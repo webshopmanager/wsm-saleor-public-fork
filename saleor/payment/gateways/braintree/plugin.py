@@ -116,6 +116,17 @@ class DeprecatedBraintreeGatewayPlugin(BasePlugin):
     def _get_gateway_config(self) -> GatewayConfig:
         return self.config
 
+    @staticmethod
+    def _has_credentials(config: GatewayConfig) -> bool:
+        """Return True only if all required Braintree credentials are present."""
+        return all(
+            [
+                config.connection_params.get("merchant_id"),
+                config.connection_params.get("public_key"),
+                config.connection_params.get("private_key"),
+            ]
+        )
+
     def authorize_payment(
         self, payment_information: "PaymentData", previous_value
     ) -> "GatewayResponse":
@@ -163,7 +174,11 @@ class DeprecatedBraintreeGatewayPlugin(BasePlugin):
     def get_client_token(self, token_config: "TokenConfig", previous_value):
         if not self.active:
             return previous_value
-        return get_client_token(self._get_gateway_config(), token_config)
+        config = self._get_gateway_config()
+        # Skip if Braintree credentials are not configured
+        if not self._has_credentials(config):
+            return previous_value
+        return get_client_token(config, token_config)
 
     def get_supported_currencies(self, previous_value):
         if not self.active:
@@ -175,6 +190,11 @@ class DeprecatedBraintreeGatewayPlugin(BasePlugin):
         if not self.active:
             return previous_value
         config = self._get_gateway_config()
+        # When credentials are not configured, skip generating a client token
+        # (which would raise ImproperlyConfigured) and return an empty config.
+        # config is a non-nullable list, so return [] rather than previous_value.
+        if not self._has_credentials(config):
+            return []
         return [
             {"field": "store_customer_card", "value": config.store_customer},
             {"field": "client_token", "value": get_client_token(config=config)},

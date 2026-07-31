@@ -1,4 +1,5 @@
 import datetime
+import json
 from decimal import Decimal
 from unittest.mock import ANY, patch
 
@@ -590,6 +591,179 @@ def test_checkout_with_charged(
 
     customer_user.refresh_from_db()
     assert customer_user.number_of_orders == user_number_of_orders + 1
+
+
+def test_checkout_complete_blocked_when_lines_changed_after_payment(
+    user_api_client,
+    checkout_with_gift_card,
+    gift_card,
+    transaction_item_generator,
+    address,
+    checkout_delivery,
+):
+    """Lines changed after payment must not silently complete an order.
+
+    This is the exact class of bug reproduced live (orders completing for
+    a different amount than what was actually charged, 2026-07-30/31).
+    """
+    # given
+    checkout = checkout_with_gift_card
+    checkout.shipping_address = address
+    checkout.assigned_delivery = checkout_delivery(checkout)
+    checkout.billing_address = address
+    checkout.save()
+
+    manager = get_plugins_manager(allow_replica=False)
+    lines, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+    total = calculations.calculate_checkout_total_with_gift_cards(
+        manager, checkout_info, lines, address
+    )
+
+    transaction = transaction_item_generator(
+        checkout_id=checkout.pk, charged_value=total.gross.amount
+    )
+    # The paid-for snapshot claims a variant/quantity that doesn't match
+    # what's actually on the checkout right now.
+    transaction.store_value_in_private_metadata(
+        {
+            "checkout_payment_snapshot_initialize": json.dumps(
+                {
+                    "snapshotted_at": timezone.now().isoformat(),
+                    "checkout_id": to_global_id_or_none(checkout),
+                    "currency": checkout.currency,
+                    "total_gross_amount": str(total.gross.amount),
+                    "total_net_amount": str(total.net.amount),
+                    "lines": [
+                        {
+                            "variant_id": graphene.Node.to_global_id(
+                                "ProductVariant", 999999999
+                            ),
+                            "variant_sku": "SOME-OTHER-SKU",
+                            "product_name": "Some Other Product",
+                            "variant_name": "Default",
+                            "quantity": 1,
+                        }
+                    ],
+                    "shipping_method_name": None,
+                    "shipping_price_gross_amount": None,
+                }
+            )
+        }
+    )
+    transaction.save(update_fields=["private_metadata"])
+
+    update_checkout_payment_statuses(
+        checkout=checkout_info.checkout,
+        checkout_total_gross=total.gross,
+        checkout_has_lines=bool(lines),
+    )
+
+    variables = {"id": to_global_id_or_none(checkout)}
+
+    # when
+    response = user_api_client.post_graphql(MUTATION_CHECKOUT_COMPLETE, variables)
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["checkoutComplete"]
+    assert not data["order"]
+    assert len(data["errors"]) == 1
+    assert (
+        data["errors"][0]["code"]
+        == CheckoutErrorCode.CONTENT_CHANGED_AFTER_PAYMENT.name
+    )
+    assert not Order.objects.exists()
+    # The checkout survives so the mismatch can still be investigated/resolved.
+    assert Checkout.objects.filter(pk=checkout.pk).exists()
+
+
+def test_checkout_complete_annotates_order_with_shipping_drift_after_payment(
+    user_api_client,
+    checkout_with_gift_card,
+    gift_card,
+    transaction_item_generator,
+    address,
+    checkout_delivery,
+):
+    """Shipping/tax drift alone must not block completion, but should be recorded.
+
+    Not a line-item change, so it's common and often benign — but the
+    resulting order should still carry it, so a human reviewing a payment
+    discrepancy later has something concrete to look at instead of just an
+    unexplained number.
+    """
+    # given
+    checkout = checkout_with_gift_card
+    checkout.shipping_address = address
+    checkout.assigned_delivery = checkout_delivery(checkout)
+    checkout.billing_address = address
+    checkout.save()
+
+    checkout_line = checkout.lines.first()
+
+    manager = get_plugins_manager(allow_replica=False)
+    lines, _ = fetch_checkout_lines(checkout)
+    checkout_info = fetch_checkout_info(checkout, lines, manager)
+    total = calculations.calculate_checkout_total_with_gift_cards(
+        manager, checkout_info, lines, address
+    )
+
+    transaction = transaction_item_generator(
+        checkout_id=checkout.pk, charged_value=total.gross.amount
+    )
+    # Same lines as the current checkout, but a different shipping method/
+    # price than what's currently set — simulates the checkout's shipping
+    # having changed after the charge was made.
+    transaction.store_value_in_private_metadata(
+        {
+            "checkout_payment_snapshot_initialize": json.dumps(
+                {
+                    "snapshotted_at": timezone.now().isoformat(),
+                    "checkout_id": to_global_id_or_none(checkout),
+                    "currency": checkout.currency,
+                    "total_gross_amount": str(total.gross.amount),
+                    "total_net_amount": str(total.net.amount),
+                    "lines": [
+                        {
+                            "variant_id": graphene.Node.to_global_id(
+                                "ProductVariant", checkout_line.variant_id
+                            ),
+                            "variant_sku": checkout_line.variant.sku,
+                            "product_name": checkout_line.variant.product.name,
+                            "variant_name": checkout_line.variant.name,
+                            "quantity": checkout_line.quantity,
+                        }
+                    ],
+                    "shipping_method_name": "A Totally Different Method",
+                    "shipping_price_gross_amount": "999.99",
+                }
+            )
+        }
+    )
+    transaction.save(update_fields=["private_metadata"])
+
+    update_checkout_payment_statuses(
+        checkout=checkout_info.checkout,
+        checkout_total_gross=total.gross,
+        checkout_has_lines=bool(lines),
+    )
+
+    variables = {"id": to_global_id_or_none(checkout)}
+
+    # when
+    response = user_api_client.post_graphql(MUTATION_CHECKOUT_COMPLETE, variables)
+
+    # then
+    content = get_graphql_content(response)
+    data = content["data"]["checkoutComplete"]
+    assert not data["errors"]
+    order = Order.objects.get()
+    assert to_global_id_or_none(order) == data["order"]["id"]
+    assert "payment_reconciliation_diff" in order.private_metadata
+    diff_message = order.private_metadata["payment_reconciliation_diff"]
+    assert "A Totally Different Method" in diff_message
+    assert "999.99" in diff_message
 
 
 def test_checkout_price_override(

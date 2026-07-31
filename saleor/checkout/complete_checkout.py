@@ -75,10 +75,13 @@ from .base_calculations import (
 )
 from .calculations import fetch_checkout_data
 from .checkout_cleaner import (
+    _build_checkout_payment_snapshot,
     _validate_gift_cards,
     clean_billing_address,
     clean_checkout_payment,
     clean_checkout_shipping,
+    diff_checkout_payment_snapshot,
+    get_checkout_payment_snapshot,
 )
 from .delivery_context import PRIVATE_META_APP_SHIPPING_ID
 from .fetch import (
@@ -1624,6 +1627,31 @@ def create_order_from_checkout(
             )
         assign_checkout_user(user, checkout_info)
 
+        # Universal enforcement point for every completion path — this same
+        # function is reached whether checkoutComplete is called directly by
+        # a storefront right after a successful charge, by our own
+        # reconciliation recovering an ambiguous webhook response, or by the
+        # automatic-checkout-completion background task. Comparing here,
+        # against freshly-fetched checkout_info under select_for_update,
+        # means no completion path can silently create an order for
+        # something other than what was actually paid for.
+        payment_snapshot_diff = None
+        paid_for_snapshot = get_checkout_payment_snapshot(checkout)
+        if paid_for_snapshot is not None:
+            current_snapshot = _build_checkout_payment_snapshot(checkout_info)
+            payment_snapshot_diff = diff_checkout_payment_snapshot(
+                paid_for_snapshot, current_snapshot
+            )
+            if payment_snapshot_diff and payment_snapshot_diff["content_changed"]:
+                raise ValidationError(
+                    {
+                        "lines": ValidationError(
+                            payment_snapshot_diff["message"],
+                            code=CheckoutErrorCode.CONTENT_CHANGED_AFTER_PAYMENT.value,
+                        )
+                    }
+                )
+
         try:
             order = _create_order_from_checkout(
                 checkout_info=checkout_info,
@@ -1636,6 +1664,18 @@ def create_order_from_checkout(
                 is_automatic_completion=is_automatic_completion,
                 force_update=force_update,
             )
+
+            # Non-blocking drift (shipping/tax changed, but not the line
+            # items) doesn't stop order creation — but it shouldn't be
+            # silent either. Attaching it to the order itself, rather than
+            # just logging it, is what makes it discoverable by whoever
+            # actually investigates a payment discrepancy later (store
+            # staff looking at the order, not server logs).
+            if payment_snapshot_diff is not None:
+                order.store_value_in_private_metadata(
+                    {"payment_reconciliation_diff": payment_snapshot_diff["message"]}
+                )
+                order.save(update_fields=["private_metadata"])
 
             if checkout_info.checkout.tax_error is not None:
                 checkout_id = graphene.Node.to_global_id(

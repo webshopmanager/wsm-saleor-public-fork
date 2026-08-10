@@ -28,6 +28,7 @@ from ..types import Checkout
 from .utils import (
     CheckoutLineData,
     apply_gift_reward_if_applicable_on_checkout_creation,
+    get_country_display_name,
     get_not_available_variants_for_purchase,
     get_not_published_variants,
     get_variants_and_total_quantities,
@@ -346,15 +347,29 @@ class CheckoutCreateFromOrder(BaseMutation):
                 if not variant_with_insufficient_stock:
                     valid_order_lines.append(line)
                     continue
-                msg = (
-                    f"Could not add items {variant_with_insufficient_stock.variant}. "
-                    f"Only {max(variant_with_insufficient_stock.available_quantity, 0)}"
-                    f" remaining in stock.",
-                )
+                # A destination no warehouse in this channel ships to also lands
+                # here with available_quantity == 0, so it has to be told apart
+                # from a genuine stock-out -- see insufficient_stock_error.
+                if variant_with_insufficient_stock.destination_not_serviced:
+                    msg = (
+                        f"We do not ship to {get_country_display_name(country)}. "
+                        f"{variant_with_insufficient_stock.variant} cannot be "
+                        f"delivered to this address."
+                    )
+                    code = error_codes.DESTINATION_NOT_SERVICED.value
+                else:
+                    msg = (
+                        f"Could not add items "
+                        f"{variant_with_insufficient_stock.variant}. "
+                        f"Only "
+                        f"{max(variant_with_insufficient_stock.available_quantity, 0)}"
+                        f" remaining in stock."
+                    )
+                    code = error_codes.INSUFFICIENT_STOCK.value
                 variant_errors.append(
                     {
                         "message": msg,
-                        "code": error_codes.INSUFFICIENT_STOCK.value,
+                        "code": code,
                         "variant_id": line.product_variant_id,
                         "line_id": graphene.Node.to_global_id("OrderLine", line.pk),
                     }

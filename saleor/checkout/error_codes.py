@@ -35,6 +35,7 @@ class CheckoutErrorCode(Enum):
     NON_REMOVABLE_GIFT_LINE = "non_removable_gift_line"
     SHIPPING_CHANGE_FORBIDDEN = "shipping_change_forbidden"
     MISSING_ADDRESS_DATA = "missing_address_data"
+    DESTINATION_NOT_SERVICED = "destination_not_serviced"
 
 
 class OrderCreateFromCheckoutErrorCode(Enum):
@@ -69,3 +70,4 @@ class CheckoutCreateFromOrderUnavailableVariantErrorCode(Enum):
     PRODUCT_NOT_PUBLISHED = "product_not_published"
     QUANTITY_GREATER_THAN_LIMIT = "quantity_greater_than_limit"
     INSUFFICIENT_STOCK = "insufficient_stock"
+    DESTINATION_NOT_SERVICED = "destination_not_serviced"

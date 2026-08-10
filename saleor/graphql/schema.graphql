@@ -31504,6 +31504,7 @@ enum CheckoutErrorCode @doc(category: "Checkout") {
   NON_REMOVABLE_GIFT_LINE
   SHIPPING_CHANGE_FORBIDDEN
   MISSING_ADDRESS_DATA
+  DESTINATION_NOT_SERVICED
 }
 
 """
@@ -31722,6 +31723,7 @@ enum CheckoutCreateFromOrderUnavailableVariantErrorCode @doc(category: "Checkout
   PRODUCT_NOT_PUBLISHED
   QUANTITY_GREATER_THAN_LIMIT
   INSUFFICIENT_STOCK
+  DESTINATION_NOT_SERVICED
 }
 
 type CheckoutCreateFromOrderError @doc(category: "Checkout") {

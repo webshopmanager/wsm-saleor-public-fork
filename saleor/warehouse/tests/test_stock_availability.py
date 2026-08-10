@@ -596,3 +596,70 @@ def test_is_product_in_stock_no_shipping_zones_excluded_from_stock_calculations(
 
     # then - flag disabled: shipping zones ignored, product in stock
     assert result is True
+
+
+def test_check_stock_quantity_bulk_destination_not_serviced(
+    variant_with_many_stocks, channel_USD
+):
+    # given a channel with no shipping zone covering the destination
+    variant = variant_with_many_stocks
+    available_quantity = _get_available_quantity(variant.stocks.all())
+    channel_USD.shipping_zones.clear()
+
+    # when the stock check runs for that destination
+    with pytest.raises(InsufficientStock) as error:
+        check_stock_quantity_bulk(
+            [variant],
+            COUNTRY_CODE,
+            [available_quantity],
+            channel_USD.slug,
+            50,
+            include_shipping_zones=True,
+        )
+
+    # then the failure is flagged as an undeliverable destination
+    assert error.value.items[0].destination_not_serviced is True
+
+
+def test_check_stock_quantity_bulk_too_few_units_is_not_destination_not_serviced(
+    variant_with_many_stocks, channel_USD
+):
+    # given a destination the channel serves, holding fewer units than requested
+    variant = variant_with_many_stocks
+    available_quantity = _get_available_quantity(variant.stocks.all())
+
+    # when more than the available quantity is requested
+    with pytest.raises(InsufficientStock) as error:
+        check_stock_quantity_bulk(
+            [variant],
+            COUNTRY_CODE,
+            [available_quantity + 1],
+            channel_USD.slug,
+            50,
+            include_shipping_zones=True,
+        )
+
+    # then it stays a stock shortfall, so the shopper is not told we do not ship there
+    item = error.value.items[0]
+    assert item.destination_not_serviced is False
+    assert item.available_quantity == available_quantity
+
+
+def test_check_stock_quantity_destination_not_serviced(
+    variant_with_many_stocks, channel_USD
+):
+    # given a channel with no shipping zone covering the destination
+    channel_USD.shipping_zones.clear()
+
+    # when the stock check runs for that destination
+    with pytest.raises(InsufficientStock) as error:
+        check_stock_quantity(
+            variant_with_many_stocks,
+            COUNTRY_CODE,
+            channel_USD.slug,
+            1,
+            include_shipping_zones=True,
+        )
+
+    # then the failure is flagged as an undeliverable destination
+    assert error.value.items[0].destination_not_serviced is True

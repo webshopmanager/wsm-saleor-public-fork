@@ -495,7 +495,7 @@ def test_checkout_shipping_address_update_channel_without_shipping_zones(
     content = get_graphql_content(response)
     data = content["data"]["checkoutShippingAddressUpdate"]
     errors = data["errors"]
-    assert errors[0]["code"] == CheckoutErrorCode.INSUFFICIENT_STOCK.name
+    assert errors[0]["code"] == CheckoutErrorCode.DESTINATION_NOT_SERVICED.name
     assert errors[0]["field"] == "quantity"
     checkout.refresh_from_db()
     assert checkout.last_change == previous_last_change
@@ -1478,3 +1478,69 @@ def test_checkout_shipping_address_update_with_kosovo_address(
     assert checkout.shipping_address.country.code == shipping_address["country"]
     assert checkout.shipping_address.city == shipping_address["city"].upper()
     assert checkout.shipping_address.postal_code == shipping_address["postalCode"]
+
+
+def test_checkout_shipping_address_update_destination_not_serviced(
+    user_api_client, checkout_with_item, graphql_address_data, shipping_zone
+):
+    # given a channel whose only shipping zone covers the US
+    shipping_zone.countries = ["US"]
+    shipping_zone.save(update_fields=["countries"])
+
+    # when the shopper enters a delivery address in a country it does not cover
+    shipping_address = graphql_address_data
+    shipping_address["country"] = "CA"
+    shipping_address["countryArea"] = "ON"
+    shipping_address["city"] = "Toronto"
+    shipping_address["postalCode"] = "M5H 2N2"
+    shipping_address["streetAddress1"] = "100 Queen St W"
+    variables = {
+        "id": to_global_id_or_none(checkout_with_item),
+        "shippingAddress": shipping_address,
+    }
+    response = user_api_client.post_graphql(
+        MUTATION_CHECKOUT_SHIPPING_ADDRESS_UPDATE, variables
+    )
+    content = get_graphql_content(response)
+
+    # then the error names the destination rather than blaming stock, which is
+    # untouched -- the warehouse still holds every unit it did before
+    data = content["data"]["checkoutShippingAddressUpdate"]
+    error = data["errors"][0]
+    assert error["code"] == CheckoutErrorCode.DESTINATION_NOT_SERVICED.name
+    assert error["message"] == (
+        f"We do not ship to Canada. {checkout_with_item.lines.first().variant} "
+        "cannot be delivered to this address."
+    )
+
+
+def test_checkout_shipping_address_update_insufficient_stock_keeps_stock_message(
+    user_api_client, checkout_with_item, graphql_address_data, shipping_zone
+):
+    # given a destination the channel serves, holding fewer units than the checkout
+    line = checkout_with_item.lines.first()
+    stock = line.variant.stocks.get()
+    line.quantity = stock.quantity + 1
+    line.save(update_fields=["quantity"])
+
+    # when the shopper enters an address in a country the zone covers
+    shipping_address = graphql_address_data
+    shipping_address["country"] = "US"
+    shipping_address["countryArea"] = "NY"
+    shipping_address["city"] = "New York"
+    shipping_address["postalCode"] = "10001"
+    shipping_address["streetAddress1"] = "1 Main St"
+    variables = {
+        "id": to_global_id_or_none(checkout_with_item),
+        "shippingAddress": shipping_address,
+    }
+    response = user_api_client.post_graphql(
+        MUTATION_CHECKOUT_SHIPPING_ADDRESS_UPDATE, variables
+    )
+    content = get_graphql_content(response)
+
+    # then it is still reported as a stock shortfall
+    data = content["data"]["checkoutShippingAddressUpdate"]
+    error = data["errors"][0]
+    assert error["code"] == CheckoutErrorCode.INSUFFICIENT_STOCK.name
+    assert "remaining in stock" in error["message"]

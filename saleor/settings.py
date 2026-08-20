@@ -264,6 +264,11 @@ PASSWORD_HASHERS = [
     *global_settings.PASSWORD_HASHERS,
     "django.contrib.auth.hashers.BCryptPasswordHasher",
     "saleor.core.hashers.SHA512Base64PBKDF2PasswordHasher",
+    # Verify-only, for customers migrated off the legacy WSM5 PHP platform.
+    # Must stay last: the first entry is the preferred hasher, and a successful
+    # login through either of these is immediately re-hashed with it.
+    "saleor.core.hashers.WSMSHA256PasswordHasher",
+    "saleor.core.hashers.WSMMD5PasswordHasher",
 ]
 
 if not SECRET_KEY and DEBUG:

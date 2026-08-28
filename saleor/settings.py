@@ -335,6 +335,8 @@ INSTALLED_APPS = [
     "saleor.app",
     "saleor.thumbnail",
     "saleor.schedulers",
+    # WSM-FORK: fork-only app, see saleor/wsm/__init__.py and FORK-NOTES.md
+    "saleor.wsm",
     # External apps
     "django_measurement",
     "mptt",

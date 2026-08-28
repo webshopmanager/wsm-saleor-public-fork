@@ -724,6 +724,11 @@ class ProductVariant(ChannelContextType[models.ProductVariant]):
 
             if not variant_channel_listing or not product_channel_listing:
                 return None
+            # WSM6-1178: a listing with a NULL price crashes the flat-rate tax
+            # calc (money.currency on None). `pricing` is nullable; an unpriced
+            # variant has no pricing, mirroring upstream behavior.
+            if variant_channel_listing.price_amount is None:
+                return None
             country_code = get_active_country(channel, address_data=address)
 
             def load_tax_country_exceptions(tax_config):

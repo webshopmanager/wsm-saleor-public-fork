@@ -15,13 +15,21 @@ them Saleor's doing and neither of them ours to change:
 
 So this backend authenticates a password, and answers for `wsm_*` app labels
 only. Saleor's backends run first and keep owning every Saleor permission.
+
+It also honours `SiteSettings.password_login_mode`, which is the merchant's own
+switch for password sign-in. Being in `AUTHENTICATION_BACKENDS` makes this
+backend part of every `authenticate()` call in the process, so ignoring the
+switch would have re-opened password login shop-wide for anyone with a Saleor
+account, through /admin/, after the merchant turned it off.
 """
 
+from django.contrib.sites.models import Site
 from django.db.models import Q
 
 from ...account.models import User
 from ...core.auth_backend import BaseBackend
 from ...permission.models import Permission
+from ...site import PasswordLoginMode
 
 WSM_APP_LABEL_PREFIX = "wsm_"
 
@@ -38,6 +46,15 @@ class AdminPasswordBackend(BaseBackend):
             User().set_password(password)
             return None
         if not user.check_password(password) or not user.is_active:
+            return None
+        # The merchant's own switch, read only once a password has already been
+        # proved right, so a wrong password costs no extra query and the answer
+        # tells an attacker nothing new. `AUTHENTICATION_BACKENDS` is app-wide:
+        # a shop that turned password login off turned it off here too.
+        mode = Site.objects.get_current().settings.password_login_mode
+        if mode == PasswordLoginMode.DISABLED:
+            return None
+        if mode == PasswordLoginMode.CUSTOMERS_ONLY and user.is_staff:
             return None
         return user
 

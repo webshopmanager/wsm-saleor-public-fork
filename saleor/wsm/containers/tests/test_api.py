@@ -294,3 +294,69 @@ def test_a_tiered_kit_member_is_written_as_a_dealer_line(
     assert {line.price_override_reason for line in retail} == {
         pricing.PRICE_OVERRIDE_REASON
     }
+
+
+@pytest.fixture
+def bakeoff_kit(collection, product_list, channel_USD):
+    """The two bake-off kits as one container: 3998.99 + 6399.00, 10 percent off.
+
+    List 10397.99, discount 1039.80, prorated across the two members; the single
+    residue cent falls to the larger shortfall, which is the Stage 2 member.
+    """
+    stage_2, stage_3 = product_list[0], product_list[1]
+    collection.products.add(stage_2, stage_3)
+    for product, price in ((stage_2, "3998.99"), (stage_3, "6399.00")):
+        product.variants.first().channel_listings.filter(channel=channel_USD).update(
+            price_amount=Decimal(price)
+        )
+    kit = KitConfig.objects.create(
+        collection=collection,
+        discount_kind=pricing.PERCENT,
+        discount_amount=Decimal(10),
+    )
+    for order, product in enumerate((stage_2, stage_3)):
+        KitMember.objects.create(
+            kit=kit, variant=product.variants.first(), quantity=1, sort_order=order
+        )
+    return kit
+
+
+def test_the_acceptance_kit_is_9358_19_at_retail(client, checkout, bakeoff_kit, product_list):
+    """B4, retail half: the number the bake-off walk pins."""
+    response = post_kit(client, checkout, bakeoff_kit.collection_id)
+
+    assert response.status_code == 200
+    assert response.json()["kitTotal"] == "9358.19"
+    units = {
+        line.variant_id: line.price_override for line in checkout.lines.all()
+    }
+    assert units[product_list[0].variants.first().pk] == Decimal("3599.09")
+    assert units[product_list[1].variants.first().pk] == Decimal("5759.10")
+
+
+def test_the_acceptance_kit_is_9159_10_for_a_dealer_on_a_3400_break(
+    client, checkout, bakeoff_kit, product_list, customer_user
+):
+    """B4, dealer half: better-of per member line, never both."""
+    from saleor.wsm.dealer.models import DealerCustomer, DealerGroup, TierPrice
+
+    group = DealerGroup.objects.create(code="dealer-1", name="Dealer 1")
+    DealerCustomer.objects.create(user=customer_user, group=group)
+    stage_2 = product_list[0].variants.first()
+    TierPrice.objects.create(
+        variant=stage_2, group=group, min_quantity=1, amount=Decimal("3400.00")
+    )
+
+    response = post_kit(
+        client, checkout, bakeoff_kit.collection_id, customer=customer_user
+    )
+
+    assert response.status_code == 200
+    assert response.json()["kitTotal"] == "9159.10"
+    units = {
+        line.variant_id: line.price_override for line in checkout.lines.all()
+    }
+    # The tier beats the kit-discounted 3599.09, so the member pays the break.
+    assert units[stage_2.pk] == Decimal("3400.00")
+    # The member with no break keeps its kit price. Never both.
+    assert units[product_list[1].variants.first().pk] == Decimal("5759.10")

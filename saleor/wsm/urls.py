@@ -13,6 +13,7 @@ from .compose.admin import site as compose_admin
 
 urlpatterns = [
     re_path(r"^wsm/compose/", include("saleor.wsm.compose.urls")),
+    re_path(r"^wsm/dealer_pricing/", include("saleor.wsm.dealer.urls")),
     # The merchant UI (bake-off design section 6). Its own AdminSite, not
     # `admin.site`: see saleor/wsm/compose/admin.py for why.
     re_path(r"^admin/", compose_admin.urls),

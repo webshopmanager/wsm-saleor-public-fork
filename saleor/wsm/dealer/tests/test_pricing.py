@@ -5,7 +5,7 @@ import graphene
 import pytest
 
 from ..models import DealerCustomer, DealerGroup, TierPrice
-from ..pricing import MAX_BATCH, dealer_price_for, prices_for_variants
+from ..pricing import MAX_BATCH, dealer_price_for, ladders, prices_for_variants
 
 pytestmark = pytest.mark.django_db
 
@@ -97,3 +97,23 @@ def test_batch_is_one_query_and_carries_the_whole_ladder(
         ]
     }
     assert MAX_BATCH == 100
+
+
+def test_a_half_cent_tier_is_rounded_once_here_for_every_caller(
+    variant, dealer_group, customer_user, channel_USD
+):
+    """The one quantize point: 8.005 is 8.01 before any caller sees it.
+
+    `TierPrice.amount` holds three decimals, so a merchant can store a landed
+    cost that is not a cent. Rounding it at each caller is how the dealer
+    endpoint and a kit member came to charge different money for one row.
+    """
+    from saleor.wsm.containers.pricing import to_cents
+
+    ladder(variant, dealer_group, [(1, "8.005")])
+
+    found = ladders(customer_user, channel_USD, [variant.pk])
+
+    assert found[variant.pk][0].amount == Decimal("8.01")
+    # The containers path converts what it is handed, so both charge 801 cents.
+    assert to_cents(found[variant.pk][0].amount) == 801

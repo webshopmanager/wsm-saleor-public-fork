@@ -13,8 +13,10 @@ and on the line (1.3): money that came to nothing is a data bug, and clamping
 would hide it.
 
 Dealer tiers follow requirement 2.2 as corrected: a tier row on a NEGATIVE
-retail delta is taken VERBATIM, and the above-retail refusal applies to positive
-deltas only. A credit is a component of the configured price, not a discount.
+retail delta is taken VERBATIM, because a credit is a component of the
+configured price and not a discount on it. The refusal guards everything above
+that: the ceiling is the retail delta floored at zero, so a tier row can never
+turn a free or credited value into a surcharge a retail shopper does not pay.
 """
 
 from __future__ import annotations
@@ -147,19 +149,25 @@ class ConfiguredPrice:
     snapshot: dict = field(default_factory=dict)
 
 
-def _delta_for(value: Value, tier_group: str | None) -> tuple[int, bool]:
+def delta_for(value: Value, tier_group: str | None) -> tuple[int, bool]:
     """The delta this buyer pays for one value, and whether a tier row supplied it.
 
-    Requirement 2.2 as corrected: the above-retail guard is for POSITIVE retail
-    deltas only. On a credit the tier row stands verbatim, larger or smaller,
-    because a credit is part of the price rather than a discount on it.
+    Public because the PDP endpoint shows the same number it will charge, and a
+    second copy of this rule in a view is how a quoted price and a charged price
+    drift apart.
+
+    Requirement 2.2 as corrected: the ceiling is the retail delta floored at
+    zero. A credit stands verbatim, larger or smaller, because a credit is part
+    of the price rather than a discount on it; the floor is what stops a tier
+    row from charging a dealer for a value retail gets free, which was live for
+    every value whose retail delta is exactly zero.
     """
     if not tier_group:
         return value.price_delta, False
     for row in value.tier_deltas:
         if row.tier_group != tier_group:
             continue
-        if value.price_delta > 0 and row.price_delta > value.price_delta:
+        if row.price_delta > max(value.price_delta, 0):
             raise AboveRetailError(
                 value_id=value.id,
                 name=value.name,
@@ -347,7 +355,7 @@ def price_configured(
             (v for v in option_set.values if v.id in wanted),
             key=lambda v: (v.sort_order, v.id),
         ):
-            delta, tiered = _delta_for(value, tier_group)
+            delta, tiered = delta_for(value, tier_group)
             tier_applied = tier_applied or tiered
             unit_cents += delta
             if value.sku_fragment:

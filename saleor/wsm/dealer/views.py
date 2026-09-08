@@ -31,11 +31,13 @@ from django.views.decorators.http import require_POST
 
 from ...account.models import User
 from ...channel.models import Channel
+from ...checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from ...checkout.models import Checkout, CheckoutLine
-from ...checkout.utils import add_variants_to_checkout
+from ...checkout.utils import add_variants_to_checkout, invalidate_checkout
 from ...core.db.connection import allow_writer
 from ...core.prices import quantize_price
 from ...graphql.checkout.mutations.utils import CheckoutLineData
+from ...plugins.manager import get_plugins_manager
 from ...product.models import ProductVariant, ProductVariantChannelListing
 from . import pricing
 from .no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
@@ -106,6 +108,22 @@ def _money(amount, channel):
     if amount is None:
         return None
     return str(quantize_price(amount, channel.currency_code))
+
+
+def _invalidate(checkout):
+    """The tail every write path owes the checkout, the one stock code runs.
+
+    `price_expiration` is what tells the next read to recompute, so a line
+    written outside a mutation and left un-stamped is a cart that keeps quoting
+    the price it held a moment ago. It also runs the discount recalculation,
+    which is where a promotion that must come off a line that just became a
+    dealer line comes off.
+    """
+    manager = get_plugins_manager(allow_replica=False)
+    checkout_info = fetch_checkout_info(checkout, [], manager)
+    lines, _ = fetch_checkout_lines(checkout)
+    checkout_info.lines = lines
+    invalidate_checkout(checkout_info, lines, manager, save=True)
 
 
 @csrf_exempt
@@ -230,11 +248,13 @@ def _add_line(checkout, channel, variant, quantity, winner):
             channel,
             calculate_stocks_with_shipping_zones=False,
         )
-        return (
+        line = (
             CheckoutLine.objects.filter(checkout_id=checkout.pk)
             .exclude(pk__in=before)
             .first()
         )
+        _invalidate(checkout)
+        return line
 
 
 @csrf_exempt
@@ -292,6 +312,10 @@ def dealer_line_reprice(request):
         line.delete_value_from_metadata(LINE_METADATA_KEY)
     if was != (line.price_override, line.price_override_reason, dict(line.metadata or {})):
         line.save(update_fields=["price_override", "price_override_reason", "metadata"])
+        # Only when the line actually moved: a reprice that changed nothing is
+        # a read, and expiring the prices on every poll would put the whole
+        # checkout through a recalculation the storefront never asked for.
+        _invalidate(checkout)
 
     base = _retail_amount(line.variant_id, channel, WRITER)
     return JsonResponse(

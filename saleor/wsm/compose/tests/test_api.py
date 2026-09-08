@@ -99,20 +99,23 @@ def crating_fee(stage_2_kit):
     )
 
 
-def post_line(client, checkout, variant, *, quantity=1, selections, accepted=()):
+def post_line(
+    client, checkout, variant, *, quantity=1, selections, accepted=(), customer=None
+):
+    body = {
+        "checkoutId": gid("Checkout", checkout.token),
+        "channel": checkout.channel.slug,
+        "productId": gid("Product", variant.product_id),
+        "variantId": gid("ProductVariant", variant.pk),
+        "quantity": quantity,
+        "selections": selections,
+        "acceptedFeeIds": list(accepted),
+    }
+    if customer is not None:
+        body["customerId"] = gid("User", customer.pk)
     return client.post(
         CONFIGURED_LINE_URL,
-        data=json.dumps(
-            {
-                "checkoutId": gid("Checkout", checkout.token),
-                "channel": checkout.channel.slug,
-                "productId": gid("Product", variant.product_id),
-                "variantId": gid("ProductVariant", variant.pk),
-                "quantity": quantity,
-                "selections": selections,
-                "acceptedFeeIds": list(accepted),
-            }
-        ),
+        data=json.dumps(body),
         content_type="application/json",
         **HEADERS,
     )
@@ -430,3 +433,81 @@ def test_naming_a_required_fee_as_accepted_is_not_an_error(
 
     assert without.status_code == 200
     assert without.json()["feeTotal"] == FEE_AMOUNT
+
+
+# --- (d) the dealer on a configured line -----------------------------------
+
+
+@pytest.fixture
+def dealer_credit(customer_user, omit_parts):
+    """A dealer whose credit on the pump assembly is deeper than retail's."""
+    from saleor.wsm.compose.models import DealerTierOptionPrice
+    from saleor.wsm.dealer.models import DealerCustomer, DealerGroup
+
+    group = DealerGroup.objects.create(code="dealer-1", name="Dealer 1")
+    DealerCustomer.objects.create(user=customer_user, group=group)
+    DealerTierOptionPrice.objects.create(
+        option_value=omit_parts[1][2],
+        tier_group="dealer-1",
+        price_delta=Decimal("-545.00"),
+    )
+    return customer_user
+
+
+def test_a_dealer_pays_the_tier_delta_on_the_configured_line(
+    client, checkout, stage_2_kit, omit_parts, dealer_credit
+):
+    """B3 on a configured line: the tier row prices it, not the retail delta."""
+    option_set, values = omit_parts
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+        customer=dealer_credit,
+    )
+
+    assert response.status_code == 200
+    # 3998.99 - 29.99 - 30.00 - 545.00: the dealer's credit stands in place of
+    # retail's -445.00 and nothing else about the line moves.
+    assert response.json()["unitPrice"] == "3394.00"
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert line.price_override == Decimal("3394.00")
+    snapshot = json.loads(line.metadata[META_OPTIONS])
+    assert snapshot["tier_group"] == "dealer-1"
+    assert snapshot["tier_applied"] is True
+
+
+def test_a_retail_shopper_is_unmoved_by_a_tier_row(
+    client, checkout, stage_2_kit, omit_parts, dealer_credit
+):
+    """The acceptance number, with the dealer row sitting right there: 3494.00."""
+    option_set, values = omit_parts
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+    )
+
+    assert response.json()["unitPrice"] == CONFIGURED_UNIT
+    assert checkout.lines.get(variant_id=stage_2_kit.pk).price_override == Decimal(
+        CONFIGURED_UNIT
+    )
+
+
+def test_option_sets_quotes_the_dealer_the_delta_it_will_charge(
+    client, stage_2_kit, omit_parts, dealer_credit
+):
+    """Endpoint 1 with a customer id: the PDP shows what the add will take."""
+    url = OPTION_SETS_URL.format(gid("Product", stage_2_kit.product_id))
+
+    retail = client.get(url).json()["data"][0]["values"]
+    dealer = client.get(url, {"customerId": gid("User", dealer_credit.pk)}).json()[
+        "data"
+    ][0]["values"]
+
+    assert [v["price_delta"] for v in retail] == ["-29.99", "-30.00", "-445.00"]
+    assert [v["price_delta"] for v in dealer] == ["-29.99", "-30.00", "-545.00"]

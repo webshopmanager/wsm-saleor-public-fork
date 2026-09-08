@@ -145,13 +145,27 @@ def kit_line(request):
         if user is None:
             return _not_found("customer")
 
+    tier_lookup = resolve_tier_lookup(kit, checkout, user)
+    # Only a buyer who can actually reach a tier costs the group lookup: with no
+    # ladder on any member there is no dealer line to stamp. A lookup without a
+    # user is a caller supplying its own, and it gets no group rather than a
+    # crash on the way to one.
+    tier_group = (
+        dealer_pricing.tier_group_for(
+            user.pk, database_connection_name=settings.DATABASE_CONNECTION_DEFAULT_NAME
+        )
+        if tier_lookup is not None and user is not None
+        else None
+    )
+
     try:
         group_id, priced, lines_by_variant = pricing.add_kit_to_checkout(
             checkout,
             kit,
             quantity,
             user=user,
-            tier_lookup=resolve_tier_lookup(kit, checkout, user),
+            tier_lookup=tier_lookup,
+            tier_group=tier_group,
         )
     except pricing.KitRefusal as refusal:
         return _refused(str(refusal))

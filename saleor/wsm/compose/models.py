@@ -222,16 +222,28 @@ def _ensure_fee_variant(fee, channel):
                 "is_shipping_required": False,
             },
         )
-        product = Product.objects.create(
-            product_type=product_type,
-            name=fee.label,
+        # Two shoppers configuring the same product in the same second both
+        # arrive here, and the first add of a fee is a shopper request that
+        # writes catalog rows. Keyed on the identifiers that are unique in the
+        # database, so the loser of the race is handed the row the winner made
+        # instead of an IntegrityError on the way to a 500.
+        product, _ = Product.objects.get_or_create(
             slug=f"wsm-fee-{fee.pk}",
+            defaults={"product_type": product_type, "name": fee.label},
         )
-        variant = ProductVariant.objects.create(
-            product=product,
-            name=fee.label[:255],
-            sku=fee.sku or f"WSM-FEE-{fee.pk}",
-            track_inventory=False,
+        # The SKU is ours and namespaced, never the merchant's own fee SKU: SKU
+        # is unique across the whole catalog, so taking `fee.sku` here either
+        # collides with the merchant's real product of that SKU or silently
+        # claims a code the ERP means for something else. The merchant's SKU
+        # still reaches the order, on the parent line's `wsm.options` snapshot
+        # (`fees[].sku`), which is what the export reads.
+        variant, _ = ProductVariant.objects.get_or_create(
+            sku=f"wsm-fee-{fee.pk}",
+            defaults={
+                "product": product,
+                "name": fee.label[:255],
+                "track_inventory": False,
+            },
         )
         fee.variant = variant
         fee.save(update_fields=["variant"])

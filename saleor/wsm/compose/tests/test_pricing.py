@@ -184,6 +184,40 @@ def test_above_retail_refuses_on_a_positive_delta():
         price_configured(STAGE_2_BASE, positive_value_sets(15000), pick(3), "dealer-1")
 
 
+def free_value_sets(tier_cents):
+    """A value retail charges nothing for, which is most of a real option set."""
+    return [
+        OptionSet(
+            id=4,
+            name="Powder coat",
+            values=(
+                Value(
+                    id=44,
+                    name="Satin black",
+                    price_delta=0,
+                    tier_deltas=(
+                        TierDelta(tier_group="dealer-1", price_delta=tier_cents),
+                    ),
+                ),
+            ),
+        )
+    ]
+
+
+FREE_PICK = [Selection(set_id=4, value_ids=(44,))]
+
+
+def test_a_tier_row_above_a_zero_retail_delta_is_refused():
+    """Requirement 2.1 reaches the zero case: a free value is not a surcharge."""
+    with pytest.raises(AboveRetailError):
+        price_configured(STAGE_2_BASE, free_value_sets(5000), FREE_PICK, "dealer-1")
+
+
+def test_a_credit_on_a_free_value_still_stands():
+    result = price_configured(STAGE_2_BASE, free_value_sets(-5000), FREE_PICK, "dealer-1")
+    assert result.unit_cents == 399899 - 5000
+
+
 def test_below_retail_tier_on_a_positive_delta_is_charged():
     result = price_configured(STAGE_2_BASE, positive_value_sets(6000), pick(3), "dealer-1")
     assert result.unit_cents == 399899 + 6000

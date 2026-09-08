@@ -239,7 +239,9 @@ def test_configured_line_prices_server_side_and_writes_one_line(
         "label": "Freight crating",
         "apply_to": "unit",
     }
-    assert fee_line.metadata[META_PARENT] == str(product_line.pk)
+    # The fee names its parent by CID, never by pk: that is the only key the
+    # storefront pairs on, and a pk here orphans the fee in the cart.
+    assert fee_line.metadata[META_PARENT] == cid
 
     # The fee's own product is never something a shopper can browse to.
     fee_listing = fee_line.variant.product.channel_listings.get(channel=checkout.channel)

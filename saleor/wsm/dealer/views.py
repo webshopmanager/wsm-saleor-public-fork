@@ -6,11 +6,13 @@ does the work a serializer layer would. The contract is the one today's
 storefront already speaks, so B6 holds with no storefront code (design doc
 section 2, "Stays").
 
-`X-Saleor-Domain` and `X-Dealer-Pricing-Key` arrive on every call and are
-ignored. They existed because pricing lived in another process and its answers
-had to be signed; the price is now computed here from catalog rows, so there is
-no signature to check and nothing a caller could forge. No caller-supplied price
-is ever honoured (requirement 1.4), and no caller-supplied price is ever read.
+The caller is the storefront SERVER, and it proves it with the tenant's
+`X-Dealer-Pricing-Key` (saleor/wsm/http.py). What a caller could forge was never
+a price, which is why "nothing to forge" read true: it is the BUYER. `customerId`
+arrives in the body, so without the key any stranger could read what a dealer
+pays and add lines to a checkout at that dealer's tier. No caller-supplied price
+is ever honoured (requirement 1.4) and none is ever read; `X-Saleor-Domain` still
+arrives and is still ignored, because one process serves one tenant.
 
 Not being a dealer is never an error. It is an empty ladder and a retail line,
 because the same storefront code runs for every shopper and a 4xx on the common
@@ -37,6 +39,7 @@ from ...core.db.connection import allow_writer
 from ...core.prices import quantize_price
 from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...product.models import ProductVariant, ProductVariantChannelListing
+from ..http import storefront_key_required
 from . import pricing
 from .no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
 
@@ -110,6 +113,7 @@ def _money(amount, channel):
 
 @csrf_exempt
 @require_POST
+@storefront_key_required
 def storefront_prices(request):
     """Endpoint 3. Every break the buyer can reach on up to 100 variants."""
     body = _body(request)
@@ -133,6 +137,7 @@ def storefront_prices(request):
 
 @csrf_exempt
 @require_POST
+@storefront_key_required
 @allow_writer()
 def dealer_line(request):
     """Endpoint 4. Add one line, priced at the buyer's break where there is one."""
@@ -239,6 +244,7 @@ def _add_line(checkout, channel, variant, quantity, winner):
 
 @csrf_exempt
 @require_POST
+@storefront_key_required
 @allow_writer()
 def dealer_line_reprice(request):
     """Endpoint 5. Re-run the ladder against the line's CURRENT quantity.

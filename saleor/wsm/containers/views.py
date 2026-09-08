@@ -21,6 +21,7 @@ from ...account.models import User
 from ...checkout.models import Checkout
 from ...core.db.connection import allow_writer
 from ..dealer import pricing as dealer_pricing
+from ..http import storefront_key_required
 from . import pricing
 from .models import KitConfig
 
@@ -97,6 +98,7 @@ def resolve_tier_lookup(kit, checkout, user):
 
 @csrf_exempt
 @require_POST
+@storefront_key_required
 # Saleor routes reads to a replica and refuses the writer unless a view asks for
 # it, exactly as its own webhook views do (saleor/plugins/views.py). This view
 # writes checkout lines, so it asks.

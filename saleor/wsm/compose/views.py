@@ -7,10 +7,11 @@ Endpoint 2 prices the line SERVER-SIDE and writes it through Saleor's own
 ``price_expiration`` invalidation and the price recalculation happen exactly as
 stock. Nothing here writes a CheckoutLine row by hand.
 
-The storefront still sends X-Client-Id, X-Saleor-Domain and X-Compose-Key. They
-are read by nobody: signing existed to make an out-of-process price trustworthy,
-and the price is now computed in this process from catalog rows. The headers are
-deleted from the contract in the storefront's own time (design section 2).
+Endpoint 2's caller is the storefront SERVER, and `X-Compose-Key` is how it
+proves that (saleor/wsm/http.py). The forgeable thing was never the price, which
+is computed here from catalog rows: it is the checkout the line lands in.
+`X-Client-Id` and `X-Saleor-Domain` still arrive and are still ignored, because
+one process serves one tenant. Endpoint 1 is catalog data and stays open.
 """
 
 import base64
@@ -33,6 +34,7 @@ from ...core.utils.metadata_manager import MetadataItem
 from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...plugins.manager import get_plugins_manager
 from ...product.models import Product, ProductVariant, ProductVariantChannelListing
+from ..http import storefront_key_required
 from . import pricing
 from .models import Fee, OptionSet, to_cents
 
@@ -166,6 +168,7 @@ def _selections(raw):
 
 @csrf_exempt
 @require_POST
+@storefront_key_required
 @allow_writer()
 def configured_line(request):
     """Price one configuration and put it in the checkout as a priced line.

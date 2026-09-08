@@ -15,6 +15,7 @@ from decimal import Decimal
 import pytest
 
 from saleor.wsm.compose.models import Fee, OptionSet, OptionValue
+from saleor.wsm.tests import COMPOSE_HEADERS
 from saleor.wsm.compose.views import (
     META_CID,
     META_FEE,
@@ -31,11 +32,7 @@ BASE_PRICE = Decimal("3998.99")
 CONFIGURED_UNIT = "3494.00"  # 3998.99 - 29.99 - 30.00 - 445.00
 FEE_AMOUNT = "149.00"
 
-HEADERS = {
-    "HTTP_X_SALEOR_DOMAIN": "bakeoff.test",
-    "HTTP_X_CLIENT_ID": "storefront",
-    "HTTP_X_COMPOSE_KEY": "a key nobody reads",
-}
+HEADERS = COMPOSE_HEADERS
 
 
 def gid(type_name, pk):

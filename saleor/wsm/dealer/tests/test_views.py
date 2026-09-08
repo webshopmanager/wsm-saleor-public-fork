@@ -6,6 +6,7 @@ import graphene
 import pytest
 
 from ....checkout.models import CheckoutLine
+from ...tests import DEALER_HEADERS
 from ..models import DealerCustomer, DealerGroup, TierPrice
 from ..no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
 from ..pricing import MAX_BATCH
@@ -16,11 +17,9 @@ PRICES_URL = "/wsm/dealer_pricing/api/storefront/prices"
 LINE_URL = "/wsm/dealer_pricing/api/checkout/dealer-line"
 REPRICE_URL = "/wsm/dealer_pricing/api/checkout/dealer-line/reprice"
 
-# Both arrive on every storefront call and both are ignored.
-HEADERS = {
-    "HTTP_X_SALEOR_DOMAIN": "example.com",
-    "HTTP_X_DEALER_PRICING_KEY": "not-checked",
-}
+# What the storefront server sends. The key is now checked (saleor/wsm/http.py);
+# `X-Saleor-Domain` still is not, because one process serves one tenant.
+HEADERS = DEALER_HEADERS
 
 
 @pytest.fixture

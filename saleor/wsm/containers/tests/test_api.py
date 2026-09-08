@@ -13,11 +13,15 @@ from decimal import Decimal
 import pytest
 
 from saleor.wsm.containers import pricing
+from saleor.wsm.tests import DEALER_HEADERS
 from saleor.wsm.containers.models import KitConfig, KitMember
 
 pytestmark = pytest.mark.django_db
 
 KIT_LINE_URL = "/wsm/containers/api/checkout/kit-line"
+
+# The storefront server proves itself with the tenant key (saleor/wsm/http.py).
+HEADERS = DEALER_HEADERS
 
 
 def gid(type_name, pk):
@@ -48,7 +52,10 @@ def post_kit(client, checkout, collection_id, quantity=1, customer=None):
     if customer is not None:
         body["customerId"] = gid("User", customer.pk)
     return client.post(
-        KIT_LINE_URL, data=json.dumps(body), content_type="application/json"
+        KIT_LINE_URL,
+        data=json.dumps(body),
+        content_type="application/json",
+        **HEADERS,
     )
 
 
@@ -128,6 +135,7 @@ def test_unknown_checkout_is_404(client, kit, db):
             }
         ),
         content_type="application/json",
+        **HEADERS,
     )
 
     assert response.status_code == 404

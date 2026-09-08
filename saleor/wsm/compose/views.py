@@ -148,7 +148,15 @@ def _selections(raw):
     out = []
     for entry in raw or []:
         set_id = entry.get("set_id")
-        if not isinstance(set_id, int):
+        # The storefront keys its selections map by option-set id, so JSON hands
+        # the id back as a STRING ("1"), never an int: Object.entries on a
+        # JS object has no other shape. Refusing it 422s every configured add
+        # from wsm-storefront develop, which is the one caller this contract
+        # exists for. Digits only, so a set id the caller invented is still
+        # refused by the pricing engine and never coerced into one.
+        if isinstance(set_id, str) and set_id.isdigit():
+            set_id = int(set_id)
+        if not isinstance(set_id, int) or isinstance(set_id, bool):
             raise pricing.UnknownValueError(f"selection has no option set id: {entry!r}")
         out.append(
             pricing.Selection(

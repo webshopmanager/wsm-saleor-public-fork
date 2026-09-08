@@ -233,6 +233,10 @@ context_processors = [
     "django.template.context_processors.media",
     "django.template.context_processors.static",
     "saleor.site.context_processors.site",
+    # WSM-FORK: required by the Django admin's templates and its system checks.
+    "django.contrib.auth.context_processors.auth",
+    "django.contrib.messages.context_processors.messages",
+    "django.template.context_processors.request",
 ]
 
 loaders = [
@@ -282,6 +286,11 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "saleor.core.middleware.jwt_refresh_token_middleware",
+    # WSM-FORK: the three the Django admin requires. Session and message state
+    # exists only for /admin/; the GraphQL API is untouched by them.
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
 ]
 
 ENABLE_RESTRICT_WRITER_MIDDLEWARE = get_bool_from_env(
@@ -298,6 +307,18 @@ INSTALLED_APPS = [
     "storages",
     # Django modules
     "django.contrib.contenttypes",
+    # WSM-FORK: the Django admin is the merchant UI for Compose (bake-off design
+    # section 6) and it hard-requires these four. `auth` is loaded through a
+    # fork-owned AppConfig because Saleor renamed auth_permission out from under
+    # it. See docs/wsm/CORE-TOUCHES.md.
+    "saleor.wsm.compose.apps.WsmAuthConfig",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.admin",
+    # Saleor sets FORM_RENDERER to TemplatesSetting, so form widget templates are
+    # resolved through the normal loaders and django.forms must be installed for
+    # them to be found. No models, no migrations.
+    "django.forms",
     "django.contrib.sites",
     "django.contrib.staticfiles",
     "django.contrib.postgres",
@@ -476,6 +497,14 @@ LOGGING = {
 
 AUTH_USER_MODEL = "account.User"
 
+# WSM-FORK: `django.contrib.auth` is installed (the Django admin refuses to run
+# without it) under the label `django_auth`, because `saleor.auth` already owns
+# the label `auth`: that app is a history shim holding the 13 auth migrations
+# for the models Saleor took over. Those migrations are recorded under the old
+# label, so this installation must contribute none of its own.
+# See docs/wsm/CORE-TOUCHES.md.
+MIGRATION_MODULES = {"django_auth": "saleor.wsm.compose.django_auth_migrations"}
+
 AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
@@ -611,6 +640,10 @@ PLACEHOLDER_IMAGES = {
 AUTHENTICATION_BACKENDS = [
     "saleor.core.auth_backend.JSONWebTokenBackend",
     "saleor.core.auth_backend.PluginBackend",
+    # WSM-FORK: email plus password for /admin/ only. Django's own ModelBackend
+    # cannot be used: its permission lookups read auth_permission, a table
+    # Saleor renamed. See docs/wsm/CORE-TOUCHES.md.
+    "saleor.wsm.compose.auth.AdminPasswordBackend",
 ]
 
 # Expired checkouts settings - defines after what time checkouts will be deleted

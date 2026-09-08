@@ -27,11 +27,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from ...checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from ...checkout.models import Checkout
-from ...checkout.utils import (
-    add_variants_to_checkout,
-    checkout_lines_bulk_update,
-    invalidate_checkout,
-)
+from ...checkout.utils import add_variants_to_checkout, invalidate_checkout
 from ...core.db.connection import allow_writer
 from ...core.utils.metadata_manager import MetadataItem
 from ...graphql.checkout.mutations.utils import CheckoutLineData
@@ -148,7 +144,15 @@ def _selections(raw):
     out = []
     for entry in raw or []:
         set_id = entry.get("set_id")
-        if not isinstance(set_id, int):
+        # The storefront keys its selections map by option-set id, so JSON hands
+        # the id back as a STRING ("1"), never an int: Object.entries on a
+        # JS object has no other shape. Refusing it 422s every configured add
+        # from wsm-storefront develop, which is the one caller this contract
+        # exists for. Digits only, so a set id the caller invented is still
+        # refused by the pricing engine and never coerced into one.
+        if isinstance(set_id, str) and set_id.isdigit():
+            set_id = int(set_id)
+        if not isinstance(set_id, int) or isinstance(set_id, bool):
             raise pricing.UnknownValueError(f"selection has no option set id: {entry!r}")
         out.append(
             pricing.Selection(
@@ -282,6 +286,18 @@ def configured_line(request):
                         json.dumps({"label": row["label"], "apply_to": row["apply_to"]}),
                     ),
                     MetadataItem(META_CID, cid),
+                    # The PARENT is named by its cid, not its line pk: the
+                    # storefront pairs a fee to its product on
+                    # `compose.parent_line == the parent's wsm.options.cid`
+                    # (composeFee.ts feeLinesFor) and on nothing else. A pk
+                    # here orphaned every fee in the cart ("the item this
+                    # charge applies to is no longer in your cart") AND left
+                    # it out of withChildLines, so a per-unit crate charge
+                    # stayed at one unit's money when the shopper bought two.
+                    # Writing the cid also makes the pairing knowable BEFORE
+                    # the insert, which is why the post-write lookup below is
+                    # gone.
+                    MetadataItem(META_PARENT, cid),
                 ],
             )
         )
@@ -306,17 +322,6 @@ def configured_line(request):
 
     lines, _ = fetch_checkout_lines(checkout)
     checkout_info.lines = lines
-
-    # The product line's id is only knowable after the write, and the fee lines
-    # must point at it. `cid` is what pairs them, so the lines we just wrote are
-    # found in the list this recalculation already loaded: no extra read.
-    ours = [li.line for li in lines if li.line.metadata.get(META_CID) == cid]
-    parent = next((line for line in ours if META_OPTIONS in line.metadata), None)
-    fee_lines = [line for line in ours if parent and line.pk != parent.pk]
-    if fee_lines:
-        for line in fee_lines:
-            line.store_value_in_metadata({META_PARENT: str(parent.pk)})
-        checkout_lines_bulk_update(fee_lines, ["metadata"])
 
     invalidate_checkout(checkout_info, lines, manager, save=True)
 

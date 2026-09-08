@@ -2,6 +2,8 @@
 """Requirement 2.4: no discount combines with dealer pricing, toggle default off."""
 
 import json
+import sys
+import types
 from decimal import Decimal
 
 import pytest
@@ -152,3 +154,34 @@ def test_catalogue_promotions_are_offered_only_the_retail_lines(db):
     no_stacking.reset_cache()
     catalogue_guard(original)([dealer, retail])
     assert seen[-1] == [dealer, retail]
+
+
+# --- finding 12: the binding sites are discovered, not hoped for -------------
+
+
+def test_the_pinned_binding_sites_are_exactly_the_discovered_ones():
+    """An upstream bump that adds an import site reddens here and at boot.
+
+    `saleor.checkout.fetch` is deliberately absent: it imports the function
+    INSIDE the function that uses it, so it resolves through the defining module
+    at call time and there is no module attribute to rebind.
+    """
+    guard = no_stacking.installed_voucher_guard()
+
+    assert guard is not None, "MP1 was never installed"
+    assert no_stacking.binding_sites(guard) == frozenset(
+        no_stacking.VOUCHER_BINDING_SITES
+    )
+
+
+def test_a_new_binding_site_is_discovered(monkeypatch):
+    """The mechanism that makes the pin above meaningful: discovery is live."""
+    guard = no_stacking.installed_voucher_guard()
+    newcomer = types.ModuleType("saleor.checkout.somewhere_new")
+    newcomer.attach_voucher_to_line_info = guard
+    monkeypatch.setitem(sys.modules, "saleor.checkout.somewhere_new", newcomer)
+
+    discovered = no_stacking.binding_sites(guard)
+
+    assert "saleor.checkout.somewhere_new" in discovered
+    assert discovered != frozenset(no_stacking.VOUCHER_BINDING_SITES)

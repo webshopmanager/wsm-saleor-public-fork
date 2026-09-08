@@ -34,7 +34,11 @@ checkout line-discount path, e.g. a `CheckoutLine.discounts_excluded` flag (or a
 from __future__ import annotations
 
 import importlib
+import sys
 from functools import wraps
+
+from django.core.exceptions import ImproperlyConfigured
+
 
 # Presence of this key on a checkout or order line means the line is priced at a
 # dealer tier. The value carries the group and the break for support; nothing
@@ -42,15 +46,25 @@ from functools import wraps
 LINE_METADATA_KEY = "wsm.dealer"
 PRICE_OVERRIDE_REASON = "wsm.dealer"
 
-# Modules that bound `attach_voucher_to_line_info` at import time. Patching the
-# defining module alone would leave these three pointing at the original.
-_VOUCHER_BINDING_SITES = (
-    "saleor.checkout.fetch",
-    "saleor.order.fetch",
+# Every module holding `attach_voucher_to_line_info` as its OWN attribute: the
+# module that defines it, plus the two that imported it by name at import time.
+# Patching the definer alone would leave those two on the original.
+#
+# `saleor.checkout.fetch` is deliberately absent. It imports the function inside
+# the function that calls it, so it resolves through the definer at call time and
+# has no attribute to rebind; patching the definer covers it.
+#
+# This is a PIN, not a hope: `install` discovers the real set and refuses to boot
+# if it differs, so an upstream bump that adds an import site is a startup error
+# rather than a checkout that silently stacks a voucher onto a dealer price.
+VOUCHER_BINDING_SITES = (
+    "saleor.discount.utils.voucher",
     "saleor.graphql.checkout.dataloaders.checkout_infos",
+    "saleor.order.fetch",
 )
 
 _installed = False
+_voucher_guard = None
 _stacking: bool | None = None
 
 
@@ -96,16 +110,42 @@ def voucher_guard(original):
     return attach_voucher_to_line_info
 
 
-def _guard_vouchers():
-    from saleor.discount.utils import voucher as voucher_utils
+def binding_sites(function) -> frozenset[str]:
+    """Every loaded `saleor.` module whose attribute IS this exact function."""
+    return frozenset(
+        name
+        for name, module in list(sys.modules.items())
+        if name.startswith("saleor.")
+        and getattr(module, "attach_voucher_to_line_info", None) is function
+    )
 
-    original = voucher_utils.attach_voucher_to_line_info
-    guarded = voucher_guard(original)
-    voucher_utils.attach_voucher_to_line_info = guarded
-    for name in _VOUCHER_BINDING_SITES:
-        module = importlib.import_module(name)
-        if getattr(module, "attach_voucher_to_line_info", None) is original:
-            module.attach_voucher_to_line_info = guarded
+
+def installed_voucher_guard():
+    """The wrapper `install` put in place, for the test that pins the site set."""
+    return _voucher_guard
+
+
+def _guard_vouchers():
+    global _voucher_guard
+
+    # Import the pinned modules first: discovery can only see what is loaded, and
+    # at app-ready time most of these have not been imported yet.
+    for name in VOUCHER_BINDING_SITES:
+        importlib.import_module(name)
+
+    original = sys.modules["saleor.discount.utils.voucher"].attach_voucher_to_line_info
+    discovered = binding_sites(original)
+    if discovered != frozenset(VOUCHER_BINDING_SITES):
+        raise ImproperlyConfigured(
+            "wsm.dealer no-stacking: attach_voucher_to_line_info is bound in "
+            f"{sorted(discovered)}, but this patch pins "
+            f"{sorted(VOUCHER_BINDING_SITES)}. Rebind the new sites and update "
+            "docs/wsm/CORE-TOUCHES.md, or a voucher will stack on a dealer price."
+        )
+
+    _voucher_guard = voucher_guard(original)
+    for name in discovered:
+        sys.modules[name].attach_voucher_to_line_info = _voucher_guard
 
 
 def catalogue_guard(original):

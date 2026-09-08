@@ -199,3 +199,98 @@ def test_a_shopper_with_no_dealer_row_gets_the_kit_discount(
         "27.00",
     ]
     assert response.json()["kitTotal"] == "54.00"
+
+
+def test_a_voucher_does_not_stack_on_a_tiered_kit_member(
+    client, checkout, kit, customer_user, voucher_percentage
+):
+    """Better of, never both, through Saleor's own voucher machinery.
+
+    The same 10 percent code is applied to two of the three member products.
+    The retail member takes it; the member that took a dealer tier does not,
+    because the line carries the dealer key the no-stacking guard looks for.
+    """
+    from saleor.discount import VoucherType
+    from saleor.wsm.dealer.models import DealerCustomer, DealerGroup, TierPrice
+
+    group = DealerGroup.objects.create(code="tier-1", name="Tier 1")
+    DealerCustomer.objects.create(user=customer_user, group=group)
+    members = list(kit.members.order_by("sort_order"))
+    cheap, dear = members[0].variant, members[-1].variant
+    TierPrice.objects.create(
+        variant=dear, group=group, min_quantity=1, amount=Decimal("25.00")
+    )
+    voucher_percentage.type = VoucherType.SPECIFIC_PRODUCT
+    voucher_percentage.save(update_fields=["type"])
+    voucher_percentage.products.add(cheap.product, dear.product)
+
+    added = post_kit(client, checkout, kit.collection_id, customer=customer_user)
+    assert added.status_code == 200
+
+    line = checkout.lines.get(variant_id=dear.pk)
+    assert line.price_override == Decimal("25.00")
+    assert "wsm.dealer" in line.metadata
+
+    response = client.post(
+        "/graphql/",
+        data=json.dumps(
+            {
+                "query": """
+                mutation($id: ID!, $code: String!) {
+                  checkoutAddPromoCode(id: $id, promoCode: $code) {
+                    errors { field message }
+                    checkout { lines {
+                      variant { id }
+                      totalPrice { gross { amount } }
+                    } }
+                  }
+                }""",
+                "variables": {
+                    "id": gid("Checkout", checkout.token),
+                    "code": "saleor",
+                },
+            }
+        ),
+        content_type="application/json",
+    )
+
+    payload = response.json()["data"]["checkoutAddPromoCode"]
+    assert payload["errors"] == []
+    totals = {
+        line["variant"]["id"]: line["totalPrice"]["gross"]["amount"]
+        for line in payload["checkout"]["lines"]
+    }
+    # The retail member proves the code is live: 9.00 less 10 percent. The
+    # tiered member keeps its 25.00 whole; 22.50 here is the stack this exists
+    # to refuse.
+    assert totals[gid("ProductVariant", cheap.pk)] == 8.10
+    assert totals[gid("ProductVariant", dear.pk)] == 25.00
+
+
+def test_a_tiered_kit_member_is_written_as_a_dealer_line(
+    client, checkout, kit, customer_user
+):
+    """The metadata and the reason MP1 and a support screen both read."""
+    from saleor.wsm.dealer.models import DealerCustomer, DealerGroup, TierPrice
+    from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
+
+    group = DealerGroup.objects.create(code="tier-1", name="Tier 1")
+    DealerCustomer.objects.create(user=customer_user, group=group)
+    dear = kit.members.order_by("-sort_order").first().variant
+    TierPrice.objects.create(
+        variant=dear, group=group, min_quantity=1, amount=Decimal("25.00")
+    )
+
+    added = post_kit(client, checkout, kit.collection_id, customer=customer_user)
+    assert added.status_code == 200
+
+    tiered = checkout.lines.get(variant_id=dear.pk)
+    assert json.loads(tiered.metadata[LINE_METADATA_KEY]) == {"group": "tier-1"}
+    assert tiered.price_override_reason == PRICE_OVERRIDE_REASON
+    # The members that stayed at the kit-discounted retail unit are not dealer
+    # lines and a voucher may still reach them.
+    retail = checkout.lines.exclude(variant_id=dear.pk)
+    assert not any(LINE_METADATA_KEY in line.metadata for line in retail)
+    assert {line.price_override_reason for line in retail} == {
+        pricing.PRICE_OVERRIDE_REASON
+    }

@@ -213,7 +213,9 @@ def price_kit(
     )
 
 
-def add_kit_to_checkout(checkout, kit, quantity, user=None, tier_lookup=None):
+def add_kit_to_checkout(
+    checkout, kit, quantity, user=None, tier_lookup=None, tier_group=None
+):
     """Explode a kit into ordinary checkout lines at prices computed right here.
 
     Returns `(group_id, KitPrice, {variant_id: CheckoutLine})`. The lines are
@@ -231,6 +233,8 @@ def add_kit_to_checkout(checkout, kit, quantity, user=None, tier_lookup=None):
     from ...core.utils.metadata_manager import MetadataItem
     from ...graphql.checkout.mutations.utils import CheckoutLineData
     from ...plugins.manager import get_plugins_manager
+    from ..dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
+    from ..dealer.no_stacking import PRICE_OVERRIDE_REASON as DEALER_REASON
 
     priced = price_kit(
         kit.pricing_members(checkout.channel),
@@ -247,6 +251,34 @@ def add_kit_to_checkout(checkout, kit, quantity, user=None, tier_lookup=None):
     lines_data = []
     for line in priced.lines:
         variants.append(line.member.variant)
+        metadata = [
+            MetadataItem(META_GROUP, group_id),
+            MetadataItem(
+                META_KIT,
+                json.dumps(
+                    {"collection": collection_slug, "share": line.share},
+                    sort_keys=True,
+                ),
+            ),
+        ]
+        reason = PRICE_OVERRIDE_REASON
+        if line.on_tier:
+            # A member line that took a tier IS a dealer line, and the
+            # no-stacking guard finds one by the PRESENCE of this key
+            # (dealer.no_stacking.is_dealer_line). Without it a catalogue
+            # promotion or a SPECIFIC_PRODUCT voucher comes off the tier price
+            # and the dealer collects both, which "better of, never both" is
+            # there to refuse. The value carries the group for support; the
+            # break's own minimum quantity is not carried, because a kit member
+            # is bought at the KIT's quantity rather than at a rung the shopper
+            # chose.
+            metadata.append(
+                MetadataItem(
+                    DEALER_KEY,
+                    json.dumps({"group": tier_group} if tier_group else {}),
+                )
+            )
+            reason = DEALER_REASON
         lines_data.append(
             CheckoutLineData(
                 variant_id=str(line.member.variant.pk),
@@ -254,18 +286,9 @@ def add_kit_to_checkout(checkout, kit, quantity, user=None, tier_lookup=None):
                 quantity_to_update=True,
                 custom_price=Decimal(line.unit_cents) / 100,
                 custom_price_to_update=True,
-                custom_price_reason=PRICE_OVERRIDE_REASON,
+                custom_price_reason=reason,
                 custom_price_reason_to_update=True,
-                metadata_list=[
-                    MetadataItem(META_GROUP, group_id),
-                    MetadataItem(
-                        META_KIT,
-                        json.dumps(
-                            {"collection": collection_slug, "share": line.share},
-                            sort_keys=True,
-                        ),
-                    ),
-                ],
+                metadata_list=metadata,
             )
         )
 

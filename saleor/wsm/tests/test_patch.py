@@ -14,10 +14,12 @@ import pytest
 
 from ...graphql.api import schema
 from .. import category_products
+from .test_core_tables_untouched import ALLOWED_CORE_FILES, REPO
 
-# The upstream commit the fork is branched from. `saleor/settings.py` is the only
-# file outside `saleor/wsm/` the fork is allowed to have touched since.
-UPSTREAM_BASE = "0a8ae002"
+# The upstream release the fork sits on. The base commit is DERIVED from it
+# rather than pinned, because a rebase moves the base and a pinned sha then
+# fails for a reason that has nothing to do with the footprint it guards.
+UPSTREAM_TAG = "3.23.31"
 
 
 def test_the_patched_resolver_is_the_one_wired_into_the_schema():
@@ -142,33 +144,42 @@ def test_patch_refuses_to_stack_on_another_wrapper(monkeypatch):
         category_products.patch()
 
 
-def test_the_fork_touches_exactly_one_upstream_file():
-    """`saleor/settings.py` plus `saleor/wsm/**`. Nothing else, ever.
+def test_the_fork_touches_exactly_the_allowed_upstream_files():
+    """`saleor/wsm/**` plus the deviation budget, and nothing else, ever.
 
     Bill and Matias both hold that we do not commit on top of saleor, so that is
-    a property of the diff and belongs in a test. Diffed against the working tree
-    rather than HEAD so an uncommitted stray edit fails too.
+    a property of the diff and belongs in a test. The allowed set is IMPORTED
+    from the guard test rather than restated here, so the budget has one home and
+    the two tests cannot drift apart. Diffed against the working tree rather than
+    HEAD so an uncommitted stray edit fails too.
     """
     # given / when. Skip only when there is no git at all (a wheel, a tarball).
     # A git checkout that cannot see the base object is a shallow clone, and a
     # shallow clone silently skipping the one test that enforces the footprint
     # is worse than a failure: it fails loudly and says how to fix the checkout.
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", UPSTREAM_BASE, "--", "saleor/"],
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError as error:
-        pytest.skip(f"no git on this box: {error}")
+    def git(*args):
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=REPO, capture_output=True, text=True
+            )
+        except FileNotFoundError as error:
+            pytest.skip(f"no git on this box: {error}")
+
+    base = git("merge-base", "HEAD", UPSTREAM_TAG)
+    assert base.returncode == 0, (
+        f"git cannot find the merge base with {UPSTREAM_TAG} (exit "
+        f"{base.returncode}: {base.stderr.strip()}). A shallow clone hides the "
+        "upstream base; check out with fetch-depth: 0 so this footprint test can "
+        "run."
+    )
+    result = git("diff", "--name-only", base.stdout.strip(), "--", "saleor/")
     assert result.returncode == 0, (
-        f"git cannot diff against {UPSTREAM_BASE} (exit {result.returncode}: "
-        f"{result.stderr.strip()}). A shallow clone hides the upstream base; "
-        "check out with fetch-depth: 0 so this footprint test can run."
+        f"git cannot diff against {base.stdout.strip()} (exit "
+        f"{result.returncode}: {result.stderr.strip()})."
     )
     changed = result.stdout.split()
 
     # then
-    assert [path for path in changed if not path.startswith("saleor/wsm/")] == [
-        "saleor/settings.py"
-    ]
+    assert {
+        path for path in changed if not path.startswith("saleor/wsm/")
+    } == ALLOWED_CORE_FILES

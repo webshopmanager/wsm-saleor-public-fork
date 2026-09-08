@@ -13,9 +13,27 @@ nothing else:
 git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py + saleor/wsm/** only
 ```
 
-Monkey patches: **one** (MP1 below, added by U3; the design doc budgeted
-zero, see that entry for why the stock levers do not exist). Core table edits: **zero.** Our tables carry FKs into
-core tables; core migrations are untouched.
+Monkey patches on this branch: **one** (MP1 below, added by U3; the design doc
+budgeted zero, see that entry for why the stock levers do not exist). Core table
+edits: **zero.** Our tables carry FKs into core tables; core migrations are
+untouched.
+
+Every patch any branch of this fork installs is named, once, in
+`saleor/wsm/patches.py` as `PINNED`, by the defining module and qualname of the
+function it wraps. That tuple also carries MP2, the order-level no-stacking
+patch on `wsm/bakeoff-voucher`, so the two branches merge without the guard
+going red; a branch that carries only some of them still passes.
+
+Both counts are assertions, not claims.
+`saleor/wsm/tests/test_core_tables_untouched.py` discovers the patches actually
+installed in the running process by sweeping `sys.modules` for a wrapper whose
+code lives under `saleor/wsm/`, and fails on any that `PINNED` does not name. It
+also walks every fork migration's DATABASE operations for a non-`wsm_` table,
+including the list and `(sql, params)` forms of `RunSQL` and both directions,
+and refuses a `RunPython` in a fork migration unless the file carries a
+`# WSM-CORE-SAFE: <reason>` line directly above it. A patch nobody wrote down,
+or a migration reaching core through the ORM, reddens the suite before it
+reaches this document.
 
 ---
 
@@ -58,15 +76,33 @@ to satisfy one of its dependencies. Grouped, with what breaks without it:
 | `MIDDLEWARE`: session, authentication, message | admin checks `admin.E40x` | admin refuses to load |
 | `TEMPLATES` context processors: `auth`, `messages`, `request` | same checks, plus `admin.W411` for the sidebar | admin refuses to load |
 | `AUTHENTICATION_BACKENDS`: `saleor.wsm.compose.auth.AdminPasswordBackend` | email + password login, and permissions read from Saleor's renamed `permission_permission` | no way to log in as a merchant |
-| `MIGRATION_MODULES = {"django_auth": None}` | `saleor.auth` already owns the `auth` label and holds the 13 historical auth migrations | duplicate migration history, `migrate` fails |
+| `MIGRATION_MODULES = {"django_auth": "saleor.wsm.compose.django_auth_migrations"}` | `saleor.auth` already owns the `auth` label and holds the 13 historical auth migrations | duplicate migration history, `migrate` fails |
 
 Why a relabelled `django.contrib.auth` rather than the stock one: `saleor.auth`
 is a models-free shim occupying the `auth` label whose `0013` deletes Group,
 Permission and User from migration state. Two apps cannot share a label, so the
-one we add takes `django_auth` and contributes no migrations of its own. Its
-`AppConfig.ready()` is a no-op so that Django's `create_permissions` receiver is
-never connected: `wsm_compose` permission rows are created by our own
-`post_migrate` receiver, into `saleor.permission.models.Permission`.
+one we add takes `django_auth`. Its `AppConfig.ready()` is a no-op so that
+Django's `create_permissions` receiver is never connected: `wsm_compose`
+permission rows are created by our own `post_migrate` receiver, into
+`saleor.permission.models.Permission`.
+
+`MIGRATION_MODULES` points `django_auth` at a FORK-OWNED migration package,
+`saleor.wsm.compose.django_auth_migrations`, not at `None`. It holds two
+migrations, `0001_initial` and `0002_auth_models_state_only`, and both are
+state-only: they create no table and touch no row, they exist so that
+`makemigrations --check` sees a history for an app that has three models in the
+registry and none of its own tables. `None` was the shape U2 first wrote and the
+shape this table used to claim; the code has said otherwise since
+`0002_auth_models_state_only` landed on the merge branch.
+
+Read the `AUTHENTICATION_BACKENDS` row as the app-wide change it is. A backend in
+that list is consulted on EVERY `authenticate()` call in the process, not only on
+/admin/, so this one password backend is part of the shop's whole sign-in path.
+Since review wave A it therefore honours the merchant's own
+`SiteSettings.password_login_mode`: `DISABLED` refuses everyone and
+`CUSTOMERS_ONLY` refuses staff, which is what the same switch means to Saleor's
+own backends (`saleor/wsm/compose/auth.py`, and its tests in
+`saleor/wsm/compose/tests/test_auth.py`).
 
 Removal cost: delete the block. Nothing outside `saleor/wsm/` imports any of it.
 
@@ -181,6 +217,33 @@ Monkey patches added by the merge: **zero.** MP1 below is still the only one.
 
 ---
 
+## 7. `saleor/settings.py`, +5 lines, 1 of them code (review wave A, 2026-09-08)
+
+```python
+WSM_STOREFRONT_KEY = os.environ.get("WSM_STOREFRONT_KEY", "")
+```
+
+The per-tenant secret the storefront SERVER already sends on every call to the
+fork's checkout endpoints, as `X-Dealer-Pricing-Key` (dealer) or `X-Compose-Key`
+(compose). It has to be a setting because it is per-deployment configuration, and
+core is where Saleor reads env into settings; everything that uses it lives in
+`saleor/wsm/http.py`.
+
+Until wave A those headers were read by nobody, on the reasoning that the price
+is computed in this process so there is "nothing a caller could forge". The price
+was never the forgeable thing: the BUYER was. `customerId` arrives in the request
+body, so anyone on the network could read a named dealer's whole price ladder and
+add lines to a checkout at that dealer's tier. The five write and price endpoints
+now demand the key; the public catalog read (`.../option-sets`) does not.
+
+Unset or empty fails SAFE: every gated endpoint answers 401. A tenant that forgot
+to set the secret sells nothing through these routes, which is loud, rather than
+selling at anyone's dealer price, which is silent.
+
+Removal cost: delete the line, the decorator and `saleor/wsm/http.py`.
+
+---
+
 # Monkey patches
 
 Expected: zero. Actual: **one**, in U3. Every entry names the exact function it
@@ -197,10 +260,19 @@ reimplemented: each wrapper calls the original with a smaller list of lines.
 | `attach_voucher_to_line_info(voucher_info, lines_info)` | `saleor/discount/utils/voucher.py` | Runs the original, then clears `voucher` and `voucher_code` from any line info whose line carries the `wsm.dealer` metadata key. |
 | `prepare_checkout_line_discount_objects_for_catalogue_promotions(lines_info)` | `saleor/discount/utils/checkout.py` | Calls the original with the retail lines only, and adds any catalogue discount already sitting on a dealer line to the returned removal list. |
 
-The voucher function is also rebound in the three modules that imported it by
-name at import time (`saleor.checkout.fetch`, `saleor.order.fetch`,
-`saleor.graphql.checkout.dataloaders.checkout_infos`); patching the defining
-module alone would leave them on the original.
+The voucher function is rebound in every module that holds it as its own
+attribute: the module that defines it, plus `saleor.order.fetch` and
+`saleor.graphql.checkout.dataloaders.checkout_infos`, which imported it by name
+at import time. Patching the definer alone would leave those two on the original.
+`saleor.checkout.fetch` imports it INSIDE the function that calls it, so it
+resolves through the definer at call time and there is nothing there to rebind.
+
+That list used to be hardcoded, and a site it did not name was skipped in
+silence. Since review wave A `install` imports the pinned modules, DISCOVERS
+every loaded `saleor.` module bound to the original, and raises
+`ImproperlyConfigured` if the discovered set differs from the pin. An upstream
+bump that adds an import site is now a boot failure with the module name in it,
+not a checkout that quietly stacks a voucher onto a dealer price.
 
 Why (requirement 2.4, Dana's ruling 2026-09-08): "no discount combines with
 dealer pricing", as a per-tenant toggle defaulting OFF.

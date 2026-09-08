@@ -91,7 +91,7 @@ def _tier_group(customer_gid, db):
 def _delta_string(value, tier_group):
     """What THIS buyer pays for one value, as the storefront reads it.
 
-    A tier row above a POSITIVE retail delta refuses the add
+    A tier row above the retail delta, floored at zero, refuses the add
     (`AboveRetailError`); on a product page it shows retail instead, because a
     shopper is the wrong audience for a merchant's data bug and a 500 on the PDP
     would hide every other option too. The refusal still stands where the money

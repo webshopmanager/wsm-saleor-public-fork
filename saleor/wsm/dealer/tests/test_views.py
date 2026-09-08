@@ -135,6 +135,24 @@ def test_dealer_line_sets_price_override_and_metadata(
     assert body["lineId"] == gid("CheckoutLine", line.pk)
 
 
+def test_a_half_cent_tier_is_charged_up_and_quoted_the_same(
+    client, checkout, variant, customer_user, dealer_group, channel_USD
+):
+    """What is quoted and what is written are the same number, rounded up."""
+    TierPrice.objects.create(
+        variant=variant, group=dealer_group, min_quantity=1, amount=Decimal("8.005")
+    )
+
+    response = post(
+        client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 1)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["dealerPrice"] == "8.01"
+    line = CheckoutLine.objects.get(checkout_id=checkout.pk)
+    assert line.price_override == Decimal("8.01")
+
+
 def test_dealer_line_under_the_lowest_break_is_refused(
     client, checkout, variant, customer_user, tiers, channel_USD
 ):

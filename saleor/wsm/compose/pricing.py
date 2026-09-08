@@ -147,8 +147,12 @@ class ConfiguredPrice:
     snapshot: dict = field(default_factory=dict)
 
 
-def _delta_for(value: Value, tier_group: str | None) -> tuple[int, bool]:
+def delta_for(value: Value, tier_group: str | None) -> tuple[int, bool]:
     """The delta this buyer pays for one value, and whether a tier row supplied it.
+
+    Public because the PDP endpoint shows the same number it will charge, and a
+    second copy of this rule in a view is how a quoted price and a charged price
+    drift apart.
 
     Requirement 2.2 as corrected: the above-retail guard is for POSITIVE retail
     deltas only. On a credit the tier row stands verbatim, larger or smaller,
@@ -347,7 +351,7 @@ def price_configured(
             (v for v in option_set.values if v.id in wanted),
             key=lambda v: (v.sort_order, v.id),
         ):
-            delta, tiered = _delta_for(value, tier_group)
+            delta, tiered = delta_for(value, tier_group)
             tier_applied = tier_applied or tiered
             unit_cents += delta
             if value.sku_fragment:

@@ -33,6 +33,7 @@ from ...core.utils.metadata_manager import MetadataItem
 from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...plugins.manager import get_plugins_manager
 from ...product.models import Product, ProductVariant, ProductVariantChannelListing
+from ..dealer import pricing as dealer_pricing
 from . import pricing
 from .models import Fee, OptionSet, to_cents
 
@@ -75,6 +76,36 @@ def _not_found(what: str):
     return JsonResponse({"violations": [f"unknown {what}"]}, status=404)
 
 
+def _tier_group(customer_gid, db):
+    """The buyer group behind a customer id, resolved by wsm.dealer, or None.
+
+    Compose never reads `DealerCustomer` itself: one string names one buyer
+    group across both apps (wsm.dealer models docstring) and the app that owns
+    the row owns the lookup.
+    """
+    return dealer_pricing.tier_group_for(
+        _from_gid(customer_gid or "", "User"), database_connection_name=db
+    )
+
+
+def _delta_string(value, tier_group):
+    """What THIS buyer pays for one value, as the storefront reads it.
+
+    A tier row above a POSITIVE retail delta refuses the add
+    (`AboveRetailError`); on a product page it shows retail instead, because a
+    shopper is the wrong audience for a merchant's data bug and a 500 on the PDP
+    would hide every other option too. The refusal still stands where the money
+    is taken.
+    """
+    if not tier_group:
+        return f"{value.price_delta:.2f}"
+    try:
+        delta, _ = pricing.delta_for(value.to_pricing(), tier_group)
+    except pricing.AboveRetailError:
+        return f"{value.price_delta:.2f}"
+    return f"{Decimal(delta) / 100:.2f}"
+
+
 @require_GET
 def option_sets(request, product_gid):
     """Everything the PDP needs to draw the configurator, in three queries.
@@ -89,10 +120,15 @@ def option_sets(request, product_gid):
         return _not_found("product")
 
     replica = settings.DATABASE_CONNECTION_REPLICA_NAME
+    # A dealer is quoted their own deltas; every other shopper is quoted retail
+    # and pays for nothing extra: no customer id means no lookup and no tier
+    # prefetch, so the retail PDP read costs exactly what it cost before.
+    tier_group = _tier_group(request.GET.get("customerId"), replica)
+    values = ("values", "values__tier_deltas") if tier_group else ("values",)
     sets = list(
         OptionSet.objects.using(replica)
         .filter(product_id=product_pk)
-        .prefetch_related("values")
+        .prefetch_related(*values)
     )
     fees = list(Fee.objects.using(replica).filter(product_id=product_pk))
 
@@ -115,7 +151,7 @@ def option_sets(request, product_gid):
                             "id": v.pk,
                             "name": v.name,
                             "sku_fragment": v.sku_fragment,
-                            "price_delta": f"{v.price_delta:.2f}",
+                            "price_delta": _delta_string(v, tier_group),
                             "image_url": v.image_url,
                         }
                         for v in s.values.all()
@@ -211,6 +247,11 @@ def configured_line(request):
         "values", "values__tier_deltas"
     )
     fees = list(Fee.objects.filter(product_id=product_pk))
+    # Read from the WRITER: a group that decides the price about to be stamped
+    # on a checkout line is read from the database the line is written to.
+    tier_group = _tier_group(
+        body.get("customerId"), settings.DATABASE_CONNECTION_DEFAULT_NAME
+    )
 
     requested_fee_ids = tuple(body.get("acceptedFeeIds") or ())
     # A required fee is charged whether or not the caller names it, and the
@@ -229,8 +270,7 @@ def configured_line(request):
             to_cents(listing.price_amount),
             [s.to_pricing() for s in sets],
             selections,
-            # U3 resolves the buyer's tier group here. Retail until then.
-            None,
+            tier_group,
             fees=[f.to_pricing() for f in fees],
             accepted_fee_ids=accepted_fee_ids,
             base_sku=variant.sku or "",

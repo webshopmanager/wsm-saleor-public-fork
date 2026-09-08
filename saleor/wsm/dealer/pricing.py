@@ -27,11 +27,34 @@ from django.conf import settings
 from django.db.models import OuterRef, Subquery
 
 from ...product.models import ProductVariantChannelListing
-from .models import TierPrice
+from .models import DealerCustomer, TierPrice
 
 # Endpoint 3's cap. A storefront asking about more variants than a page can show
 # is a bug in the caller, and an unbounded IN () is how one becomes an outage.
 MAX_BATCH = 100
+
+
+def tier_group_for(user_pk, *, database_connection_name=None) -> str | None:
+    """The group code this buyer buys at, or None at retail. ONE query, from the id.
+
+    The callers that need a group (a configured line, a kit) never need the User
+    row itself, and `DealerCustomer` is a OneToOne, so there is exactly one
+    answer and no join to a fetched object. The code returned is the same string
+    `wsm.compose.DealerTierOptionPrice.tier_group` stores, which is what makes
+    this the one place either app turns a customer into a group: nothing else
+    reads `DealerCustomer` to price anything.
+
+    Costs nothing for the shopper who is not signed in: no id, no query.
+    """
+    if not user_pk:
+        return None
+    db = database_connection_name or settings.DATABASE_CONNECTION_REPLICA_NAME
+    return (
+        DealerCustomer.objects.using(db)
+        .filter(user_id=user_pk)
+        .values_list("group__code", flat=True)
+        .first()
+    )
 
 
 class DealerPrice(NamedTuple):

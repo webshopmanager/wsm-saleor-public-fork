@@ -135,7 +135,7 @@ def test_dealer_line_sets_price_override_and_metadata(
 
 
 def test_a_half_cent_tier_is_charged_up_and_quoted_the_same(
-    client, checkout, variant, customer_user, dealer_group, channel_USD
+    client, checkout, variant, customer_user, dealer_group, channel_USD, stock
 ):
     """What is quoted and what is written are the same number, rounded up."""
     TierPrice.objects.create(
@@ -238,7 +238,7 @@ def test_reprice_puts_the_override_back_when_the_quantity_reaches_a_break(
 
 
 def test_a_dealer_add_expires_the_checkout_prices(
-    client, checkout, variant, customer_user, tiers, channel_USD
+    client, checkout, variant, customer_user, tiers, channel_USD, stock
 ):
     """Endpoint 4 owes the checkout the same tail a stock mutation runs."""
     from django.utils import timezone
@@ -255,7 +255,7 @@ def test_a_dealer_add_expires_the_checkout_prices(
 
 
 def test_a_reprice_that_moves_the_price_expires_it_and_one_that_does_not_leaves_it(
-    client, checkout, variant, customer_user, tiers, channel_USD
+    client, checkout, variant, customer_user, tiers, channel_USD, stock
 ):
     """The write is idempotent, so the invalidation is too."""
     from django.utils import timezone

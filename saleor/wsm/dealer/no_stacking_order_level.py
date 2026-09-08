@@ -43,18 +43,9 @@ is already consulted on the voucher side.
 
 from __future__ import annotations
 
-import importlib
 from functools import wraps
 
-from .no_stacking import is_dealer_line, stacking_enabled
-
-# Modules that bound a patched function at import time. Patching the defining
-# module alone would leave these pointing at the original.
-_ORDER_PRICES_BINDING_SITES = ("saleor.plugins.manager",)
-_ORDER_PROMOTION_BINDING_SITES = (
-    "saleor.discount.utils.checkout",
-    "saleor.discount.utils.order",
-)
+from .no_stacking import install_guard, is_dealer_line, stacking_enabled
 
 _installed = False
 
@@ -216,45 +207,40 @@ def order_promotion_amount_guard(original):
 # --- install -----------------------------------------------------------------
 
 
-def _rebind(original, guarded, module_names):
-    for name in module_names:
-        module = importlib.import_module(name)
-        for attribute, value in list(vars(module).items()):
-            if value is original:
-                setattr(module, attribute, guarded)
-
-
 def install() -> None:
-    """Called once from DealerConfig.ready(), after MP1."""
+    """Called once from DealerConfig.ready(), after MP1.
+
+    Every one of the five is rebound at every module that holds it, discovered
+    against the sites pinned in `saleor/wsm/patches.py`. Patching the definer
+    alone was enough for none of them: `saleor.plugins.manager` and the two
+    discount helpers each imported one by name, and an upstream bump that adds a
+    sixth site now fails at boot instead of quietly discounting a dealer line.
+    """
     global _installed
     if _installed:
         return
     _installed = True
 
-    from ...checkout import base_calculations as checkout_base
-    from ...checkout import utils as checkout_utils
-    from ...discount.utils import promotion as promotion_utils
-    from ...order import base_calculations as order_base
-
-    checkout_utils.get_voucher_discount_for_checkout = checkout_voucher_amount_guard(
-        checkout_utils.get_voucher_discount_for_checkout
+    install_guard(
+        "saleor.checkout.utils.get_voucher_discount_for_checkout",
+        checkout_voucher_amount_guard,
     )
-    checkout_base._propagate_checkout_discount_on_checkout_lines_prices = (
-        checkout_spread_guard(
-            checkout_base._propagate_checkout_discount_on_checkout_lines_prices
-        )
+    install_guard(
+        "saleor.checkout.base_calculations."
+        "_propagate_checkout_discount_on_checkout_lines_prices",
+        checkout_spread_guard,
     )
-
-    order_prices_original = order_base.propagate_order_discount_on_order_prices
-    order_prices_guarded = order_amount_guard(order_prices_original)
-    order_base.propagate_order_discount_on_order_prices = order_prices_guarded
-    _rebind(order_prices_original, order_prices_guarded, _ORDER_PRICES_BINDING_SITES)
-
-    order_base.propagate_order_discount_on_order_lines_prices = order_spread_guard(
-        order_base.propagate_order_discount_on_order_lines_prices
+    install_guard(
+        "saleor.order.base_calculations.propagate_order_discount_on_order_prices",
+        order_amount_guard,
     )
-
-    promotion_original = promotion_utils.create_discount_objects_for_order_promotions
-    promotion_guarded = order_promotion_amount_guard(promotion_original)
-    promotion_utils.create_discount_objects_for_order_promotions = promotion_guarded
-    _rebind(promotion_original, promotion_guarded, _ORDER_PROMOTION_BINDING_SITES)
+    install_guard(
+        "saleor.order.base_calculations."
+        "propagate_order_discount_on_order_lines_prices",
+        order_spread_guard,
+    )
+    install_guard(
+        "saleor.discount.utils.promotion."
+        "create_discount_objects_for_order_promotions",
+        order_promotion_amount_guard,
+    )

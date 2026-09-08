@@ -53,7 +53,7 @@ Core touches expected (counted, each one line): INSTALLED_APPS += 3 apps and dja
 - U3 wsm.dealer models, endpoints 3 to 5, no-stacking toggle, B3 walked.
 - U4 wsm.containers, B4 and B5 walked.
 - U5 storefront develop pointed at the box (tenant block only), full shopper walk PDP -> cart -> checkout, screenshots, per-request query count (B6, B7).
-- U6 Import: fub option sets and dealer tiers through the migration tool stage into the new tables, census parity (111 sets, 607 values, QSST 2,443.00 exact).
+- U6 Import: fub option sets and dealer tiers out of 5.0 into the new tables, census parity (111 sets, 607 values, QSST 2,943.00 exact).
 - U7 Rebase check: Bill's Saleor patches re-applied onto 3.23.31 (conflict surface from the patch inventory), then Tonneau Outlaw data on the stack.
 
 ## 5. Budget (design for the millionth run)

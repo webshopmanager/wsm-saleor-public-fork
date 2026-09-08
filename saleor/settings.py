@@ -355,6 +355,8 @@ INSTALLED_APPS = [
     "saleor.wsm.compose",
     # WSM-FORK: fork-only app, see saleor/wsm/dealer/__init__.py and docs/wsm/CORE-TOUCHES.md
     "saleor.wsm.dealer",
+    # WSM-FORK: fork-only app, see saleor/wsm/containers/__init__.py and docs/wsm/CORE-TOUCHES.md
+    "saleor.wsm.containers",
     # External apps
     "django_measurement",
     "mptt",

@@ -81,14 +81,35 @@ Same reason as Compose above, and the same removal cost: delete the two lines
 and the package. The app label is pinned to `wsm_dealer` in `apps.py` so the
 tables keep their `wsm_dealer_` prefix.
 
-## 4. `saleor/urls.py`, +1 line of code (U2 and U3 together, 2026-09-08)
+## 4. `saleor/settings.py`, +2 lines (U4, 2026-09-08)
+
+```python
+    # WSM-FORK: fork-only app, see saleor/wsm/containers/__init__.py and docs/wsm/CORE-TOUCHES.md
+    "saleor.wsm.containers",
+```
+
+The twin of touch 1, for the same reason: `INSTALLED_APPS` is the only thing an
+app cannot do for itself. The label is pinned to `wsm_containers` in `apps.py`
+so the three tables carry the `wsm_containers_` prefix and stay out of core's
+namespace. Everything else in Containers (models, migration, pricing, views,
+admin, tests) lives under `saleor/wsm/containers/`, which upstream does not own.
+
+This is the SHARED touch site: U1, U3 and U4 each add their own line in the
+same block. The merge kept all three, in unit order.
+
+Removal cost: delete the two lines and the package. Nothing in core references
+Containers.
+
+---
+
+## 5. `saleor/urls.py`, +1 line of code (U2, U3 and U4 together, 2026-09-08)
 
 ```python
     re_path(r"", include("saleor.wsm.urls")),
 ```
 
-**Shared touch.** U2 (Compose endpoints, the merchant admin, static) and U3
-(Dealer endpoints) each need the fork's URLs mounted, and both branches wrote
+**Shared touch.** U2 (Compose endpoints, the merchant admin, static), U3
+(Dealer endpoints) and U4 (the kit endpoint) each need the fork's URLs mounted, and both branches wrote
 this line their own way. U2's shape is the one kept: U3's `path("wsm/", ...)`
 prefixes every fork route with `/wsm/`, which the dealer and compose endpoints
 want but `/admin/` and `/static/` do not, and those two are U2's merchant UI.
@@ -104,6 +125,31 @@ that file, which upstream does not own, rather than another core touch.
 
 Removal cost: delete the line and the `saleor/wsm/` package. Nothing in core
 resolves a `wsm-` route name.
+
+---
+
+## What U4 deliberately did NOT touch
+
+- **No GraphQL.** A series collection page is the STOCK collection page. The
+  series facts (`brand`, `axes`, `partitioning_axis`, `miss_message`) are written
+  onto the Collection's own metadata under the key `wsm.series` by
+  `SeriesConfig.save`, through the stock metadata API, so the storefront and the
+  search indexer read them with the query they already make. No new field, no
+  new type, no schema snapshot to regenerate.
+- **No core table.** The three tables are ours; the FKs point INTO
+  `product.Collection` and `product.ProductVariant` and no core migration moves.
+- **No hand-written CheckoutLine.** Kit members are added through
+  `add_variants_to_checkout`, the same function `checkoutLinesAdd` calls, with
+  `price_override` computed in this process. A kit is never a Saleor object
+  beyond the Collection.
+- **No `django.contrib.admin` registration in settings.** `saleor/wsm/containers/admin.py`
+  registers onto the AdminSite that U2 mounts; on a containers-only branch there
+  is nothing to register onto and the screens are exercised by calling
+  `admin.register(AdminSite())` in a test. When U2 and U4 sit on one branch the
+  screens appear with no further edit, and the `post_migrate` permission receiver
+  in `saleor/wsm/compose/apps.py` needs `wsm_containers` added to its label guard
+  so a non-superuser merchant is grantable on them. That one-word follow-up is
+  the whole merge cost.
 
 ---
 

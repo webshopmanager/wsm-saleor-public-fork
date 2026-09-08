@@ -12,9 +12,9 @@ from ..pricing import MAX_BATCH
 
 pytestmark = pytest.mark.django_db
 
-PRICES_URL = "/wsm/dealer_pricing/storefront/prices"
-LINE_URL = "/wsm/dealer_pricing/checkout/dealer-line"
-REPRICE_URL = "/wsm/dealer_pricing/checkout/dealer-line/reprice"
+PRICES_URL = "/wsm/dealer_pricing/api/storefront/prices"
+LINE_URL = "/wsm/dealer_pricing/api/checkout/dealer-line"
+REPRICE_URL = "/wsm/dealer_pricing/api/checkout/dealer-line/reprice"
 
 # Both arrive on every storefront call and both are ignored.
 HEADERS = {

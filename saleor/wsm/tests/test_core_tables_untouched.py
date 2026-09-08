@@ -4,7 +4,8 @@
 Two halves. Outside `saleor/wsm/`, only settings.py and urls.py may differ from
 the upstream release this fork sits on, so no core model or core migration can
 have moved. Inside it, every operation that reaches the DATABASE must name a
-`wsm_` table. State-only operations name nothing, which is the point of them.
+`wsm_` table. State-only operations name nothing, which is the point of them, and an
+unmanaged model is state-only: it declares a table another service owns.
 """
 
 import importlib
@@ -15,7 +16,42 @@ from django.db import migrations
 from django.db.migrations.loader import MigrationLoader
 
 UPSTREAM = "a1ab3a2"
-ALLOWED_CORE_FILES = {"saleor/settings.py", "saleor/urls.py"}
+# The two registration points the fork's own apps need, plus every core file
+# Bill's six pre-existing WSM patches edit. Listed one by one, on purpose: this
+# set is the fork's deviation budget, so growing it is a decision someone has to
+# make in a diff, never something a patch can do by arriving.
+ALLOWED_CORE_FILES = {
+    # Fork app registration (U1-U4).
+    "saleor/settings.py",
+    "saleor/urls.py",
+    # WSM6-1978, legacy WSM5 password hashers, upgraded on first sign-in.
+    "saleor/core/hashers.py",
+    "saleor/core/tests/test_hashers.py",
+    # WSM6-1178, NULL-price channel listings must not crash variant pricing.
+    "saleor/graphql/product/types/products.py",
+    # Braintree gateway crash on order details with missing credentials.
+    "saleor/payment/gateways/braintree/plugin.py",
+    "saleor/payment/gateways/braintree/tests/test_braintree.py",
+    # An undeliverable destination is not the same error as missing stock.
+    "saleor/checkout/error_codes.py",
+    "saleor/core/exceptions.py",
+    "saleor/graphql/checkout/mutations/checkout_create_from_order.py",
+    "saleor/graphql/checkout/mutations/utils.py",
+    "saleor/graphql/checkout/tests/mutations/test_checkout_create.py",
+    "saleor/graphql/checkout/tests/mutations/test_checkout_lines_add.py",
+    "saleor/graphql/checkout/tests/mutations/test_checkout_lines_update.py",
+    "saleor/graphql/checkout/tests/mutations/test_checkout_shipping_address_update.py",
+    "saleor/graphql/schema.graphql",
+    "saleor/warehouse/availability.py",
+    "saleor/warehouse/tests/test_stock_availability.py",
+    # Validate a checkout is payment-ready before charging it.
+    "saleor/checkout/checkout_cleaner.py",
+    "saleor/checkout/complete_checkout.py",
+    "saleor/checkout/tests/test_checkout_cleaner.py",
+    "saleor/graphql/checkout/tests/mutations/test_checkout_complete_with_transactions.py",
+    "saleor/graphql/payment/mutations/transaction/transaction_initialize.py",
+    "saleor/graphql/payment/mutations/transaction/transaction_process.py",
+}
 REPO = Path(__file__).resolve().parents[3]
 # The word before a table name in the SQL a migration is allowed to run.
 SQL_TABLE_WORDS = ("table", "into", "update", "from", "join")
@@ -37,6 +73,14 @@ def _tables(operation, app_label):
     if isinstance(operation, migrations.SeparateDatabaseAndState):
         return [t for o in operation.database_operations for t in _tables(o, app_label)]
     if isinstance(operation, migrations.CreateModel):
+        # `managed = False` means Django emits no DDL for this model, so the
+        # operation is state-only in exactly the sense the docstring means: it
+        # declares a table someone else owns (PartsLogic writes
+        # `product_secondary_categories`) rather than creating one. Reading the
+        # option rather than the table name is what keeps this half strict:
+        # a managed model still has to be `wsm_`-prefixed.
+        if operation.options.get("managed") is False:
+            return []
         return [operation.options.get("db_table") or f"{app_label}_{operation.name.lower()}"]
     if isinstance(operation, migrations.AlterModelTable):
         return [operation.table or f"{app_label}_{operation.name.lower()}"]

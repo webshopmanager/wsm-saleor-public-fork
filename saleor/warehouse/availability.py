@@ -13,11 +13,12 @@ from django.core.exceptions import ValidationError
 from django.db.models import F, QuerySet, Sum
 from django.db.models.functions import Coalesce
 
+from ..channel.models import Channel
 from ..checkout.error_codes import CheckoutErrorCode
 from ..checkout.fetch import DeliveryMethodBase
 from ..core.exceptions import InsufficientStock, InsufficientStockData
 from ..product.models import ProductVariantChannelListing
-from .models import Reservation, Stock, StockQuerySet
+from .models import Reservation, Stock, StockQuerySet, Warehouse
 from .reservations import get_listings_reservations
 
 if TYPE_CHECKING:
@@ -58,6 +59,42 @@ def _get_available_quantity(
         quantity_reserved = 0
 
     return max(total_quantity - quantity_allocated - quantity_reserved, 0)
+
+
+def is_destination_serviced(
+    country_code: str,
+    channel_slug: str,
+    database_connection_name: str = settings.DATABASE_CONNECTION_DEFAULT_NAME,
+) -> bool:
+    """Whether ANY warehouse in this channel can ship to this country.
+
+    Deliberately variant-agnostic. An empty per-variant stock queryset has two very
+    different causes and the shopper needs a different answer for each:
+
+    * nothing in this channel reaches the country at all -- no shipping zone covers
+      it, or the zones that do have no warehouse attached. "We don't ship there."
+    * the channel does reach the country, but this variant holds no stock in the
+      warehouses that can ship there -- it may sit in a pickup-only collection
+      point, or in a warehouse serving other countries. That is a stock-out for
+      this destination, not a refusal to deliver, and saying "we don't ship to
+      Canada" when we demonstrably do would be wrong.
+
+    Only consulted once a stock check has already failed, so the extra query costs
+    nothing on the success path.
+    """
+    channel_id = (
+        Channel.objects.using(database_connection_name)
+        .filter(slug=channel_slug)
+        .values_list("pk", flat=True)
+        .first()
+    )
+    if channel_id is None:
+        return False
+    return (
+        Warehouse.objects.using(database_connection_name)
+        .for_country_and_channel(country_code, channel_id)
+        .exists()
+    )
 
 
 def check_stock_and_preorder_quantity(
@@ -128,7 +165,12 @@ def check_stock_quantity(
             raise InsufficientStock(
                 [
                     InsufficientStockData(
-                        variant=variant, available_quantity=0, order_line=order_line
+                        variant=variant,
+                        available_quantity=0,
+                        order_line=order_line,
+                        destination_not_serviced=not is_destination_serviced(
+                            country_code, channel_slug, database_connection_name
+                        ),
                     )
                 ]
             )
@@ -312,6 +354,22 @@ def check_stock_quantity_bulk(
     variants_quantities = {
         line.variant.pk: line.line.quantity for line in existing_lines or []
     }
+
+    # Resolved lazily and at most once per call: it is only needed once a line has
+    # already failed its stock check, and never for a click-and-collect order, where
+    # the destination country plays no part in which warehouse can fulfil the line.
+    destination_serviced: bool | None = None
+
+    def destination_not_serviced() -> bool:
+        nonlocal destination_serviced
+        if collection_point:
+            return False
+        if destination_serviced is None:
+            destination_serviced = is_destination_serviced(
+                country_code, channel_slug, database_connection_name
+            )
+        return not destination_serviced
+
     for variant, quantity in zip(variants, quantities, strict=False):
         if not replace:
             quantity += variants_quantities.get(variant.pk, 0)
@@ -331,7 +389,9 @@ def check_stock_quantity_bulk(
             if not stocks:
                 insufficient_stocks.append(
                     InsufficientStockData(
-                        variant=variant, available_quantity=available_quantity
+                        variant=variant,
+                        available_quantity=available_quantity,
+                        destination_not_serviced=destination_not_serviced(),
                     )
                 )
             elif quantity > available_quantity:

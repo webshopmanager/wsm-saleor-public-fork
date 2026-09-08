@@ -21,6 +21,12 @@ class InsufficientStockData:
     checkout_line: Optional["CheckoutLine"] = None
     order_line: Optional["OrderLine"] = None
     warehouse_pk: UUID | None = None
+    # True when no warehouse can ship to the requested country in this channel, as
+    # opposed to a warehouse that can but holds too few units. Both end up with
+    # available_quantity == 0, so quantity alone cannot tell them apart: the shopper
+    # needs "we don't ship there" in the first case and "out of stock" in the second.
+    # See Stock.objects.for_channel_and_country for what makes a warehouse eligible.
+    destination_not_serviced: bool = False
 
 
 class UnsupportedMediaProviderException(Exception):

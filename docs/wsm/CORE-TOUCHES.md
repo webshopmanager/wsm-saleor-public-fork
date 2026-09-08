@@ -10,12 +10,20 @@ The complete inventory is one command, and it must return this file's list and
 nothing else:
 
 ```
-git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py + saleor/wsm/** only
+git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py, urls.py, section 7's list, saleor/wsm/**
 ```
 
 Monkey patches: **one** (MP1 below, added by U3; the design doc budgeted
-zero, see that entry for why the stock levers do not exist). Core table edits: **zero.** Our tables carry FKs into
-core tables; core migrations are untouched.
+zero, see that entry for why the stock levers do not exist), plus one resolver
+swap Bill's secondary-categories patch performs from `saleor/wsm/apps.py`
+(section 7). Core table edits: **zero.** Our tables carry FKs into
+core tables; core migrations are untouched, and the one migration section 7
+brings in is state-only.
+
+Sections 1 to 6 are this branch's own work and touch two core files. Section 7
+is the six WSM patches that already existed before the fork, merged in from
+`wsm/bakeoff-rebase-probe`; they are the reason the guard test's allow-list is
+longer than two entries.
 
 ---
 
@@ -180,6 +188,49 @@ Monkey patches added by the merge: **zero.** MP1 below is still the only one.
   was the whole merge cost, as predicted.
 
 ---
+
+---
+
+## 7. Bill's six pre-existing WSM patches, merged in (TNO pass 1, 2026-09-08)
+
+Merged from `wsm/bakeoff-rebase-probe` (`e9ecb87`), which is the six patches
+already carried on `webshopmanager/saleor` rebased onto 3.23.31. Unlike sections
+1 to 6 these edit core `.py` files directly, which is precisely what "own our
+Saleor" has to price. **662 lines of core code across 13 files**, plus test files
+and the generated `schema.graphql`.
+
+| Patch | Core files it edits | Lines |
+|---|---|---|
+| Legacy WSM5 password hashers, upgraded on first sign-in (WSM6-1978) | `saleor/core/hashers.py` | +121 |
+| NULL-price channel listings must not crash variant pricing (WSM6-1178) | `saleor/graphql/product/types/products.py` | +5 |
+| Braintree gateway crash on order details with missing credentials | `saleor/payment/gateways/braintree/plugin.py` | +22 |
+| Secondary categories unioned into `Category.products` | none: lives in `saleor/wsm/` | 0 |
+| An undeliverable destination is not "out of stock" | `saleor/warehouse/availability.py`, `saleor/checkout/error_codes.py`, `saleor/core/exceptions.py`, `saleor/graphql/checkout/mutations/checkout_create_from_order.py`, `saleor/graphql/checkout/mutations/utils.py`, `saleor/graphql/schema.graphql` | +161 |
+| Validate a checkout is payment-ready before charging it | `saleor/checkout/checkout_cleaner.py`, `saleor/checkout/complete_checkout.py`, `saleor/graphql/payment/mutations/transaction/transaction_initialize.py`, `saleor/graphql/payment/mutations/transaction/transaction_process.py` | +373 |
+
+Also in `saleor/wsm/`, so outside the core budget: `models.py`,
+`secondary_categories.py`, `category_products.py`, `apps.py` (label `wsm`), and
+**one migration, `saleor/wsm/migrations/0001_initial.py`**.
+
+That migration is **state-only**. Its single `CreateModel` carries
+`managed = False`, so Django emits no DDL for it; it declares
+`product_secondary_categories`, a table the PartsLogic service creates and
+populates with its own Go migrations and that Saleor only ever reads. No core
+table is altered and no table is created by this branch. The guard test
+`saleor/wsm/tests/test_core_tables_untouched.py` reads the `managed` option
+rather than the table name for exactly this case, so a *managed* fork model
+still has to be `wsm_`-prefixed.
+
+Open question for the "own our Saleor" epic: `product_secondary_categories` is
+the only fork-adjacent table without the `wsm_` prefix. Renaming it is one line
+here and a coordinated change in PartsLogic's Go migrations and the 5.0
+migration ETL, so it is a decision, not a cleanup. Left as Bill wrote it.
+
+The secondary-categories patch also swaps `Category.resolve_products` at
+`ready()`. It is not counted as a core *touch* because `saleor/graphql/` stays
+byte-identical, but it is a monkey patch in the MP sense, and its copy of the
+upstream resolver body is pinned by a source digest that fails on an upstream
+rebase (`saleor/wsm/tests/test_patch.py`).
 
 # Monkey patches
 

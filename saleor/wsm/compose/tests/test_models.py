@@ -106,3 +106,49 @@ def test_stored_percent_fee_reads_amount_as_hundredths_of_a_percent(dd_product):
 )
 def test_to_cents_is_exact(amount, expected):
     assert to_cents(amount) == expected
+
+
+@pytest.fixture
+def crating_fee(dd_product):
+    return Fee.objects.create(
+        product=dd_product,
+        label="Freight crating",
+        sku="CRATE-01",
+        basis="fixed",
+        amount=Decimal("125.00"),
+        apply_to="unit",
+        required=True,
+    )
+
+
+def test_a_second_shopper_racing_the_same_fee_gets_the_row_the_first_made(
+    crating_fee, channel_USD
+):
+    """The first add of a fee is a shopper request that writes catalog rows."""
+    from saleor.wsm.compose import models as compose_models
+
+    first = compose_models._ensure_fee_variant(crating_fee, channel_USD)
+
+    # The loser of the race: same fee row, its own process, nothing memoised
+    # and no variant on the copy it read a moment before the winner saved.
+    compose_models._ENSURED_FEE_VARIANTS.discard((crating_fee.pk, channel_USD.pk))
+    loser = Fee.objects.get(pk=crating_fee.pk)
+    loser.variant = None
+
+    second = compose_models._ensure_fee_variant(loser, channel_USD)
+
+    assert second.pk == first.pk
+    assert Product.objects.filter(slug=f"wsm-fee-{crating_fee.pk}").count() == 1
+
+
+def test_the_fee_variant_sku_is_ours_and_the_merchant_sku_still_ships(
+    crating_fee, channel_USD
+):
+    """A fee's hidden variant never claims the merchant's SKU."""
+    from saleor.wsm.compose import models as compose_models
+
+    variant = compose_models._ensure_fee_variant(crating_fee, channel_USD)
+
+    assert variant.sku == f"wsm-fee-{crating_fee.pk}"
+    # CRATE-01 is what the ERP reads, and it rides the priced snapshot.
+    assert crating_fee.to_pricing().sku == "CRATE-01"

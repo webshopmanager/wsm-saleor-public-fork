@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib.staticfiles.views import serve
-from django.urls import re_path
+from django.urls import include, path, re_path
 from django.views.decorators.csrf import csrf_exempt
 
 from .core.views import jwks, serve_media_view
@@ -50,6 +50,8 @@ urlpatterns = [
         name="original-image",
     ),
     re_path(r"^\.well-known/jwks.json$", jwks, name="jwks"),
+    # WSM-FORK: one include covers every fork app, see saleor/wsm/urls.py and docs/wsm/CORE-TOUCHES.md
+    path("wsm/", include("saleor.wsm.urls")),
 ]
 
 if settings.DEBUG:

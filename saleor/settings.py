@@ -332,6 +332,8 @@ INSTALLED_APPS = [
     "saleor.schedulers",
     # WSM-FORK: fork-only app, see saleor/wsm/compose/__init__.py and docs/wsm/CORE-TOUCHES.md
     "saleor.wsm.compose",
+    # WSM-FORK: fork-only app, see saleor/wsm/dealer/__init__.py and docs/wsm/CORE-TOUCHES.md
+    "saleor.wsm.dealer",
     # External apps
     "django_measurement",
     "mptt",

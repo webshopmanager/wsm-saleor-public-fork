@@ -146,6 +146,16 @@ class Fee(models.Model):
     )
     required = models.BooleanField(default=True)
     decline_label = models.CharField(max_length=250, blank=True)
+    # The hidden variant this fee's checkout line points at (U2). Fee is our
+    # table, so the column is ours; the FK reaches into a core table, which the
+    # design allows, and no core table is altered.
+    variant = models.ForeignKey(
+        "product.ProductVariant",
+        related_name="+",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+    )
 
     class Meta:
         ordering = ("pk",)
@@ -164,3 +174,90 @@ class Fee(models.Model):
             required=self.required,
             decline_label=self.decline_label,
         )
+
+    def ensure_variant(self, channel):
+        return _ensure_fee_variant(self, channel)
+
+
+# Fee variants already built in this process, as (fee id, channel id). The
+# channel listings behind a fee variant are created once and never deleted, so
+# re-checking them on every configured add would be two queries bought for
+# nothing. ponytail: a process-lifetime memo, not a cache with a TTL; the
+# ceiling is that deleting a fee's channel listing by hand needs a restart.
+_ENSURED_FEE_VARIANTS: set[tuple[int, int]] = set()
+
+
+def _ensure_fee_variant(fee, channel):
+    """The hidden variant a fee's checkout line points at, created on first use.
+
+    A fee has to be its own checkout line to reach the order with its own SKU and
+    label, which is what 5.0's product_fee did and what the ERP export reads. A
+    line needs a variant, so each fee owns one: product type "WSM Fee", one
+    product, one variant, one channel listing at zero. The listing is a
+    placeholder Saleor requires, never a price: the money is always the
+    price_override the view computes.
+    """
+    from django.utils import timezone
+
+    from ...product import ProductTypeKind
+    from ...product.models import (
+        Product,
+        ProductChannelListing,
+        ProductType,
+        ProductVariant,
+        ProductVariantChannelListing,
+    )
+
+    if (fee.pk, channel.pk) in _ENSURED_FEE_VARIANTS and fee.variant_id:
+        return fee.variant
+
+    variant = fee.variant
+    if variant is None:
+        product_type, _ = ProductType.objects.get_or_create(
+            slug="wsm-fee",
+            defaults={
+                "name": "WSM Fee",
+                "kind": ProductTypeKind.NORMAL,
+                "has_variants": False,
+                "is_shipping_required": False,
+            },
+        )
+        product = Product.objects.create(
+            product_type=product_type,
+            name=fee.label,
+            slug=f"wsm-fee-{fee.pk}",
+        )
+        variant = ProductVariant.objects.create(
+            product=product,
+            name=fee.label[:255],
+            sku=fee.sku or f"WSM-FEE-{fee.pk}",
+            track_inventory=False,
+        )
+        fee.variant = variant
+        fee.save(update_fields=["variant"])
+
+    now = timezone.now()
+    ProductChannelListing.objects.get_or_create(
+        product_id=variant.product_id,
+        channel=channel,
+        defaults={
+            "is_published": True,
+            "published_at": now,
+            # Never in a listing and never in search: a fee is not something a
+            # shopper can find, only something a line can point at.
+            "visible_in_listings": False,
+            "available_for_purchase_at": now,
+            "currency": channel.currency_code,
+            "discounted_price_amount": Decimal("0"),
+        },
+    )
+    ProductVariantChannelListing.objects.get_or_create(
+        variant=variant,
+        channel=channel,
+        defaults={
+            "currency": channel.currency_code,
+            "price_amount": Decimal("0"),
+        },
+    )
+    _ENSURED_FEE_VARIANTS.add((fee.pk, channel.pk))
+    return variant

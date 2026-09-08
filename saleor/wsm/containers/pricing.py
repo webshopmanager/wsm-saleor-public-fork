@@ -231,6 +231,7 @@ def add_kit_to_checkout(checkout, kit, quantity, user=None, tier_lookup=None):
     from ...core.utils.metadata_manager import MetadataItem
     from ...graphql.checkout.mutations.utils import CheckoutLineData
     from ...plugins.manager import get_plugins_manager
+    from ..checkout import check_addable
 
     priced = price_kit(
         kit.pricing_members(checkout.channel),
@@ -272,6 +273,17 @@ def add_kit_to_checkout(checkout, kit, quantity, user=None, tier_lookup=None):
     manager = get_plugins_manager(allow_replica=False)
     checkout_info = fetch_checkout_info(checkout, [], manager)
     site_settings = Site.objects.get_current().settings
+    # The checks `checkoutLinesAdd` runs before the identical write. A kit member
+    # that went out of stock or off sale is refused as a whole: half a kit in the
+    # cart is worse than none, and the money spec prices the members together.
+    check_addable(
+        checkout,
+        checkout_info.channel,
+        variants,
+        lines_data,
+        site_settings=site_settings,
+        delivery_method_info=checkout_info.get_delivery_method_info(),
+    )
     add_variants_to_checkout(
         checkout,
         variants,

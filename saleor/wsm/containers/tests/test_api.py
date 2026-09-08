@@ -207,3 +207,36 @@ def test_a_shopper_with_no_dealer_row_gets_the_kit_discount(
         "27.00",
     ]
     assert response.json()["kitTotal"] == "54.00"
+
+
+# --- finding 8: the same two holes on the kit write path ---------------------
+
+
+def test_a_kit_quantity_that_is_not_a_number_is_refused(client, checkout, kit):
+    response = client.post(
+        KIT_LINE_URL,
+        data=json.dumps(
+            {
+                "checkoutId": gid("Checkout", checkout.token),
+                "collectionId": gid("Collection", kit.collection_id),
+                "quantity": "x",
+            }
+        ),
+        content_type="application/json",
+        **HEADERS,
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"violations": ["quantity must be a whole number"]}
+
+
+def test_a_kit_member_not_available_for_purchase_is_refused(client, checkout, kit):
+    member = kit.members.first()
+    member.variant.product.channel_listings.filter(channel=checkout.channel).update(
+        available_for_purchase_at=None
+    )
+
+    response = post_kit(client, checkout, kit.collection_id)
+
+    assert response.status_code == 422
+    assert checkout.lines.count() == 0

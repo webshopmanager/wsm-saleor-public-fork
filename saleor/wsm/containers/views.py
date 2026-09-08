@@ -20,6 +20,7 @@ from django.views.decorators.http import require_POST
 from ...account.models import User
 from ...checkout.models import Checkout
 from ...core.db.connection import allow_writer
+from ..checkout import LineRefused, whole_number
 from ..dealer import pricing as dealer_pricing
 from ..http import storefront_key_required
 from . import pricing
@@ -117,7 +118,9 @@ def kit_line(request):
     if collection_pk is None or not collection_pk.isdigit():
         return _not_found("kit")
 
-    quantity = int(body.get("quantity") or 1)
+    quantity = whole_number(body.get("quantity") or 1)
+    if quantity is None:
+        return _refused("quantity must be a whole number")
     if quantity < 1:
         return _refused("quantity must be at least 1")
 
@@ -157,6 +160,8 @@ def kit_line(request):
         )
     except pricing.KitRefusal as refusal:
         return _refused(str(refusal))
+    except LineRefused as refusal:
+        return JsonResponse({"violations": refusal.violations}, status=422)
 
     return JsonResponse(
         {

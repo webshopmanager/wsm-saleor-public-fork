@@ -26,6 +26,7 @@ from typing import NamedTuple
 
 import graphene
 from django.conf import settings
+from django.contrib.sites.models import Site
 from django.db import transaction
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -39,6 +40,7 @@ from ...core.db.connection import allow_writer
 from ...core.prices import quantize_price
 from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...product.models import ProductVariant, ProductVariantChannelListing
+from ..checkout import LineRefused, check_addable, whole_number
 from ..http import storefront_key_required
 from . import pricing
 from .no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
@@ -156,10 +158,9 @@ def dealer_line(request):
     if variant is None:
         return _error("variantNotFound", 404)
 
-    try:
-        quantity = int(body.get("quantity", 1))
-    except (TypeError, ValueError):
-        quantity = 0
+    quantity = whole_number(body.get("quantity", 1))
+    if quantity is None:
+        return _error("quantityMustBeAWholeNumber", 422)
     if quantity < 1:
         return _error("invalidQuantity", 400)
 
@@ -175,7 +176,12 @@ def dealer_line(request):
     if breaks and winner is None:
         return _error("belowBreak", 422)
 
-    line = _add_line(checkout, channel, variant, quantity, winner)
+    try:
+        line = _add_line(checkout, channel, variant, quantity, winner)
+    except LineRefused as refusal:
+        return JsonResponse(
+            {"error": "lineRefused", "violations": refusal.violations}, status=422
+        )
     return JsonResponse(
         {
             "lineId": graphene.Node.to_global_id("CheckoutLine", line.pk),
@@ -211,6 +217,26 @@ def _add_line(checkout, channel, variant, quantity, winner):
             )
         )
 
+    line_data = CheckoutLineData(
+        variant_id=str(variant.pk),
+        quantity=quantity,
+        quantity_to_update=True,
+        custom_price=winner.amount if winner else None,
+        custom_price_to_update=bool(winner),
+        custom_price_reason=PRICE_OVERRIDE_REASON if winner else None,
+        custom_price_reason_to_update=bool(winner),
+        metadata_list=metadata,
+    )
+    # The checks `checkoutLinesAdd` runs before the identical write. Raises
+    # `LineRefused`, which the view turns into a 422.
+    check_addable(
+        checkout,
+        channel,
+        [variant],
+        [line_data],
+        site_settings=Site.objects.get_current().settings,
+    )
+
     with transaction.atomic():
         before = set(
             CheckoutLine.objects.filter(checkout_id=checkout.pk).values_list(
@@ -220,18 +246,7 @@ def _add_line(checkout, channel, variant, quantity, winner):
         add_variants_to_checkout(
             checkout,
             [variant],
-            [
-                CheckoutLineData(
-                    variant_id=str(variant.pk),
-                    quantity=quantity,
-                    quantity_to_update=True,
-                    custom_price=winner.amount if winner else None,
-                    custom_price_to_update=bool(winner),
-                    custom_price_reason=PRICE_OVERRIDE_REASON if winner else None,
-                    custom_price_reason_to_update=bool(winner),
-                    metadata_list=metadata,
-                )
-            ],
+            [line_data],
             channel,
             calculate_stocks_with_shipping_zones=False,
         )
@@ -275,7 +290,10 @@ def dealer_line_reprice(request):
     # is not this app's to decide. Compose and the kit endpoint stamp their own
     # reason; clearing one here would sell a configured line at its bare base
     # price. A line with no override at all is nobody's and is fair game.
-    if line.price_override is not None and line.price_override_reason != PRICE_OVERRIDE_REASON:
+    if (
+        line.price_override is not None
+        and line.price_override_reason != PRICE_OVERRIDE_REASON
+    ):
         return _error("foreignPriceOverride", 409)
 
     user = _customer(body.get("customerId"), WRITER)

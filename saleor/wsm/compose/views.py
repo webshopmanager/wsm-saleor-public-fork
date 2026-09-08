@@ -34,6 +34,7 @@ from ...core.utils.metadata_manager import MetadataItem
 from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...plugins.manager import get_plugins_manager
 from ...product.models import Product, ProductVariant, ProductVariantChannelListing
+from ..checkout import LineRefused, check_addable, whole_number
 from ..http import storefront_key_required
 from . import pricing
 from .models import Fee, OptionSet, to_cents
@@ -188,7 +189,11 @@ def configured_line(request):
     if product_pk is None or variant_pk is None:
         return _not_found("product")
 
-    quantity = int(body.get("quantity") or 1)
+    quantity = whole_number(body.get("quantity") or 1)
+    if quantity is None:
+        return JsonResponse(
+            {"violations": ["quantity must be a whole number"]}, status=422
+        )
     if quantity < 1:
         return JsonResponse({"violations": ["quantity must be at least 1"]}, status=422)
 
@@ -308,6 +313,21 @@ def configured_line(request):
     manager = get_plugins_manager(allow_replica=False)
     checkout_info = fetch_checkout_info(checkout, [], manager)
     site_settings = Site.objects.get_current().settings
+    try:
+        # The checks `checkoutLinesAdd` runs before the identical write. Fee
+        # variants are in the set on purpose: they are published, available and
+        # untracked, so they pass, and their quantity still counts towards the
+        # shop's per-checkout limit exactly as it does through the mutation.
+        check_addable(
+            checkout,
+            checkout_info.channel,
+            variants,
+            lines_data,
+            site_settings=site_settings,
+            delivery_method_info=checkout_info.get_delivery_method_info(),
+        )
+    except LineRefused as refusal:
+        return JsonResponse({"violations": refusal.violations}, status=422)
     add_variants_to_checkout(
         checkout,
         variants,

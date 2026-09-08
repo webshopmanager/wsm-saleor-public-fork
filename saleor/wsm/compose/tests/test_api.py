@@ -427,3 +427,47 @@ def test_naming_a_required_fee_as_accepted_is_not_an_error(
 
     assert without.status_code == 200
     assert without.json()["feeTotal"] == FEE_AMOUNT
+
+
+# --- finding 8: a posted quantity that is not a number is a 422, not a 500 ---
+
+
+def test_a_quantity_that_is_not_a_number_is_refused(client, checkout, stage_2_kit):
+    response = client.post(
+        CONFIGURED_LINE_URL,
+        data=json.dumps(
+            {
+                "checkoutId": gid("Checkout", checkout.token),
+                "channel": checkout.channel.slug,
+                "productId": gid("Product", stage_2_kit.product_id),
+                "variantId": gid("ProductVariant", stage_2_kit.pk),
+                "quantity": "x",
+                "selections": [],
+            }
+        ),
+        content_type="application/json",
+        **HEADERS,
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"violations": ["quantity must be a whole number"]}
+
+
+def test_a_variant_not_available_for_purchase_is_refused(
+    client, checkout, stage_2_kit, omit_parts
+):
+    """The stock mutation refuses this; so does the fork's own write path."""
+    stage_2_kit.product.channel_listings.filter(channel=checkout.channel).update(
+        available_for_purchase_at=None
+    )
+    option_set, values = omit_parts
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+    )
+
+    assert response.status_code == 422
+    assert checkout.lines.count() == 0

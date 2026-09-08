@@ -385,11 +385,21 @@ move together. Fixing only the spread would size a discount on the dealer line's
 money and then hand all of it to the retail lines, which is worse than stock: the
 merchant would give a deeper retail discount because a dealer line was in the cart.
 
-Rebinding: `propagate_order_discount_on_order_prices` is imported by name into
+Rebinding: `import` binds a name, so swapping the defining module's attribute
+leaves every module that imported the function by name still calling the
+original. `propagate_order_discount_on_order_prices` is imported into
 `saleor.plugins.manager`, and `create_discount_objects_for_order_promotions` into
-`saleor.discount.utils.checkout` and `saleor.discount.utils.order`. Those bindings
-are rewritten too. The other two have a single call site each, inside their own
-defining module, so a module-attribute swap is enough.
+`saleor.discount.utils.checkout` and `saleor.discount.utils.order`; the other
+three are held only by the module that defines them.
+
+All five are rebound at every site they are found at, by the same sweep MP1 uses.
+The sites are pinned in `saleor/wsm/patches.py` next to the function they belong
+to, and DISCOVERED from `sys.modules` at `ready()`: a discovered set that differs
+from the pinned one raises `ImproperlyConfigured` before the process serves a
+request. So an upstream bump that adds a sixth import site is a boot error naming
+the function and the new module, rather than an order-level discount that quietly
+lands on a dealer line. The sweep matches by identity, not by name, so
+`import ... as` cannot hide a site either.
 
 Why (requirement 2.4, Dana's ruling 2026-09-08): "no discount combines with dealer
 pricing", as a per-tenant toggle defaulting OFF. This is the "known limit,

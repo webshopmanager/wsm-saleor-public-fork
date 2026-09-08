@@ -117,14 +117,15 @@ def test_stamping_leaves_other_metadata_alone(collection, product_list):
 
 
 def test_the_merchant_screens_register(db):
-    """The admin lives on the AdminSite U2 mounts, absent here: probe one."""
-    from django.contrib.admin import AdminSite
+    """The screens are on the ONE AdminSite the compose unit mounts at /admin/.
 
-    from saleor.wsm.containers import admin as containers_admin
+    Asserted against the real site rather than a probe now that both units sit
+    on one branch: registering onto a throwaway AdminSite would still pass if
+    the import at the bottom of admin.py were deleted.
+    """
+    from saleor.wsm.compose.admin import site
 
-    site = containers_admin.register(AdminSite(name="probe"))
-
-    assert set(site._registry) == {SeriesConfig, KitConfig}
+    assert {SeriesConfig, KitConfig} <= set(site._registry)
     assert site._registry[SeriesConfig].raw_id_fields == ("collection",)
     kit_admin = site._registry[KitConfig]
     assert kit_admin.raw_id_fields == ("collection",)

@@ -2,33 +2,16 @@
 """The merchant's screens for series and kits.
 
 These land on the SAME AdminSite the compose unit mounts at /admin/: one login,
-one sidebar, one merchant. That site is what U2 adds to core's settings, so on a
-containers-only branch there is nothing to register onto and `register()` is
-called by a test instead. The collection and the variant are raw id fields on
+one sidebar, one merchant. That site is what U2 adds to core's settings. The collection and the variant are raw id fields on
 purpose: a select box that loads every collection in a real catalog is a screen
 that never opens.
 """
 
 from django.contrib import admin
 
+from ..compose.admin import WsmAdminMixin
+from ..compose.admin import site as merchant_site
 from .models import KitConfig, KitMember, SeriesConfig
-
-
-class WsmAdminMixin:
-    """Saleor's User has no `has_module_perms`, so the admin cannot ask for one.
-
-    ponytail: the twin of the mixin in saleor/wsm/compose/admin.py, duplicated
-    rather than imported because that file is not on this branch yet. The two
-    collapse into one import the day both units sit on one branch.
-    """
-
-    def has_module_permission(self, request):
-        user = request.user
-        if not user.is_active or not user.is_staff:
-            return False
-        if user.is_superuser:
-            return True
-        return any(self.get_model_perms(request).values())
 
 
 class SeriesConfigAdmin(WsmAdminMixin, admin.ModelAdmin):
@@ -60,9 +43,4 @@ def register(site):
     return site
 
 
-try:
-    from ..compose.admin import site as _merchant_site
-except ImportError:  # the compose unit has not landed on this branch yet
-    pass
-else:
-    register(_merchant_site)
+register(merchant_site)

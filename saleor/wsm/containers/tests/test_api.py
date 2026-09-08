@@ -39,17 +39,16 @@ def kit(collection, product_list):
     return kit
 
 
-def post_kit(client, checkout, collection_id, quantity=1):
+def post_kit(client, checkout, collection_id, quantity=1, customer=None):
+    body = {
+        "checkoutId": gid("Checkout", checkout.token),
+        "collectionId": gid("Collection", collection_id),
+        "quantity": quantity,
+    }
+    if customer is not None:
+        body["customerId"] = gid("User", customer.pk)
     return client.post(
-        KIT_LINE_URL,
-        data=json.dumps(
-            {
-                "checkoutId": gid("Checkout", checkout.token),
-                "collectionId": gid("Collection", collection_id),
-                "quantity": quantity,
-            }
-        ),
-        content_type="application/json",
+        KIT_LINE_URL, data=json.dumps(body), content_type="application/json"
     )
 
 
@@ -142,7 +141,7 @@ def test_a_dealer_tier_reaches_the_written_line(client, checkout, kit, monkeypat
         return Decimal("5.00") if variant.pk == cheap else None
 
     monkeypatch.setattr(
-        "saleor.wsm.containers.views.resolve_tier_lookup", lambda: tier_lookup
+        "saleor.wsm.containers.views.resolve_tier_lookup", lambda *_: tier_lookup
     )
 
     response = post_kit(client, checkout, kit.collection_id)
@@ -156,3 +155,47 @@ def test_a_dealer_tier_reaches_the_written_line(client, checkout, kit, monkeypat
         "27.00",
     ]
     assert response.json()["kitTotal"] == "50.00"
+
+
+def test_a_real_dealer_tier_beats_the_kit_discount(client, checkout, kit, customer_user):
+    """The wired seam, with no injection: wsm.dealer answers, better-of decides.
+
+    The 30.00 member is tiered at 25.00, which beats its kit-discounted 27.00,
+    so that line takes the tier and the kit discount contributes nothing to it.
+    The other two are untouched at 9.00 and 18.00, which is the whole point of
+    better of, never both: a dealer never pays more than retail on any line,
+    and never collects both reductions on one.
+    """
+    from saleor.wsm.dealer.models import DealerCustomer, DealerGroup, TierPrice
+
+    group = DealerGroup.objects.create(code="tier-1", name="Tier 1")
+    DealerCustomer.objects.create(user=customer_user, group=group)
+    dear = kit.members.order_by("-sort_order").first().variant
+    TierPrice.objects.create(
+        variant=dear, group=group, min_quantity=1, amount=Decimal("25.00")
+    )
+
+    response = post_kit(client, checkout, kit.collection_id, customer=customer_user)
+
+    assert response.status_code == 200
+    assert [line["unitPrice"] for line in response.json()["lines"]] == [
+        "9.00",
+        "18.00",
+        "25.00",
+    ]
+    assert response.json()["kitTotal"] == "52.00"
+
+
+def test_a_shopper_with_no_dealer_row_gets_the_kit_discount(
+    client, checkout, kit, customer_user
+):
+    """The same wired path, for the customer the merchant never tiered."""
+    response = post_kit(client, checkout, kit.collection_id, customer=customer_user)
+
+    assert response.status_code == 200
+    assert [line["unitPrice"] for line in response.json()["lines"]] == [
+        "9.00",
+        "18.00",
+        "27.00",
+    ]
+    assert response.json()["kitTotal"] == "54.00"

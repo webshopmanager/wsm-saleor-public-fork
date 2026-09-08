@@ -128,6 +128,32 @@ resolves a `wsm-` route name.
 
 ---
 
+## 6. Nothing. What the merge added, and where (U6, 2026-09-08)
+
+Landing all three units on one branch added **zero** lines to a file Saleor
+owns. Sections 1 to 5 are still the complete core-touch list, and the command at
+the top of this file still returns `saleor/settings.py`, `saleor/urls.py` and
+`saleor/wsm/**` and nothing else. What the merge did add lives entirely inside
+`saleor/wsm/`, and is listed here because a reviewer looking for the seam should
+not have to diff three branches to find it.
+
+| File | What changed | Why it could not stay as it was |
+|---|---|---|
+| `saleor/wsm/containers/views.py` | `resolve_tier_lookup` returns a real lookup instead of `None` | It was written as the seam and documented as returning retail "until wsm.dealer lands". It has landed. |
+| `saleor/wsm/compose/apps.py` | the receiver's label guard is a three-label set, and it is connected without a `sender` | `post_migrate` fires once per app; with `sender=self` it only ever saw `wsm_compose`, so `wsm_dealer` and `wsm_containers` got no permission rows and a merchant who is not a superuser could not be granted their screens. |
+| `saleor/wsm/dealer/admin.py` | registers on the compose `AdminSite`, with `WsmAdminMixin` | `@admin.register(Model)` puts a screen on Django's default `admin.site`, which this fork does not mount: the four dealer screens existed and were unreachable. Without the mixin they also 500 for a non-superuser, because Saleor's `User` has no `has_module_perms`. |
+| `saleor/wsm/containers/admin.py` | imports `WsmAdminMixin` rather than repeating it, and registers unconditionally | Its own docstring called for exactly this once both units sat on one branch. The `try: import ... except ImportError` around the registration was there for a branch that no longer exists, and a swallowed `ImportError` is how screens go missing silently. |
+| `saleor/wsm/compose/django_auth_migrations/0002_auth_models_state_only.py` | new, state-only, no database operations | Pre-existing on U2 and not caused by the merge: `makemigrations --check` failed on every branch, because `django_auth` has three models in the app registry and an empty migration history. See the file's own docstring. Fixed here rather than filed, because a merge branch whose acceptance bar includes a clean `makemigrations --check` cannot hand that check on. |
+
+The tier lookup reads every member's breaks in ONE query before pricing starts,
+rather than one query per member from inside the loop, and makes no query at all
+for a shopper who is not signed in. Better-of on a kit member is still decided by
+`price_kit`, which already took a `tier_lookup`: no money rule moved.
+
+Monkey patches added by the merge: **zero.** MP1 below is still the only one.
+
+---
+
 ## What U4 deliberately did NOT touch
 
 - **No GraphQL.** A series collection page is the STOCK collection page. The
@@ -146,10 +172,10 @@ resolves a `wsm-` route name.
   registers onto the AdminSite that U2 mounts; on a containers-only branch there
   is nothing to register onto and the screens are exercised by calling
   `admin.register(AdminSite())` in a test. When U2 and U4 sit on one branch the
-  screens appear with no further edit, and the `post_migrate` permission receiver
-  in `saleor/wsm/compose/apps.py` needs `wsm_containers` added to its label guard
-  so a non-superuser merchant is grantable on them. That one-word follow-up is
-  the whole merge cost.
+  screens appear with no further edit. The `post_migrate` permission receiver in
+  `saleor/wsm/compose/apps.py` needed `wsm_containers` in its label guard so a
+  non-superuser merchant is grantable on them: done in section 6 below, and it
+  was the whole merge cost, as predicted.
 
 ---
 

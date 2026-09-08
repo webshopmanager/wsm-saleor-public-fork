@@ -12,6 +12,7 @@ import binascii
 import json
 from decimal import Decimal
 
+from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
@@ -19,6 +20,7 @@ from django.views.decorators.http import require_POST
 from ...account.models import User
 from ...checkout.models import Checkout
 from ...core.db.connection import allow_writer
+from ..dealer import pricing as dealer_pricing
 from . import pricing
 from .models import KitConfig
 
@@ -58,13 +60,39 @@ def _refused(message: str):
     return JsonResponse({"violations": [message]}, status=422)
 
 
-def resolve_tier_lookup():
-    """Return the dealer tier lookup, or None for retail. The seam, in one place.
+def resolve_tier_lookup(kit, checkout, user):
+    """Return the dealer tier lookup for this buyer, or None for plain retail.
 
-    wsm.dealer lands in its own unit and this app never imports it; when it does
-    land, this returns its `tier_lookup(variant, user, quantity) -> amount | None`
-    and the better-of rule in pricing.price_kit starts firing. Retail until then.
+    The seam, in one place. `pricing.price_kit` already takes the better of a
+    tier and the kit-discounted unit, so wiring wsm.dealer in is handing it the
+    callable that app already exposes: nothing about the kit money changes here.
+
+    Every break for every member is read in ONE query, up front, rather than one
+    query per member from inside the pricing loop: `ladders` is built to answer
+    a page of variants at a time and a kit is smaller than a page. A shopper who
+    is not signed in costs nothing at all, because there is no query to make.
+
+    The writer connection is passed for the reason the dealer endpoints pass it:
+    a price about to be stamped on a checkout line is read from the database the
+    line is written to, not from a replica that may lag behind the merchant.
     """
+    if user is None:
+        return None
+
+    breaks = dealer_pricing.ladders(
+        user,
+        checkout.channel,
+        list(kit.members.values_list("variant_id", flat=True)),
+        database_connection_name=settings.DATABASE_CONNECTION_DEFAULT_NAME,
+    )
+    if not breaks:
+        return None
+
+    def tier_lookup(variant, _user, quantity):
+        winner = dealer_pricing.best_break(breaks.get(variant.pk, []), quantity)
+        return winner.amount if winner is not None else None
+
+    return tier_lookup
 
 
 @csrf_exempt
@@ -119,7 +147,11 @@ def kit_line(request):
 
     try:
         group_id, priced, lines_by_variant = pricing.add_kit_to_checkout(
-            checkout, kit, quantity, user=user, tier_lookup=resolve_tier_lookup()
+            checkout,
+            kit,
+            quantity,
+            user=user,
+            tier_lookup=resolve_tier_lookup(kit, checkout, user),
         )
     except pricing.KitRefusal as refusal:
         return _refused(str(refusal))

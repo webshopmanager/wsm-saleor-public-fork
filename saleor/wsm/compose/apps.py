@@ -3,6 +3,10 @@ from django.apps import AppConfig
 from django.contrib.auth.apps import AuthConfig
 from django.db.models.signals import post_migrate
 
+# The apps whose models a merchant is granted on. Adding the next fork app is
+# adding its label here; the receiver itself never changes.
+FORK_APP_LABELS = frozenset({"wsm_compose", "wsm_dealer", "wsm_containers"})
+
 
 def create_wsm_permissions(sender, using=None, **kwargs):
     """Create add/change/delete/view rows for this app's models, in Saleor's table.
@@ -11,8 +15,12 @@ def create_wsm_permissions(sender, using=None, **kwargs):
     renamed to `permission_permission`; that is exactly why `WsmAuthConfig` below
     unhooks it. Something still has to create the rows a merchant is granted, so
     this does, against `saleor.permission.models.Permission`, for fork apps only.
+
+    Every fork app, not just this one: wsm_dealer and wsm_containers put their
+    screens on the AdminSite this app mounts, and a merchant who is not a
+    superuser can only be granted a permission row that exists.
     """
-    if sender.label != "wsm_compose":
+    if sender.label not in FORK_APP_LABELS:
         return
 
     from django.contrib.auth import get_permission_codename
@@ -61,9 +69,11 @@ class ComposeConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
 
     def ready(self):
+        # No `sender`: post_migrate fires once per app and the guard above picks
+        # the fork's out. Connecting per app config would mean each fork app
+        # importing this one just to hook a receiver it does not own.
         post_migrate.connect(
             create_wsm_permissions,
-            sender=self,
             dispatch_uid="wsm_compose.create_wsm_permissions",
         )
 

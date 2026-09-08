@@ -271,6 +271,12 @@ def dealer_line_reprice(request):
     )
     if line is None:
         return _error("lineNotFound", 404)
+    # Repricing means deciding this line's price, and a price another app wrote
+    # is not this app's to decide. Compose and the kit endpoint stamp their own
+    # reason; clearing one here would sell a configured line at its bare base
+    # price. A line with no override at all is nobody's and is fair game.
+    if line.price_override is not None and line.price_override_reason != PRICE_OVERRIDE_REASON:
+        return _error("foreignPriceOverride", 409)
 
     user = _customer(body.get("customerId"), WRITER)
     winner = pricing.dealer_price_for(

@@ -216,3 +216,35 @@ def test_reprice_puts_the_override_back_when_the_quantity_reaches_a_break(
     line.refresh_from_db()
     assert line.price_override == Decimal("7.00")
     assert json.loads(line.metadata[LINE_METADATA_KEY])["minQuantity"] == 10
+
+
+# --- finding 3: reprice never clears an override another app wrote -----------
+
+
+def test_reprice_refuses_a_line_priced_by_another_app(
+    client, checkout, variant, customer_user, tiers, channel_USD
+):
+    """A compose-priced line is not this app's to zero out."""
+    post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
+    line = CheckoutLine.objects.get(checkout_id=checkout.pk)
+    line.quantity = 2
+    line.price_override = Decimal("99.00")
+    line.price_override_reason = "wsm.compose"
+    line.save(update_fields=["quantity", "price_override", "price_override_reason"])
+
+    response = post(
+        client,
+        REPRICE_URL,
+        {
+            "checkoutId": gid("Checkout", checkout.pk),
+            "customerId": gid("User", customer_user.pk),
+            "lineId": gid("CheckoutLine", line.pk),
+            "channel": channel_USD.slug,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "foreignPriceOverride"}
+    line.refresh_from_db()
+    assert line.price_override == Decimal("99.00")
+    assert line.price_override_reason == "wsm.compose"

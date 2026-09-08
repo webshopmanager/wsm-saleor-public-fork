@@ -202,7 +202,8 @@ at that point; MP2 arrived after it, in U7.
 ## What U4 deliberately did NOT touch
 
 - **No GraphQL.** A series collection page is the STOCK collection page. The
-  series facts (`brand`, `axes`, `partitioning_axis`, `miss_message`) are written
+  series facts (`brand`, `axes`, `partitioning_axis`, `miss_message`,
+  `published`) are written
   onto the Collection's own metadata under the key `wsm.series` by
   `SeriesConfig.save`, through the stock metadata API, so the storefront and the
   search indexer read them with the query they already make. No new field, no

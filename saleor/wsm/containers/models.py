@@ -122,6 +122,12 @@ class SeriesConfig(models.Model):
                         "axes": list(self.axes or []),
                         "partitioning_axis": self.partitioning_axis,
                         "miss_message": self.miss_message,
+                        # Visibility rides in the blob because the stamp fires
+                        # on EVERY save: presence of the key means a series
+                        # exists, never that it is live. Readers default a
+                        # missing `published` to hidden, so an unpublish must
+                        # land here as False or a dark series stays lit.
+                        "published": self.published,
                     },
                     sort_keys=True,
                 )

@@ -1,4 +1,5 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
+import datetime
 import json
 from decimal import Decimal
 
@@ -217,3 +218,51 @@ def test_reprice_puts_the_override_back_when_the_quantity_reaches_a_break(
     line.refresh_from_db()
     assert line.price_override == Decimal("7.00")
     assert json.loads(line.metadata[LINE_METADATA_KEY])["minQuantity"] == 10
+
+
+def test_a_dealer_add_expires_the_checkout_prices(
+    client, checkout, variant, customer_user, tiers, channel_USD
+):
+    """Endpoint 4 owes the checkout the same tail a stock mutation runs."""
+    from django.utils import timezone
+
+    from ....checkout.models import Checkout
+
+    later = timezone.now() + datetime.timedelta(hours=1)
+    Checkout.objects.filter(pk=checkout.pk).update(price_expiration=later)
+
+    post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
+
+    checkout.refresh_from_db()
+    assert checkout.price_expiration < later
+
+
+def test_a_reprice_that_moves_the_price_expires_it_and_one_that_does_not_leaves_it(
+    client, checkout, variant, customer_user, tiers, channel_USD
+):
+    """The write is idempotent, so the invalidation is too."""
+    from django.utils import timezone
+
+    from ....checkout.models import Checkout
+
+    post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
+    line = CheckoutLine.objects.get(checkout_id=checkout.pk)
+    body = {
+        "checkoutId": gid("Checkout", checkout.pk),
+        "customerId": gid("User", customer_user.pk),
+        "lineId": gid("CheckoutLine", line.pk),
+        "channel": channel_USD.slug,
+    }
+
+    # Nothing moved: the line is already on its break at this quantity.
+    later = timezone.now() + datetime.timedelta(hours=1)
+    Checkout.objects.filter(pk=checkout.pk).update(price_expiration=later)
+    assert post(client, REPRICE_URL, body).json()["unitPrice"] == "8.00"
+    checkout.refresh_from_db()
+    assert checkout.price_expiration == later
+
+    # The quantity reached the next rung, so the price moved and the prices die.
+    CheckoutLine.objects.filter(pk=line.pk).update(quantity=10)
+    assert post(client, REPRICE_URL, body).json()["unitPrice"] == "7.00"
+    checkout.refresh_from_db()
+    assert checkout.price_expiration < later

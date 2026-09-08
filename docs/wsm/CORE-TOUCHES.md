@@ -13,8 +13,9 @@ nothing else:
 git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py + saleor/wsm/** only
 ```
 
-Monkey patches: **one** (MP1 below, added by U3; the design doc budgeted
-zero, see that entry for why the stock levers do not exist). Core table edits: **zero.** Our tables carry FKs into
+Monkey patches: **two** (MP1, added by U3, and MP2, added by U7; the design doc
+budgeted zero, see those entries for why the stock levers do not exist). Core
+table edits: **zero.** Our tables carry FKs into
 core tables; core migrations are untouched.
 
 ---
@@ -152,7 +153,8 @@ rather than one query per member from inside the loop, and makes no query at all
 for a shopper who is not signed in. Better-of on a kit member is still decided by
 `price_kit`, which already took a `tier_lookup`: no money rule moved.
 
-Monkey patches added by the merge: **zero.** MP1 below is still the only one.
+Monkey patches added by the merge: **zero.** MP1 was the only one on the branch
+at that point; MP2 arrived after it, in U7.
 
 ---
 
@@ -183,8 +185,8 @@ Monkey patches added by the merge: **zero.** MP1 below is still the only one.
 
 # Monkey patches
 
-Expected: zero. Actual: **one**, in U3. Every entry names the exact function it
-replaces and the upstream change that would delete it.
+Expected: zero. Actual: **two**, in U3 and U7. Every entry names the exact
+function it replaces and the upstream change that would delete it.
 
 ## MP1. Dealer lines are excluded from checkout line discounts
 
@@ -230,9 +232,92 @@ on the checkout path, for example a `CheckoutLine.discounts_excluded` flag or a
 `prepare_checkout_line_discount_objects_for_catalogue_promotions`, the way
 `is_gift` already is.
 
-Known limit, deliberate: this covers LINE-level discounts (catalogue promotions,
-`SPECIFIC_PRODUCT` and `apply_once_per_order` vouchers). An ENTIRE_ORDER voucher
-is a checkout-level discount in Saleor and still reduces the order total that a
-dealer line contributes to. Filed rather than fixed here because the fix belongs
-with the order-level discount distribution, which U4's kit money spec also
-touches.
+Scope: this covers LINE-level discounts (catalogue promotions, `SPECIFIC_PRODUCT`
+and `apply_once_per_order` vouchers). ENTIRE_ORDER vouchers and order promotions
+are checkout-level discounts in Saleor, they never reach a line, and MP1 leaves
+them alone. U3 filed that gap rather than fixing it; MP2 below closes it.
+
+---
+
+## MP2. Dealer lines are excluded from ORDER-LEVEL discounts
+
+Installed by `saleor/wsm/dealer/apps.py` `DealerConfig.ready()`, right after MP1;
+the whole patch is `saleor/wsm/dealer/no_stacking_order_level.py`. Five functions
+are wrapped, none is reimplemented: each wrapper calls the original with a smaller
+set of lines and puts the dealer lines back at the price they already carried.
+
+MP1 closed line-level discounts. It cannot see this one: an ENTIRE_ORDER voucher
+never reaches a line, so there is no line voucher for MP1 to clear.
+`attach_voucher_to_line_info` attaches a voucher only when it is `SPECIFIC_PRODUCT`
+or `apply_once_per_order` (`saleor/discount/utils/voucher.py` lines 194-217). An
+ENTIRE_ORDER voucher is one amount on the checkout, and every line pays a share.
+
+| Replaced function | Module | What the wrapper does |
+|---|---|---|
+| `get_voucher_discount_for_checkout(manager, voucher, checkout_info, lines, address)` | `saleor/checkout/utils.py` | For an order-level voucher, calls the original with the retail lines only, so the percentage is taken of the retail subtotal. |
+| `_propagate_checkout_discount_on_checkout_lines_prices(lines, total_discount, currency)` | `saleor/checkout/base_calculations.py` | Spreads over the retail lines only, then yields each dealer line at its own `calculate_base_line_total_price`. |
+| `propagate_order_discount_on_order_prices(order, lines)` | `saleor/order/base_calculations.py` | Calls the original with the retail lines, so every `OrderDiscount` row is resized from the retail subtotal, and adds the dealer lines' total back into the returned subtotal. |
+| `propagate_order_discount_on_order_lines_prices(lines, base_subtotal, subtotal_discount)` | `saleor/order/base_calculations.py` | Spreads over the retail lines against a base reduced by the dealer total, then yields each dealer line at its `base_order_line_total`. |
+| `create_discount_objects_for_order_promotions(order_or_checkout, lines_info, subtotal, channel, country)` | `saleor/discount/utils/promotion.py` | Hands the original a subtotal with the dealer lines taken out, so an order promotion is both sized and threshold-tested on retail money. One function serves the checkout and the order, so this covers both. |
+
+Two of the five are the discount AMOUNT and two are the SPREAD, and they have to
+move together. Fixing only the spread would size a discount on the dealer line's
+money and then hand all of it to the retail lines, which is worse than stock: the
+merchant would give a deeper retail discount because a dealer line was in the cart.
+
+Rebinding: `propagate_order_discount_on_order_prices` is imported by name into
+`saleor.plugins.manager`, and `create_discount_objects_for_order_promotions` into
+`saleor.discount.utils.checkout` and `saleor.discount.utils.order`. Those bindings
+are rewritten too. The other two have a single call site each, inside their own
+defining module, so a module-attribute swap is enough.
+
+Why (requirement 2.4, Dana's ruling 2026-09-08): "no discount combines with dealer
+pricing", as a per-tenant toggle defaulting OFF. This is the "known limit,
+deliberate" paragraph at the end of MP1, now closed.
+
+**What a shopper could do without it.** A checkout holding one dealer line at
+3400.00 (a tier the merchant granted that account) and one retail line at 6399.00,
+with a 10 percent ENTIRE_ORDER voucher. Stock Saleor sizes the discount on the
+whole 9799.00, which is 979.90, and then spreads it in proportion to each line's
+share of the subtotal. The dealer line's share is 3400.00 / 9799.00, so 340.00 of
+that discount lands on the dealer line and it bills at 3060.00: ten percent off a
+price that was already the dealer's negotiated price. The voucher code is public,
+the dealer account is the one place a merchant has already given ground on margin,
+and nothing in stock Saleor stops the two combining. With MP2 the discount is
+639.90, the dealer line bills at 3400.00, the retail line at 5759.10, and the
+checkout total is 9159.10. Measured both ways in
+`saleor/wsm/dealer/tests/test_no_stacking.py`: with the install line commented out
+the same tests fail on `Money('979.90') == Money('639.90')` and
+`Money('3060.00') == Money('3400.00')`.
+
+Why a patch and not a stock lever, all three candidates checked in the 3.23.31
+source first:
+
+- The two spread functions take a plain list of lines and divide by
+  `share = line_total / subtotal`. They read no flag, skip no line and expose no
+  hook. `is_gift`, the one line-shaped exclusion in stock discount code, lives in
+  `get_discounted_lines` on the voucher side and never reaches either of them.
+- `price_override` is not a special case on this path. It sets the unit price and
+  is then treated like any other price: `CheckoutLineInfo.variant_discounted_price`
+  returns it and the spread divides it up with the rest.
+- Excluding the line upstream, by keeping it out of the `lines` list the caller
+  passes down, is not available either: that same list is the subtotal, the tax
+  base and the order-line source. A line dropped from it is a line nobody bills.
+
+The plugin manager's `calculate_checkout_line_total` is the nearest thing to a
+supported override, and it is not one: it only reshapes a line total that has
+already been computed, it cannot change the discount AMOUNT that was sized on the
+dealer line's money, it does not reach the order's own recalculation, and plugins
+are on their way out in favour of tax apps. It would move the number on one screen
+and leave the order wrong.
+
+Cost when it does nothing: zero. Every wrapper's first act is a dict-key test on
+lines already in memory. With no dealer line among them the original runs on the
+original arguments, and no query, no settings read and no `Money` arithmetic is
+added. The toggle is consulted only once a dealer line is present, and it is the
+same per-process cached read MP1 uses, so a retail-only fleet pays nothing.
+
+Upstream change that deletes this file: an exclusion honoured by the order-level
+discount base, for example a `discountable` predicate on the line consulted by
+`base_checkout_subtotal` and by both propagate functions, the way `is_gift` is
+already consulted on the voucher side. That one predicate would delete MP1 as well.

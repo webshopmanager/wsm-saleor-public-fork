@@ -16,6 +16,9 @@ class DealerConfig(AppConfig):
         # merchant turns stacking on. Stock Saleor has no per-line discount
         # exclusion, so this installs one. See no_stacking.py and the
         # "Monkey patches" heading in docs/wsm/CORE-TOUCHES.md.
-        from . import no_stacking
+        from . import no_stacking, no_stacking_order_level
 
         no_stacking.install()
+        # MP2: the same ruling for ENTIRE_ORDER vouchers and order promotions,
+        # which are checkout-level discounts and never reach a line at all.
+        no_stacking_order_level.install()

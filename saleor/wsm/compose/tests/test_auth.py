@@ -7,6 +7,10 @@ Saleor turned it off everywhere, including here.
 """
 
 import pytest
+from django.conf import settings as django_settings
+from django.db import connections
+
+from ....core.db.connection import restrict_writer
 
 from ....site import PasswordLoginMode
 from ..auth import AdminPasswordBackend
@@ -79,3 +83,30 @@ def test_staff_are_refused_in_customers_only_mode(staff_user, site_settings):
         )
         is None
     )
+
+
+
+# --- finding 16: every read in this backend goes to the replica --------------
+
+
+def test_the_backend_never_reads_the_writer(staff_user, site_settings):
+    """`AUTHENTICATION_BACKENDS` is app-wide, so a read left on the writer here
+    is not this app's problem: it raises `UnsafeWriterAccessError` inside every
+    request that authenticates a session or asks Django for a permission, which
+    is how one unrouted queryset took down a whole tenant's run.
+
+    `execute_wrapper(restrict_writer)` is exactly what `restrict_writer_middleware`
+    installs around a request, so this is the production guard, not a stand-in.
+    """
+    _with_password(staff_user)
+    _mode(site_settings, PasswordLoginMode.ENABLED)
+    backend = AdminPasswordBackend()
+    writer = connections[django_settings.DATABASE_CONNECTION_DEFAULT_NAME]
+
+    with writer.execute_wrapper(restrict_writer):
+        assert (
+            backend.authenticate(username=staff_user.email, password=PASSWORD)
+            == staff_user
+        )
+        assert backend.get_user(staff_user.pk) == staff_user
+        assert backend.get_user_permissions(staff_user) == set()

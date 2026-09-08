@@ -12,13 +12,18 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
 from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.utils import timezone
+from django_countries.fields import Country
 from prices import Money
 
 from ....checkout import models
 from ....checkout.delivery_context import is_shipping_required
 from ....checkout.error_codes import CheckoutErrorCode
 from ....checkout.fetch import CheckoutLineInfo
-from ....core.exceptions import InsufficientStock, PermissionDenied
+from ....core.exceptions import (
+    InsufficientStock,
+    InsufficientStockData,
+    PermissionDenied,
+)
 from ....discount import DiscountType, DiscountValueType
 from ....discount.interface import DiscountInfo
 from ....discount.models import CheckoutLineDiscount, PromotionRule
@@ -147,15 +152,50 @@ def check_lines_quantity(
             include_shipping_zones=calculate_stocks_with_shipping_zones,
         )
     except InsufficientStock as e:
-        errors = [
-            ValidationError(
-                f"Could not add items {item.variant}. "
-                f"Only {max(item.available_quantity, 0)} remaining in stock.",
-                code=e.code.value,
-            )
-            for item in e.items
-        ]
+        errors = [insufficient_stock_error(item, country) for item in e.items]
         raise ValidationError({"quantity": errors}) from e
+
+
+def insufficient_stock_error(
+    item: "InsufficientStockData", country_code: str | None
+) -> ValidationError:
+    """Turn an unmet stock check into the error the shopper should actually see.
+
+    A country no warehouse in this channel ships to yields available_quantity == 0
+    just like a real stock-out, so reporting both as INSUFFICIENT_STOCK sends the
+    shopper (and the merchant) hunting through inventory for a shipping-zone
+    problem. Keep INSUFFICIENT_STOCK for the case where a warehouse could ship but
+    holds too few units.
+    """
+    if item.destination_not_serviced:
+        destination = get_country_display_name(country_code)
+        # Leads with the destination rather than the item: storefronts surface this
+        # string verbatim, and it is raised while the shopper is editing an address,
+        # where the sibling message's "Could not add items" prefix reads as though
+        # they had just added something. The variant is still named -- in a mixed
+        # cart only some lines may be undeliverable.
+        return ValidationError(
+            f"We do not ship to {destination}. "
+            f"{item.variant} cannot be delivered to this address.",
+            code=CheckoutErrorCode.DESTINATION_NOT_SERVICED.value,
+        )
+    return ValidationError(
+        f"Could not add items {item.variant}. "
+        f"Only {max(item.available_quantity, 0)} remaining in stock.",
+        code=CheckoutErrorCode.INSUFFICIENT_STOCK.value,
+    )
+
+
+def get_country_display_name(country_code: str | None) -> str:
+    """Resolve a country code to its name, falling back to the code itself.
+
+    Country() returns an empty name for codes django_countries does not know, which
+    would render as "We do not ship to ." -- fall back so the message still names
+    the destination the shopper typed.
+    """
+    if not country_code:
+        return "this destination"
+    return Country(country_code).name or country_code
 
 
 def get_not_available_variants_for_purchase(

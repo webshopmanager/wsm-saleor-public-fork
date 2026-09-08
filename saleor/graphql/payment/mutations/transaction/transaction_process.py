@@ -1,3 +1,4 @@
+import json
 from typing import TYPE_CHECKING, cast
 
 import graphene
@@ -9,6 +10,7 @@ from .....app.models import App
 from .....channel import TransactionFlowStrategy
 from .....channel.models import Channel
 from .....checkout import models as checkout_models
+from .....checkout.checkout_cleaner import clean_checkout_ready_for_payment
 from .....checkout.utils import activate_payments, cancel_active_payments
 from .....order import models as order_models
 from .....payment import FAILED_TRANSACTION_EVENTS, TransactionEventType
@@ -29,7 +31,7 @@ from ...types import TransactionEvent, TransactionItem
 from .utils import clean_customer_ip_address, get_transaction_item
 
 if TYPE_CHECKING:
-    pass
+    from .....plugins.manager import PluginsManager
 
 
 class TransactionProcess(BaseMutation):
@@ -188,9 +190,21 @@ class TransactionProcess(BaseMutation):
             )
         request_event = cls.get_request_event(events)
         source_object = cls.get_source_object(transaction_item)
+        manager = get_plugin_manager_promise(info.context).get()
 
         if isinstance(source_object, checkout_models.Checkout):
-            cls.validate_checkout(source_object)
+            checkout_payment_snapshot = cls.validate_checkout(source_object, manager)
+            # Metadata values are always strings (see MetadataItem.value in the
+            # GraphQL schema) — storing the dict directly would serialize as
+            # Python's repr() through GraphQL, not valid JSON.
+            transaction_item.store_value_in_private_metadata(
+                {
+                    "checkout_payment_snapshot_process": json.dumps(
+                        checkout_payment_snapshot
+                    )
+                }
+            )
+            transaction_item.save(update_fields=["private_metadata"])
 
         app = cls.clean_payment_app(transaction_item)
         app_identifier = app.identifier
@@ -200,8 +214,6 @@ class TransactionProcess(BaseMutation):
             customer_ip_address,
             error_code=TransactionProcessErrorCode.INVALID.value,
         )
-
-        manager = get_plugin_manager_promise(info.context).get()
 
         payment_ids = []
         if isinstance(source_object, checkout_models.Checkout):
@@ -228,7 +240,9 @@ class TransactionProcess(BaseMutation):
         return cls(transaction=transaction_item, transaction_event=event, data=data)
 
     @staticmethod
-    def validate_checkout(checkout: checkout_models.Checkout) -> None:
+    def validate_checkout(
+        checkout: checkout_models.Checkout, manager: "PluginsManager"
+    ) -> dict:
         if checkout.is_checkout_locked():
             error_code = (
                 TransactionProcessErrorCode.CHECKOUT_COMPLETION_IN_PROGRESS.value
@@ -244,3 +258,15 @@ class TransactionProcess(BaseMutation):
                     )
                 }
             )
+        # A charge attempted against a checkout that can never actually
+        # complete (no shipping method, no billing address, no lines) risks
+        # real money charged with no order and no way to recover
+        # automatically — refuse before any payment app is ever asked to
+        # charge, rather than discovering it after the fact. The checkout
+        # could have drifted into this state even if it was fine when
+        # transactionInitialize first ran (e.g. address/shipping changed
+        # during an AUTH_ONLY -> capture gap), so this is checked again here,
+        # independently of the same check in TransactionInitialize.
+        return clean_checkout_ready_for_payment(
+            checkout, manager, TransactionProcessErrorCode.INVALID.value
+        )

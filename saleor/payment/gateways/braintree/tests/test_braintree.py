@@ -24,6 +24,7 @@ from .. import (
     void,
 )
 from ..errors import DEFAULT_ERROR_MESSAGE, BraintreeException
+from ..plugin import DeprecatedBraintreeGatewayPlugin
 
 DEFAULT_ERROR = "Unable to process transaction. Please try again in a moment"
 
@@ -462,3 +463,72 @@ def test_list_customer_sources(sandbox_braintree_gateway_config):
     )
     sources = list_client_sources(sandbox_braintree_gateway_config, CUSTOMER_ID)
     assert sources == [expected_customer_source]
+
+
+def test_plugin_get_payment_config_with_missing_credentials():
+    """get_payment_config must return an empty list (not None) when creds missing.
+
+    PaymentGateway.config is a non-nullable GraphQL list; returning None would
+    raise 'Cannot return null for non-nullable field PaymentGateway.config'.
+    """
+    configuration = [
+        {"name": "Public API key", "value": None},
+        {"name": "Secret API key", "value": None},
+        {"name": "Merchant ID", "value": None},
+        {"name": "Use sandbox", "value": True},
+        {"name": "Merchant Account ID", "value": ""},
+        {"name": "Store customers card", "value": False},
+        {"name": "Automatic payment capture", "value": True},
+        {"name": "Require 3D secure", "value": False},
+        {"name": "Supported currencies", "value": ""},
+    ]
+    plugin = DeprecatedBraintreeGatewayPlugin(
+        active=True, configuration=configuration
+    )
+    # previous_value is None in production; must still return [] (not None)
+    result = plugin.get_payment_config(None)
+    assert result == []
+    assert result is not None
+
+
+def test_plugin_get_client_token_with_missing_credentials():
+    """Test that get_client_token returns previous_value when credentials are missing."""
+    configuration = [
+        {"name": "Public API key", "value": None},
+        {"name": "Secret API key", "value": None},
+        {"name": "Merchant ID", "value": None},
+        {"name": "Use sandbox", "value": True},
+        {"name": "Merchant Account ID", "value": ""},
+        {"name": "Store customers card", "value": False},
+        {"name": "Automatic payment capture", "value": True},
+        {"name": "Require 3D secure", "value": False},
+        {"name": "Supported currencies", "value": ""},
+    ]
+    plugin = DeprecatedBraintreeGatewayPlugin(
+        active=True, configuration=configuration
+    )
+    token_config = TokenConfig(customer_id="123")
+    previous_value = "previous-token"
+    # When credentials are missing, should return previous_value without error
+    assert plugin.get_client_token(token_config, previous_value) == previous_value
+
+
+def test_plugin_get_payment_config_when_inactive():
+    """Test that get_payment_config returns previous_value when plugin is inactive."""
+    configuration = [
+        {"name": "Public API key", "value": "key"},
+        {"name": "Secret API key", "value": "secret"},
+        {"name": "Merchant ID", "value": "merchant"},
+        {"name": "Use sandbox", "value": True},
+        {"name": "Merchant Account ID", "value": ""},
+        {"name": "Store customers card", "value": False},
+        {"name": "Automatic payment capture", "value": True},
+        {"name": "Require 3D secure", "value": False},
+        {"name": "Supported currencies", "value": ""},
+    ]
+    plugin = DeprecatedBraintreeGatewayPlugin(
+        active=False, configuration=configuration
+    )
+    previous_value = []
+    # When plugin is inactive, should return previous_value
+    assert plugin.get_payment_config(previous_value) == previous_value

@@ -1787,7 +1787,7 @@ def test_checkout_lines_add_no_channel_shipping_zones_included_in_stock_calculat
     data = content["data"]["checkoutLinesAdd"]
     errors = data["errors"]
     assert len(errors) == 1
-    assert errors[0]["code"] == CheckoutErrorCode.INSUFFICIENT_STOCK.name
+    assert errors[0]["code"] == CheckoutErrorCode.DESTINATION_NOT_SERVICED.name
     assert errors[0]["field"] == "quantity"
 
 

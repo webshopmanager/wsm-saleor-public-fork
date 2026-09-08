@@ -31473,6 +31473,7 @@ type CheckoutError @doc(category: "Checkout") {
 enum CheckoutErrorCode @doc(category: "Checkout") {
   BILLING_ADDRESS_NOT_SET
   CHECKOUT_NOT_FULLY_PAID
+  CONTENT_CHANGED_AFTER_PAYMENT
   GRAPHQL_ERROR
   PRODUCT_NOT_PUBLISHED
   PRODUCT_UNAVAILABLE_FOR_PURCHASE
@@ -31504,6 +31505,7 @@ enum CheckoutErrorCode @doc(category: "Checkout") {
   NON_REMOVABLE_GIFT_LINE
   SHIPPING_CHANGE_FORBIDDEN
   MISSING_ADDRESS_DATA
+  DESTINATION_NOT_SERVICED
 }
 
 """
@@ -31722,6 +31724,7 @@ enum CheckoutCreateFromOrderUnavailableVariantErrorCode @doc(category: "Checkout
   PRODUCT_NOT_PUBLISHED
   QUANTITY_GREATER_THAN_LIMIT
   INSUFFICIENT_STOCK
+  DESTINATION_NOT_SERVICED
 }
 
 type CheckoutCreateFromOrderError @doc(category: "Checkout") {
@@ -32089,6 +32092,7 @@ enum OrderCreateFromCheckoutErrorCode @doc(category: "Orders") {
   INSUFFICIENT_STOCK
   VOUCHER_NOT_APPLICABLE
   GIFT_CARD_NOT_APPLICABLE
+  CONTENT_CHANGED_AFTER_PAYMENT
   TAX_ERROR
   SHIPPING_METHOD_NOT_SET
   BILLING_ADDRESS_NOT_SET

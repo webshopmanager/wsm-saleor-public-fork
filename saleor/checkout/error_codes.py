@@ -4,6 +4,7 @@ from enum import Enum
 class CheckoutErrorCode(Enum):
     BILLING_ADDRESS_NOT_SET = "billing_address_not_set"
     CHECKOUT_NOT_FULLY_PAID = "checkout_not_fully_paid"
+    CONTENT_CHANGED_AFTER_PAYMENT = "content_changed_after_payment"
     GRAPHQL_ERROR = "graphql_error"
     PRODUCT_NOT_PUBLISHED = "product_not_published"
     PRODUCT_UNAVAILABLE_FOR_PURCHASE = "product_unavailable_for_purchase"
@@ -35,6 +36,7 @@ class CheckoutErrorCode(Enum):
     NON_REMOVABLE_GIFT_LINE = "non_removable_gift_line"
     SHIPPING_CHANGE_FORBIDDEN = "shipping_change_forbidden"
     MISSING_ADDRESS_DATA = "missing_address_data"
+    DESTINATION_NOT_SERVICED = "destination_not_serviced"
 
 
 class OrderCreateFromCheckoutErrorCode(Enum):
@@ -44,6 +46,7 @@ class OrderCreateFromCheckoutErrorCode(Enum):
     INSUFFICIENT_STOCK = "insufficient_stock"
     VOUCHER_NOT_APPLICABLE = "voucher_not_applicable"
     GIFT_CARD_NOT_APPLICABLE = "gift_card_not_applicable"
+    CONTENT_CHANGED_AFTER_PAYMENT = "content_changed_after_payment"
     TAX_ERROR = "tax_error"
     SHIPPING_METHOD_NOT_SET = "shipping_method_not_set"
     BILLING_ADDRESS_NOT_SET = "billing_address_not_set"
@@ -69,3 +72,4 @@ class CheckoutCreateFromOrderUnavailableVariantErrorCode(Enum):
     PRODUCT_NOT_PUBLISHED = "product_not_published"
     QUANTITY_GREATER_THAN_LIMIT = "quantity_greater_than_limit"
     INSUFFICIENT_STOCK = "insufficient_stock"
+    DESTINATION_NOT_SERVICED = "destination_not_serviced"

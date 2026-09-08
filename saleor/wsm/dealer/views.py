@@ -6,11 +6,13 @@ does the work a serializer layer would. The contract is the one today's
 storefront already speaks, so B6 holds with no storefront code (design doc
 section 2, "Stays").
 
-`X-Saleor-Domain` and `X-Dealer-Pricing-Key` arrive on every call and are
-ignored. They existed because pricing lived in another process and its answers
-had to be signed; the price is now computed here from catalog rows, so there is
-no signature to check and nothing a caller could forge. No caller-supplied price
-is ever honoured (requirement 1.4), and no caller-supplied price is ever read.
+The caller is the storefront SERVER, and it proves it with the tenant's
+`X-Dealer-Pricing-Key` (saleor/wsm/http.py). What a caller could forge was never
+a price, which is why "nothing to forge" read true: it is the BUYER. `customerId`
+arrives in the body, so without the key any stranger could read what a dealer
+pays and add lines to a checkout at that dealer's tier. No caller-supplied price
+is ever honoured (requirement 1.4) and none is ever read; `X-Saleor-Domain` still
+arrives and is still ignored, because one process serves one tenant.
 
 Not being a dealer is never an error. It is an empty ladder and a retail line,
 because the same storefront code runs for every shopper and a 4xx on the common
@@ -24,6 +26,7 @@ from typing import NamedTuple
 
 import graphene
 from django.conf import settings
+from django.contrib.sites.models import Site
 from django.db import transaction
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -39,6 +42,8 @@ from ...core.prices import quantize_price
 from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...plugins.manager import get_plugins_manager
 from ...product.models import ProductVariant, ProductVariantChannelListing
+from ..checkout import LineRefused, check_addable, whole_number
+from ..http import storefront_key_required
 from . import pricing
 from .no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
 
@@ -128,6 +133,7 @@ def _invalidate(checkout):
 
 @csrf_exempt
 @require_POST
+@storefront_key_required
 def storefront_prices(request):
     """Endpoint 3. Every break the buyer can reach on up to 100 variants."""
     body = _body(request)
@@ -151,6 +157,7 @@ def storefront_prices(request):
 
 @csrf_exempt
 @require_POST
+@storefront_key_required
 @allow_writer()
 def dealer_line(request):
     """Endpoint 4. Add one line, priced at the buyer's break where there is one."""
@@ -169,10 +176,9 @@ def dealer_line(request):
     if variant is None:
         return _error("variantNotFound", 404)
 
-    try:
-        quantity = int(body.get("quantity", 1))
-    except (TypeError, ValueError):
-        quantity = 0
+    quantity = whole_number(body.get("quantity", 1))
+    if quantity is None:
+        return _error("quantityMustBeAWholeNumber", 422)
     if quantity < 1:
         return _error("invalidQuantity", 400)
 
@@ -188,7 +194,12 @@ def dealer_line(request):
     if breaks and winner is None:
         return _error("belowBreak", 422)
 
-    line = _add_line(checkout, channel, variant, quantity, winner)
+    try:
+        line = _add_line(checkout, channel, variant, quantity, winner)
+    except LineRefused as refusal:
+        return JsonResponse(
+            {"error": "lineRefused", "violations": refusal.violations}, status=422
+        )
     return JsonResponse(
         {
             "lineId": graphene.Node.to_global_id("CheckoutLine", line.pk),
@@ -224,6 +235,26 @@ def _add_line(checkout, channel, variant, quantity, winner):
             )
         )
 
+    line_data = CheckoutLineData(
+        variant_id=str(variant.pk),
+        quantity=quantity,
+        quantity_to_update=True,
+        custom_price=winner.amount if winner else None,
+        custom_price_to_update=bool(winner),
+        custom_price_reason=PRICE_OVERRIDE_REASON if winner else None,
+        custom_price_reason_to_update=bool(winner),
+        metadata_list=metadata,
+    )
+    # The checks `checkoutLinesAdd` runs before the identical write. Raises
+    # `LineRefused`, which the view turns into a 422.
+    check_addable(
+        checkout,
+        channel,
+        [variant],
+        [line_data],
+        site_settings=Site.objects.get_current().settings,
+    )
+
     with transaction.atomic():
         before = set(
             CheckoutLine.objects.filter(checkout_id=checkout.pk).values_list(
@@ -233,18 +264,7 @@ def _add_line(checkout, channel, variant, quantity, winner):
         add_variants_to_checkout(
             checkout,
             [variant],
-            [
-                CheckoutLineData(
-                    variant_id=str(variant.pk),
-                    quantity=quantity,
-                    quantity_to_update=True,
-                    custom_price=winner.amount if winner else None,
-                    custom_price_to_update=bool(winner),
-                    custom_price_reason=PRICE_OVERRIDE_REASON if winner else None,
-                    custom_price_reason_to_update=bool(winner),
-                    metadata_list=metadata,
-                )
-            ],
+            [line_data],
             channel,
             calculate_stocks_with_shipping_zones=False,
         )
@@ -259,6 +279,7 @@ def _add_line(checkout, channel, variant, quantity, winner):
 
 @csrf_exempt
 @require_POST
+@storefront_key_required
 @allow_writer()
 def dealer_line_reprice(request):
     """Endpoint 5. Re-run the ladder against the line's CURRENT quantity.
@@ -285,6 +306,15 @@ def dealer_line_reprice(request):
     )
     if line is None:
         return _error("lineNotFound", 404)
+    # Repricing means deciding this line's price, and a price another app wrote
+    # is not this app's to decide. Compose and the kit endpoint stamp their own
+    # reason; clearing one here would sell a configured line at its bare base
+    # price. A line with no override at all is nobody's and is fair game.
+    if (
+        line.price_override is not None
+        and line.price_override_reason != PRICE_OVERRIDE_REASON
+    ):
+        return _error("foreignPriceOverride", 409)
 
     user = _customer(body.get("customerId"), WRITER)
     winner = pricing.dealer_price_for(

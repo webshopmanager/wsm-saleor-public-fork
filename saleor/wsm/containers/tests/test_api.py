@@ -13,11 +13,15 @@ from decimal import Decimal
 import pytest
 
 from saleor.wsm.containers import pricing
+from saleor.wsm.tests import DEALER_HEADERS
 from saleor.wsm.containers.models import KitConfig, KitMember
 
 pytestmark = pytest.mark.django_db
 
 KIT_LINE_URL = "/wsm/containers/api/checkout/kit-line"
+
+# The storefront server proves itself with the tenant key (saleor/wsm/http.py).
+HEADERS = DEALER_HEADERS
 
 
 def gid(type_name, pk):
@@ -48,7 +52,10 @@ def post_kit(client, checkout, collection_id, quantity=1, customer=None):
     if customer is not None:
         body["customerId"] = gid("User", customer.pk)
     return client.post(
-        KIT_LINE_URL, data=json.dumps(body), content_type="application/json"
+        KIT_LINE_URL,
+        data=json.dumps(body),
+        content_type="application/json",
+        **HEADERS,
     )
 
 
@@ -128,6 +135,7 @@ def test_unknown_checkout_is_404(client, kit, db):
             }
         ),
         content_type="application/json",
+        **HEADERS,
     )
 
     assert response.status_code == 404
@@ -360,3 +368,37 @@ def test_the_acceptance_kit_is_9159_10_for_a_dealer_on_a_3400_break(
     assert units[stage_2.pk] == Decimal("3400.00")
     # The member with no break keeps its kit price. Never both.
     assert units[product_list[1].variants.first().pk] == Decimal("5759.10")
+
+
+
+# --- finding 8: the same two holes on the kit write path ---------------------
+
+
+def test_a_kit_quantity_that_is_not_a_number_is_refused(client, checkout, kit):
+    response = client.post(
+        KIT_LINE_URL,
+        data=json.dumps(
+            {
+                "checkoutId": gid("Checkout", checkout.token),
+                "collectionId": gid("Collection", kit.collection_id),
+                "quantity": "x",
+            }
+        ),
+        content_type="application/json",
+        **HEADERS,
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"violations": ["quantity must be a whole number"]}
+
+
+def test_a_kit_member_not_available_for_purchase_is_refused(client, checkout, kit):
+    member = kit.members.first()
+    member.variant.product.channel_listings.filter(channel=checkout.channel).update(
+        available_for_purchase_at=None
+    )
+
+    response = post_kit(client, checkout, kit.collection_id)
+
+    assert response.status_code == 422
+    assert checkout.lines.count() == 0

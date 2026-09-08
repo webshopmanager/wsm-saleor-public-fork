@@ -657,6 +657,11 @@ AUTHENTICATION_BACKENDS = [
     "saleor.wsm.compose.auth.AdminPasswordBackend",
 ]
 
+# WSM-FORK: the per-tenant secret wsm-storefront already sends on every call to
+# the fork's checkout endpoints (X-Dealer-Pricing-Key / X-Compose-Key). Unset
+# closes those endpoints. See saleor/wsm/http.py and docs/wsm/CORE-TOUCHES.md.
+WSM_STOREFRONT_KEY = os.environ.get("WSM_STOREFRONT_KEY", "")
+
 # Expired checkouts settings - defines after what time checkouts will be deleted
 ANONYMOUS_CHECKOUTS_TIMEDELTA = datetime.timedelta(
     seconds=parse(os.environ.get("ANONYMOUS_CHECKOUTS_TIMEDELTA", "30 days"))

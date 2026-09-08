@@ -20,7 +20,9 @@ from django.views.decorators.http import require_POST
 from ...account.models import User
 from ...checkout.models import Checkout
 from ...core.db.connection import allow_writer
+from ..checkout import LineRefused, whole_number
 from ..dealer import pricing as dealer_pricing
+from ..http import storefront_key_required
 from . import pricing
 from .models import KitConfig
 
@@ -97,6 +99,7 @@ def resolve_tier_lookup(kit, checkout, user):
 
 @csrf_exempt
 @require_POST
+@storefront_key_required
 # Saleor routes reads to a replica and refuses the writer unless a view asks for
 # it, exactly as its own webhook views do (saleor/plugins/views.py). This view
 # writes checkout lines, so it asks.
@@ -115,7 +118,9 @@ def kit_line(request):
     if collection_pk is None or not collection_pk.isdigit():
         return _not_found("kit")
 
-    quantity = int(body.get("quantity") or 1)
+    quantity = whole_number(body.get("quantity") or 1)
+    if quantity is None:
+        return _refused("quantity must be a whole number")
     if quantity < 1:
         return _refused("quantity must be at least 1")
 
@@ -169,6 +174,8 @@ def kit_line(request):
         )
     except pricing.KitRefusal as refusal:
         return _refused(str(refusal))
+    except LineRefused as refusal:
+        return JsonResponse({"violations": refusal.violations}, status=422)
 
     return JsonResponse(
         {

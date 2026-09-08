@@ -15,6 +15,7 @@ from decimal import Decimal
 import pytest
 
 from saleor.wsm.compose.models import Fee, OptionSet, OptionValue
+from saleor.wsm.tests import COMPOSE_HEADERS
 from saleor.wsm.compose.views import (
     META_CID,
     META_FEE,
@@ -31,11 +32,7 @@ BASE_PRICE = Decimal("3998.99")
 CONFIGURED_UNIT = "3494.00"  # 3998.99 - 29.99 - 30.00 - 445.00
 FEE_AMOUNT = "149.00"
 
-HEADERS = {
-    "HTTP_X_SALEOR_DOMAIN": "bakeoff.test",
-    "HTTP_X_CLIENT_ID": "storefront",
-    "HTTP_X_COMPOSE_KEY": "a key nobody reads",
-}
+HEADERS = COMPOSE_HEADERS
 
 
 def gid(type_name, pk):
@@ -511,3 +508,48 @@ def test_option_sets_quotes_the_dealer_the_delta_it_will_charge(
 
     assert [v["price_delta"] for v in retail] == ["-29.99", "-30.00", "-445.00"]
     assert [v["price_delta"] for v in dealer] == ["-29.99", "-30.00", "-545.00"]
+
+
+
+# --- finding 8: a posted quantity that is not a number is a 422, not a 500 ---
+
+
+def test_a_quantity_that_is_not_a_number_is_refused(client, checkout, stage_2_kit):
+    response = client.post(
+        CONFIGURED_LINE_URL,
+        data=json.dumps(
+            {
+                "checkoutId": gid("Checkout", checkout.token),
+                "channel": checkout.channel.slug,
+                "productId": gid("Product", stage_2_kit.product_id),
+                "variantId": gid("ProductVariant", stage_2_kit.pk),
+                "quantity": "x",
+                "selections": [],
+            }
+        ),
+        content_type="application/json",
+        **HEADERS,
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"violations": ["quantity must be a whole number"]}
+
+
+def test_a_variant_not_available_for_purchase_is_refused(
+    client, checkout, stage_2_kit, omit_parts
+):
+    """The stock mutation refuses this; so does the fork's own write path."""
+    stage_2_kit.product.channel_listings.filter(channel=checkout.channel).update(
+        available_for_purchase_at=None
+    )
+    option_set, values = omit_parts
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+    )
+
+    assert response.status_code == 422
+    assert checkout.lines.count() == 0

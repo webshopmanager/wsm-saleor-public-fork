@@ -7,6 +7,7 @@ import graphene
 import pytest
 
 from ....checkout.models import CheckoutLine
+from ...tests import DEALER_HEADERS
 from ..models import DealerCustomer, DealerGroup, TierPrice
 from ..no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
 from ..pricing import MAX_BATCH
@@ -17,11 +18,9 @@ PRICES_URL = "/wsm/dealer_pricing/api/storefront/prices"
 LINE_URL = "/wsm/dealer_pricing/api/checkout/dealer-line"
 REPRICE_URL = "/wsm/dealer_pricing/api/checkout/dealer-line/reprice"
 
-# Both arrive on every storefront call and both are ignored.
-HEADERS = {
-    "HTTP_X_SALEOR_DOMAIN": "example.com",
-    "HTTP_X_DEALER_PRICING_KEY": "not-checked",
-}
+# What the storefront server sends. The key is now checked (saleor/wsm/http.py);
+# `X-Saleor-Domain` still is not, because one process serves one tenant.
+HEADERS = DEALER_HEADERS
 
 
 @pytest.fixture
@@ -115,7 +114,7 @@ def line_body(checkout, customer_user, variant, channel, quantity):
 
 
 def test_dealer_line_sets_price_override_and_metadata(
-    client, checkout, variant, customer_user, tiers, channel_USD
+    client, checkout, variant, customer_user, tiers, channel_USD, stock
 ):
     response = post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
 
@@ -173,7 +172,7 @@ def test_dealer_line_in_another_channel_is_refused(
 
 
 def test_a_shopper_who_is_not_a_dealer_gets_a_retail_line(
-    client, checkout, variant, staff_user, tiers, channel_USD
+    client, checkout, variant, staff_user, tiers, channel_USD, stock
 ):
     response = post(client, LINE_URL, line_body(checkout, variant=variant, customer_user=staff_user, channel=channel_USD, quantity=6))
 
@@ -185,7 +184,7 @@ def test_a_shopper_who_is_not_a_dealer_gets_a_retail_line(
 
 
 def test_reprice_clears_the_override_when_the_quantity_falls_to_retail(
-    client, checkout, variant, customer_user, tiers, channel_USD
+    client, checkout, variant, customer_user, tiers, channel_USD, stock
 ):
     post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
     line = CheckoutLine.objects.get(checkout_id=checkout.pk)
@@ -217,7 +216,7 @@ def test_reprice_clears_the_override_when_the_quantity_falls_to_retail(
 
 
 def test_reprice_puts_the_override_back_when_the_quantity_reaches_a_break(
-    client, checkout, variant, customer_user, tiers, channel_USD
+    client, checkout, variant, customer_user, tiers, channel_USD, stock
 ):
     post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
     line = CheckoutLine.objects.get(checkout_id=checkout.pk)
@@ -284,3 +283,88 @@ def test_a_reprice_that_moves_the_price_expires_it_and_one_that_does_not_leaves_
     assert post(client, REPRICE_URL, body).json()["unitPrice"] == "7.00"
     checkout.refresh_from_db()
     assert checkout.price_expiration < later
+
+
+
+# --- finding 3: reprice never clears an override another app wrote -----------
+
+
+def test_reprice_refuses_a_line_priced_by_another_app(
+    client, checkout, variant, customer_user, tiers, channel_USD, stock
+):
+    """A compose-priced line is not this app's to zero out."""
+    post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
+    line = CheckoutLine.objects.get(checkout_id=checkout.pk)
+    line.quantity = 2
+    line.price_override = Decimal("99.00")
+    line.price_override_reason = "wsm.compose"
+    line.save(update_fields=["quantity", "price_override", "price_override_reason"])
+
+    response = post(
+        client,
+        REPRICE_URL,
+        {
+            "checkoutId": gid("Checkout", checkout.pk),
+            "customerId": gid("User", customer_user.pk),
+            "lineId": gid("CheckoutLine", line.pk),
+            "channel": channel_USD.slug,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "foreignPriceOverride"}
+    line.refresh_from_db()
+    assert line.price_override == Decimal("99.00")
+    assert line.price_override_reason == "wsm.compose"
+
+
+# --- finding 8: the stock checks checkoutLinesAdd runs -----------------------
+
+
+def test_dealer_line_refuses_a_variant_not_available_for_purchase(
+    client, checkout, variant, customer_user, tiers, channel_USD, stock
+):
+    variant.product.channel_listings.filter(channel=channel_USD).update(
+        available_for_purchase_at=None
+    )
+
+    response = post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "lineRefused"
+    assert not CheckoutLine.objects.filter(checkout_id=checkout.pk).exists()
+
+
+def test_dealer_line_refuses_a_quantity_over_the_checkout_limit(
+    client, checkout, variant, customer_user, tiers, channel_USD, site_settings, stock
+):
+    site_settings.limit_quantity_per_checkout = 5
+    site_settings.save(update_fields=["limit_quantity_per_checkout"])
+
+    response = post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "lineRefused"
+    assert not CheckoutLine.objects.filter(checkout_id=checkout.pk).exists()
+
+
+def test_dealer_line_refuses_a_quantity_that_is_not_a_number(
+    client, checkout, variant, customer_user, tiers, channel_USD
+):
+    body = line_body(checkout, customer_user, variant, channel_USD, "x")
+
+    assert post(client, LINE_URL, body).status_code == 422
+
+
+def test_dealer_line_refuses_more_than_the_stock_on_hand(
+    client, checkout, variant, customer_user, tiers, channel_USD, stock
+):
+    body = line_body(
+        checkout, customer_user, variant, channel_USD, stock.quantity + 1
+    )
+
+    response = post(client, LINE_URL, body)
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "lineRefused"
+    assert not CheckoutLine.objects.filter(checkout_id=checkout.pk).exists()

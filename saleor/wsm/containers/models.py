@@ -29,15 +29,54 @@ class SeriesConfig(models.Model):
     """What a Collection needs to behave as a series: one brand, and the axes."""
 
     collection = models.OneToOneField(
-        "product.Collection", related_name="wsm_series", on_delete=models.CASCADE
+        "product.Collection",
+        related_name="wsm_series",
+        on_delete=models.CASCADE,
+        help_text=(
+            "The collection whose products this series configures. Which "
+            "products are in it is managed on the collection itself, in the "
+            "Saleor dashboard."
+        ),
     )
     # A series spans many categories and exactly ONE brand (ruled 2026-09-08).
-    brand = models.CharField(max_length=250)
+    brand = models.CharField(
+        max_length=250,
+        help_text=(
+            "The one brand this series covers. A series is never mixed-brand."
+        ),
+    )
     # Attribute slugs, in the order the configurator asks them.
-    axes = models.JSONField(default=list, blank=True)
-    partitioning_axis = models.CharField(max_length=250)
-    miss_message = models.TextField(blank=True)
-    published = models.BooleanField(default=False)
+    axes = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "The questions the configurator asks, in order, as product "
+            "attribute slugs."
+        ),
+    )
+    partitioning_axis = models.CharField(
+        max_length=250,
+        help_text=(
+            "The one axis that decides WHICH product the shopper ends up on. "
+            "It must be one of the axes above, and every member of the "
+            "collection must carry that attribute, or publishing is refused."
+        ),
+    )
+    miss_message = models.TextField(
+        blank=True,
+        help_text=(
+            "What a shopper is told when their answers match nothing in this "
+            "series. Leave blank for the storefront's standard wording."
+        ),
+    )
+    published = models.BooleanField(
+        default=False,
+        help_text=(
+            "Show this series on the storefront. Saving with this on is refused "
+            "unless the collection has 2 or more published products and every "
+            "one of them carries the partitioning attribute."
+        ),
+    )
 
     class Meta:
         ordering = ("pk",)
@@ -140,16 +179,45 @@ class KitConfig(models.Model):
     """What a Collection needs to behave as a kit: a discount, and members."""
 
     collection = models.OneToOneField(
-        "product.Collection", related_name="wsm_kit", on_delete=models.CASCADE
+        "product.Collection",
+        related_name="wsm_kit",
+        on_delete=models.CASCADE,
+        help_text=(
+            "The collection this kit is sold as. Its products are the kit's "
+            "members, listed below with the quantity of each."
+        ),
     )
     discount_kind = models.CharField(
-        max_length=10, choices=DISCOUNT_KIND_CHOICES, default=pricing.FIXED
+        max_length=10,
+        choices=DISCOUNT_KIND_CHOICES,
+        default=pricing.FIXED,
+        help_text=(
+            "How the saving below is read: 'fixed' is an amount off the whole "
+            "kit, 'percentage' is a share off it."
+        ),
     )
     discount_amount = models.DecimalField(
-        max_digits=12, decimal_places=2, default=0, help_text="Currency, or percent."
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        help_text=(
+            "The saving off the members' own prices added up: an amount in the "
+            "shop's currency, or a percentage, per the kind above. 0 sells the "
+            "kit at the sum of its parts."
+        ),
     )
-    freight_class = models.CharField(max_length=50, blank=True)
-    active = models.BooleanField(default=True)
+    freight_class = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text=(
+            "Freight class for the kit as one shipment. Blank leaves shipping "
+            "to work off the members."
+        ),
+    )
+    active = models.BooleanField(
+        default=True,
+        help_text="Off takes the kit price away; the members still sell on their own.",
+    )
 
     class Meta:
         ordering = ("pk",)
@@ -202,9 +270,16 @@ class KitMember(models.Model):
         "product.ProductVariant",
         related_name="wsm_kit_memberships",
         on_delete=models.CASCADE,
+        help_text="The SKU this kit contains. Search by product name or SKU.",
     )
-    quantity = models.PositiveIntegerField(default=1)
-    sort_order = models.IntegerField(default=0)
+    quantity = models.PositiveIntegerField(
+        default=1,
+        help_text="How many of this SKU one kit contains.",
+    )
+    sort_order = models.IntegerField(
+        default=0,
+        help_text="Lowest first. Members with the same number fall back to the order added.",
+    )
 
     class Meta:
         ordering = ("sort_order", "pk")

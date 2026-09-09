@@ -158,8 +158,11 @@ def test_the_merchant_screens_register(db):
     from saleor.wsm.compose.admin import site
 
     assert {SeriesConfig, KitConfig} <= set(site._registry)
-    assert site._registry[SeriesConfig].raw_id_fields == ("collection",)
+    # Autocomplete, not raw id: the picker admins in saleor/wsm/admin_pickers.py
+    # give the widget a Collection and a ProductVariant list to resolve against,
+    # which is what a bare id box never had.
+    assert site._registry[SeriesConfig].autocomplete_fields == ("collection",)
     kit_admin = site._registry[KitConfig]
-    assert kit_admin.raw_id_fields == ("collection",)
+    assert kit_admin.autocomplete_fields == ("collection",)
     assert kit_admin.inlines[0].model is KitMember
-    assert kit_admin.inlines[0].raw_id_fields == ("variant",)
+    assert kit_admin.inlines[0].autocomplete_fields == ("variant",)

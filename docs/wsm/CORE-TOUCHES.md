@@ -397,7 +397,15 @@ Why a patch and not a stock lever, all three checked in the 3.23.31 source first
 
 Cost when it does nothing: zero. A checkout with no dealer line takes the
 original path with no extra call and no settings query. The toggle is read only
-once a dealer line is present, and cached per process.
+once a dealer line is present, and then it is read from its own row: ONE indexed
+single-row query per guard that fires, never on a retail cart. It used to be
+cached in a process global with a `post_save` signal to clear it, which is only
+true for the one process the save happened in. Gunicorn runs several workers and
+celery prices too, so a merchant turning stacking off in the console left every
+other worker stacking a discount onto dealer prices until it cycled, and which
+price a shopper got depended on which worker took the request. A `.update()`,
+which a bulk action or a data migration uses, reached nobody at all. One query is
+cheaper than a wrong price.
 
 Upstream change that deletes this file: a documented per-line discount exclusion
 on the checkout path, for example a `CheckoutLine.discounts_excluded` flag or a
@@ -499,7 +507,7 @@ Cost when it does nothing: zero. Every wrapper's first act is a dict-key test on
 lines already in memory. With no dealer line among them the original runs on the
 original arguments, and no query, no settings read and no `Money` arithmetic is
 added. The toggle is consulted only once a dealer line is present, and it is the
-same per-process cached read MP1 uses, so a retail-only fleet pays nothing.
+same one-row read MP1 uses, so a retail-only fleet pays nothing.
 
 Upstream change that deletes this file: an exclusion honoured by the order-level
 discount base, for example a `discountable` predicate on the line consulted by

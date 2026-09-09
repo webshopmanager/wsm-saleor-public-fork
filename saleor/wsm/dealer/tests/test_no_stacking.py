@@ -30,13 +30,6 @@ from ..no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON, catalogue_gu
 pytestmark = pytest.mark.django_db
 
 
-@pytest.fixture(autouse=True)
-def clear_toggle_cache():
-    no_stacking.reset_cache()
-    yield
-    no_stacking.reset_cache()
-
-
 @pytest.fixture
 def retail_variant(product, channel_USD):
     variant = ProductVariant.objects.create(product=product, sku="SKU_RETAIL")
@@ -119,6 +112,30 @@ def test_the_same_voucher_stacks_once_the_merchant_turns_stacking_on(
     assert by_line[retail_line.pk] == Money(Decimal("9.00"), "USD")
 
 
+def test_turning_stacking_off_takes_effect_without_cycling_the_workers(
+    checkout_with_a_dealer_line_and_a_retail_line,
+):
+    """The toggle was read once per process and remembered.
+
+    A `post_save` signal cleared it, which is only ever true for the ONE process
+    the save happened in. Gunicorn runs several workers and celery prices too, so
+    a merchant turning stacking off left the others stacking a discount onto
+    dealer prices until they cycled, and which price a shopper got came down to
+    which worker answered. A `.update()`, which the console's bulk action and any
+    data migration use, fired no signal at all and so reached nobody.
+
+    That process is this one: read the toggle, change the row the way a signal
+    cannot see, and the next price must already know.
+    """
+    checkout, dealer_line, retail_line = checkout_with_a_dealer_line_and_a_retail_line
+    DealerSettings.objects.create(discount_stacking=True)
+    assert totals(checkout)[dealer_line.pk] == Money(Decimal("7.20"), "USD")
+
+    DealerSettings.objects.update(discount_stacking=False)
+
+    assert totals(checkout)[dealer_line.pk] == Money(Decimal("8.00"), "USD")
+
+
 def test_no_row_means_the_toggle_is_off(db):
     assert DealerSettings.stacking_enabled() is False
 
@@ -160,7 +177,6 @@ def test_catalogue_promotions_are_offered_only_the_retail_lines(db):
 
     # Toggle on and the stock function gets every line back, untouched.
     DealerSettings.objects.create(discount_stacking=True)
-    no_stacking.reset_cache()
     catalogue_guard(original)([dealer, retail])
     assert seen[-1] == [dealer, retail]
 
@@ -302,7 +318,6 @@ def test_the_merchant_can_turn_the_entire_order_stacking_back_on(
     entire_order_checkout,
 ):
     DealerSettings.objects.create(discount_stacking=True)
-    no_stacking.reset_cache()
 
     manager, checkout_info, lines_info, dealer_line, retail_line = entire_order_checkout(
         dealer=True

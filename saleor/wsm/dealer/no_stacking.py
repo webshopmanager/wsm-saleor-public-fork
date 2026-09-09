@@ -63,7 +63,6 @@ CATALOGUE_BINDING_SITES = patches.PINNED[CATALOGUE]
 _installed = False
 _voucher_guard = None
 _catalogue_guard = None
-_stacking: bool | None = None
 
 
 def is_dealer_line(line) -> bool:
@@ -80,25 +79,23 @@ def is_dealer_line(line) -> bool:
 
 
 def stacking_enabled() -> bool:
-    """The toggle, cached per process.
+    """The toggle, read from its one row, once per guard that fires.
 
-    ponytail: process-local, so a merchant flipping the toggle needs the workers
-    to cycle, or a second worker keeps stacking for its lifetime. Correct for one
-    tenant per instance (design doc section 6). When this box serves more than
-    one, move the cache to `django.core.cache` keyed by tenant and drop the
-    signal below.
+    ONE indexed single-row query, and only on a checkout that has a dealer line,
+    because every caller checks that first and returns before asking. A retail
+    cart still costs zero.
+
+    It was a process global with a `post_save` signal to clear it. A signal only
+    reaches the process it fires in: gunicorn runs several workers and a celery
+    worker prices too, so a merchant turning stacking off in the console left
+    every OTHER worker stacking a discount onto dealer prices for the rest of its
+    life, and which price a shopper got depended on which worker took the
+    request. The signal also missed `.update()` and `bulk_update()` entirely.
+    One query is cheaper than a wrong price.
     """
-    global _stacking
-    if _stacking is None:
-        from .models import DealerSettings
+    from .models import DealerSettings
 
-        _stacking = DealerSettings.stacking_enabled()
-    return _stacking
-
-
-def reset_cache(**_kwargs) -> None:
-    global _stacking
-    _stacking = None
+    return DealerSettings.stacking_enabled()
 
 
 def voucher_guard(original):
@@ -171,11 +168,5 @@ def install() -> None:
         return
     _installed = True
 
-    from django.db.models.signals import post_delete, post_save
-
-    from .models import DealerSettings
-
     _guard_vouchers()
     _guard_catalogue_promotions()
-    post_save.connect(reset_cache, sender=DealerSettings, dispatch_uid="wsm_dealer")
-    post_delete.connect(reset_cache, sender=DealerSettings, dispatch_uid="wsm_dealer")

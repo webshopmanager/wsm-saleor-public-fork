@@ -7,12 +7,13 @@ variants is one round trip and not two; the retail price each row must sit under
 rides along as a correlated subquery in the same statement. Design budget,
 section 5: "Dealer display batch: 1 query for up to 100 variants."
 
-The retail floor is applied HERE, once, rather than at each caller: a tier row
-above the channel's retail price is not an offer, so it never reaches a ladder
-and never reaches a line. Refusing rather than clamping is Compose's rule for
-option-value tiers (`AboveRetailError`); a variant tier is a whole price rather
-than a delta, and a shopper standing on a product page is the wrong audience for
-a merchant's data bug, so here the bad row is simply not offered and the buyer
+Both bounds are applied HERE, once, rather than at each caller: a tier row above
+the channel's retail price is not an offer, and neither is one at or below zero,
+so neither reaches a ladder and neither reaches a line. Refusing rather than
+clamping is Compose's rule for option-value tiers (`AboveRetailError`); a variant
+tier is a whole price rather than a delta, and a shopper standing on a product
+page is the wrong audience for a merchant's data bug, so the bad row is simply
+not offered and the buyer
 falls back to retail.
 
 Every amount leaves here already rounded to the cent it will be charged at, by
@@ -127,12 +128,18 @@ def ladders(
 
     found: dict[int, list[DealerPrice]] = defaultdict(list)
     for variant_id, min_quantity, amount, group_code, retail_amount in rows:
-        # Rounded before the floor is applied, so the comparison is against the
-        # number the buyer would actually be charged.
-        money = to_money(amount)
-        if retail_amount is not None and money > retail_amount:
+        # Rounded before either bound is applied, so both comparisons are
+        # against the number the buyer would actually be charged.
+        charged = to_money(amount)
+        # A price at or below nothing is not an offer at any quantity. The field
+        # validator and the table constraint stop new ones; this catches the
+        # rows written before they existed, and the 0.004 that is a positive
+        # number and a zero charge.
+        if charged <= 0:
             continue
-        found[variant_id].append(DealerPrice(money, min_quantity, group_code))
+        if retail_amount is not None and charged > retail_amount:
+            continue
+        found[variant_id].append(DealerPrice(charged, min_quantity, group_code))
     return dict(found)
 
 

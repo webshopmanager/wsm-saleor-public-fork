@@ -127,6 +127,17 @@ before it was fixed. Each carries what it let through.
   point at the one function, so no caller changed. HALF_UP is the rule because
   it is what the ladders already quote and what a merchant means by half a cent;
   Saleor's own `quantize_price` stays HALF_EVEN and is untouched.
+- **A dealer tier price is at least one cent.** `TierPrice.amount` is an
+  absolute price, not a discount, so a zero or negative one is not a deep
+  discount but a line that pays the shopper. Nothing checked it: on the bake-off
+  box a row of -50 priced a real checkout line at a unit price of -50.00, and a
+  dealer could have ordered a cart that owed him money. Three statements of one
+  rule now: a `MinValueValidator` on the field for the merchant, a
+  `CheckConstraint` on our own `wsm_dealer_tierprice` table for the importer and
+  the shell, and a floor in `ladders()`, which is the single read every dealer
+  price comes out of, for the rows written before either existed. The floor is a
+  cent rather than "above zero" because the amount carries three decimals and is
+  charged at two: 0.004 is a positive number and a zero charge.
 
 Where one submit changes several rows at once, the value inline formset
 (`compose/forms.py`) runs both cross-row rules over the whole POST and the rows

@@ -51,14 +51,44 @@ class ComposeRefusal(Exception):
     """Base for every refusal. Nothing here is ever clamped or ignored."""
 
 
+def format_money(cents: int) -> str:
+    """Integer cents as a signed, thousand-separated amount: -935000 -> -9,350.00.
+
+    No currency symbol and no currency code: this module prices in cents and
+    knows nothing about a channel, and threading a currency through every call
+    to decorate one refusal would buy a symbol at the cost of a parameter on the
+    pricing path. The storefront and the admin each know their own currency.
+    """
+    sign = "-" if cents < 0 else ""
+    whole, frac = divmod(abs(int(cents)), 100)
+    return f"{sign}{whole:,}.{frac:02d}"
+
+
 class NegativeTotalError(ComposeRefusal):
-    """The selections were all legal and the catalog still produced no money."""
+    """The selections were all legal and the catalog still produced no money.
+
+    The message reaches a SHOPPER, in the 422 the storefront shows, so it is
+    written in currency units and in words a shopper can act on. Cents read as a
+    developer note ("configured price is -935000 cents"). The number is still on
+    `total_cents` for anything that wants it.
+
+    Reaching this at all now means the rows were written outside the merchant
+    screens: `minimum_configured_cents` below is what `OptionValue.clean()`
+    checks, so a catalog that can produce this cannot be saved in the admin.
+    """
 
     def __init__(self, total_cents: int, *, line: bool = False):
         self.total_cents = total_cents
         self.line = line
-        where = "configured line and its fees total" if line else "configured price is"
-        super().__init__(f"{where} {total_cents} cents; refusing to create the line")
+        what = (
+            "This item and its charges come to"
+            if line
+            else "This configuration comes to"
+        )
+        super().__init__(
+            f"{what} {format_money(total_cents)}, which is not a valid price. "
+            "Please contact us."
+        )
 
 
 class AboveRetailError(ComposeRefusal):
@@ -402,3 +432,40 @@ def price_configured(
             "fee_total_cents": fee_total,
         },
     )
+
+
+def minimum_configured_cents(base_unit_cents: int, option_sets) -> int:
+    """The cheapest unit price these option sets can produce on this base.
+
+    The floor, not a sample: what a shopper would pay if they answered every
+    prompt the cheapest legal way. `price_configured` refuses at or below zero
+    (requirement 1.3), so a floor at or below zero means the catalog carries a
+    configuration that 422s at add-to-cart, which is the defect the merchant
+    walk found. `OptionValue.clean()` checks this before the row is saved, so
+    the refusal is a form error on the price field instead of a broken buy
+    button nobody sees until a shopper hits it.
+
+    Per set, the cheapest legal answer is:
+      required choice_one   the lowest delta, because one must be picked;
+      any choice_many       every negative delta, because all may be picked;
+      optional choice_one   the lowest delta or nothing, whichever is lower;
+      a text prompt         nothing, it carries no delta.
+    Tier deltas are excluded on purpose: `delta_for` floors a tier row at the
+    retail delta for positives and takes credits verbatim, so a tier row can
+    price BELOW this floor. That is a dealer-catalog rule and belongs with the
+    dealer rows, not on a retail value the merchant is editing.
+    """
+    floor = base_unit_cents
+    for option_set in option_sets:
+        deltas = [v.price_delta for v in option_set.values]
+        if not deltas:
+            continue
+        if option_set.prompt_type in TEXT_PROMPTS:
+            continue
+        if option_set.prompt_type == CHOICE_MANY:
+            floor += sum(d for d in deltas if d < 0)
+        elif option_set.required:
+            floor += min(deltas)
+        else:
+            floor += min(min(deltas), 0)
+    return floor

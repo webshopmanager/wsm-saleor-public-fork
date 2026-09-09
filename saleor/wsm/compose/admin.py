@@ -16,12 +16,12 @@ whatever a future app drops on the default one.
 from functools import wraps
 
 from django.contrib import admin
-from django.db.models import Count
-from django.urls import URLResolver
+from django.db.models import Count, IntegerField, OuterRef, Subquery
+from django.urls import URLResolver, reverse
 from django.utils.html import format_html
 
 from ...core.db.connection import allow_writer
-from ...product.models import Product
+from ...product.models import Product, ProductChannelListing
 from .forms import (
     DealerTierOptionPriceForm,
     FeeForm,
@@ -29,7 +29,10 @@ from .forms import (
     OptionValueAdminForm,
     OptionValueInlineForm,
     OptionValueInlineFormSet,
+    label_money_field,
+    money,
 )
+from . import pricing
 from .models import DealerTierOptionPrice, Fee, OptionSet, OptionValue
 
 
@@ -85,6 +88,22 @@ def _cell(text):
     )
 
 
+def _with_currency(queryset, product_path):
+    """Carry the product's channel currency on the row, not one query per row.
+
+    A money column with no currency on it is the defect; asking per row is the
+    expensive way to fix it. This is a correlated subquery on the query the
+    changelist already runs, so the page cost does not move.
+    """
+    return queryset.annotate(
+        wsm_currency=Subquery(
+            ProductChannelListing.objects.filter(
+                product_id=OuterRef(product_path)
+            ).values("currency")[:1]
+        )
+    )
+
+
 class ComposeAdminSite(admin.AdminSite):
     site_header = "WSM Compose"
     site_title = "WSM Compose"
@@ -134,12 +153,26 @@ class OptionValueInline(admin.TabularInline):
     fields = ("sort_order", "name", "sku_fragment", "price_delta", "image_url")
     show_change_link = True
 
+    def get_formset(self, request, obj=None, **kwargs):
+        formset = super().get_formset(request, obj, **kwargs)
+        label_money_field(
+            formset, "price_delta", obj.product_id if obj else None
+        )
+        return formset
+
 
 class DealerTierOptionPriceInline(admin.TabularInline):
     model = DealerTierOptionPrice
     form = DealerTierOptionPriceForm
     extra = 1
     fields = ("tier_group", "price_delta")
+
+    def get_formset(self, request, obj=None, **kwargs):
+        formset = super().get_formset(request, obj, **kwargs)
+        label_money_field(
+            formset, "price_delta", obj.option_set.product_id if obj else None
+        )
+        return formset
 
 
 @admin.register(OptionSet, site=site)
@@ -196,7 +229,7 @@ class OptionValueAdmin(WsmAdminMixin, admin.ModelAdmin):
         "product",
         "name",
         "sku_fragment",
-        "price_delta",
+        "price_change",
         "sort_order",
         "option_set",
     )
@@ -205,9 +238,18 @@ class OptionValueAdmin(WsmAdminMixin, admin.ModelAdmin):
     raw_id_fields = ("option_set",)
     inlines = [DealerTierOptionPriceInline]
 
+    def get_queryset(self, request):
+        return _with_currency(super().get_queryset(request), "option_set__product_id")
+
     @admin.display(description="Product", ordering="option_set__product__name")
     def product(self, obj):
         return _cell(obj.option_set.product)
+
+    @admin.display(description="Price change", ordering="price_delta")
+    def price_change(self, obj):
+        return money(
+            obj.price_delta, getattr(obj, "wsm_currency", "") or "", signed=True
+        )
 
 
 @admin.register(Fee, site=site)
@@ -225,7 +267,7 @@ class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
         "label",
         "sku",
         "charged_as",
-        "amount",
+        "charge",
         "how_often",
         "required",
     )
@@ -260,9 +302,19 @@ class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
         ),
     )
 
+    def get_queryset(self, request):
+        return _with_currency(super().get_queryset(request), "product_id")
+
     @admin.display(description="Charged as", ordering="basis")
     def charged_as(self, obj):
         return obj.get_basis_display()
+
+    @admin.display(description="Charge", ordering="amount")
+    def charge(self, obj):
+        """One column, two units: the basis decides which one this row is in."""
+        if obj.basis == pricing.PERCENT:
+            return f"{obj.amount}%"
+        return money(obj.amount, getattr(obj, "wsm_currency", "") or "")
 
     @admin.display(description="How often", ordering="apply_to")
     def how_often(self, obj):

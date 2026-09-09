@@ -9,11 +9,15 @@ that middleware is enabled, which is the state the box is one environment
 variable away from.
 """
 
+from decimal import Decimal
+
 import pytest
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 
 from saleor.permission.models import Permission
+from saleor.wsm.compose import pricing
+from saleor.wsm.compose.models import Fee, OptionSet, OptionValue
 
 BACKEND = "saleor.wsm.compose.auth.AdminPasswordBackend"
 
@@ -62,3 +66,50 @@ def test_the_login_page_renders(client):
     response = client.get("/admin/login/")
 
     assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_the_fee_list_shows_money_with_its_currency(client, merchant, product):
+    """A charge with no currency on it is a number a merchant has to guess at."""
+    client.force_login(merchant, backend=BACKEND)
+    Fee.objects.create(
+        product=product, label="Freight crating", basis=pricing.FIXED, amount=Decimal("149")
+    )
+
+    body = client.get("/admin/wsm_compose/fee/").content.decode()
+
+    assert "149.00 USD" in body
+
+
+@pytest.mark.django_db
+def test_the_fee_list_shows_a_percentage_as_a_percentage(client, merchant, product):
+    """The same column carries two units; the basis is what says which."""
+    client.force_login(merchant, backend=BACKEND)
+    Fee.objects.create(
+        product=product, label="Handling", basis=pricing.PERCENT, amount=Decimal("8.25")
+    )
+
+    body = client.get("/admin/wsm_compose/fee/").content.decode()
+
+    assert "8.25%" in body
+    assert "8.25 USD" not in body
+
+
+@pytest.mark.django_db
+def test_the_option_value_list_signs_the_price_change(client, merchant, product):
+    """A credit and a surcharge are the same string without the sign."""
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
+    OptionValue.objects.create(
+        option_set=option_set, name="Black", price_delta=Decimal("25")
+    )
+    OptionValue.objects.create(
+        option_set=option_set, name="Omit filter", price_delta=Decimal("-29.99")
+    )
+
+    body = client.get("/admin/wsm_compose/optionvalue/").content.decode()
+
+    assert "+25.00 USD" in body
+    assert "-29.99 USD" in body
+
+

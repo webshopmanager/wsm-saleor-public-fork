@@ -145,6 +145,44 @@ def test_tier_price_search_by_product_name_returns_only_that_row(
     assert decoy.sku not in body
 
 
+def test_tier_price_list_shows_two_places_and_the_currency(merchant, variant, group):
+    """"228.000" reads as a bug and "0.000" reads as free. Storage keeps 3 places."""
+    price(variant, group, amount="228.000")
+
+    body = merchant.get(TIER_PRICES).content.decode()
+
+    assert "228.00 USD" in body
+    assert "228.000" not in body
+
+
+def test_tier_price_form_takes_two_places_and_names_the_currency(
+    merchant, variant, group
+):
+    """The input a merchant types into, not just the column they read."""
+    row = price(variant, group, amount="228.000")
+
+    body = merchant.get(f"{TIER_PRICES}{row.pk}/change/").content.decode()
+
+    assert "What this group pays each (USD)" in body
+    assert 'value="228.00"' in body
+
+
+def test_tier_price_form_refuses_a_tenth_of_a_cent(merchant, variant, group):
+    """Three places is a storage decision, never something a merchant means."""
+    response = merchant.post(
+        f"{TIER_PRICES}add/",
+        {
+            "variant": variant.pk,
+            "group": group.pk,
+            "min_quantity": "1",
+            "amount": "228.004",
+        },
+    )
+
+    assert response.status_code == 200
+    assert not TierPrice.objects.filter(variant=variant).exists()
+
+
 # --- the dealer customer list -------------------------------------------------
 
 

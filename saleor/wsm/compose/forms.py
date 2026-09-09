@@ -1,0 +1,220 @@
+# WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
+"""The merchant's forms: the model's rules, said in the merchant's words.
+
+Nothing here decides anything. Every refusal comes from a model `clean()` in
+models.py, so a writer that never renders a form gets the same answer. What
+lives here is the part a model cannot know: the wording on a label, the currency
+a channel prices in, and the two rules that span a whole inline formset instead
+of one row.
+
+Why the formset owns the floor while the option-set screen is open: a merchant
+editing a question edits several credits in one submit, and a row checked
+against its STORED siblings would refuse the very submit that fixes them. The
+rows carry `floor_checked_by_formset` so the model skips its own single-row
+version exactly there, and nowhere else.
+"""
+
+from django import forms
+from django.core.exceptions import ValidationError
+from django.forms.models import BaseInlineFormSet
+
+from .models import (
+    Fee,
+    OptionSet,
+    OptionValue,
+    configured_floor_cents,
+    duplicate_fragment_error,
+    floor_error,
+    tier_group_choices,
+)
+
+# Short on purpose: these are the column headers of a tabular inline, and a
+# header that wraps is what made the option-set list unreadable in the first
+# place. The help text under each field carries the detail.
+VALUE_LABELS = {
+    "name": "Choice",
+    "sku_fragment": "SKU code",
+    "price_delta": "Price change",
+    "image_url": "Image",
+}
+
+
+def _currency_for(product_id) -> str:
+    """The currency this product is priced in, for the amount label.
+
+    A merchant typing into a box labelled "Amount" has to guess. The product's
+    own channel listing is the only honest answer, and the shop's channel is the
+    fallback while a charge is being added and no product is chosen yet.
+    """
+    from ...channel.models import Channel
+    from ...product.models import ProductChannelListing
+
+    if product_id:
+        currency = (
+            ProductChannelListing.objects.filter(product_id=product_id)
+            .values_list("currency", flat=True)
+            .first()
+        )
+        if currency:
+            return currency
+    return Channel.objects.values_list("currency_code", flat=True).first() or ""
+
+
+class FeeForm(forms.ModelForm):
+    """Defect 4: developer vocabulary, no currency, no percent semantics.
+
+    `variant` is off the form entirely. It is written by the first configured
+    add, never by hand, and a merchant editing it can only break the charge. The
+    admin still SHOWS it, read-only, in a collapsed Internal section, because
+    support needs to know which hidden row a charge rides on.
+    """
+
+    class Meta:
+        model = Fee
+        exclude = ("variant",)
+        labels = {
+            "product": "Product",
+            "label": "Charge name shown to the shopper",
+            "sku": "Your code for this charge",
+            "basis": "Charged as",
+            "apply_to": "How often",
+            "required": "Always charged",
+            "decline_label": "Wording when the shopper declines",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        currency = _currency_for(
+            self.instance.product_id or self.initial.get("product")
+        )
+        if currency:
+            self.fields["amount"].label = f"Amount ({currency}, or a percentage)"
+
+
+class DealerTierOptionPriceForm(forms.ModelForm):
+    """Defect 3: free text saved a group nobody belongs to and reported success.
+
+    A dropdown of the groups that exist, so the no-op cannot be typed. The model
+    still validates the code (`DealerTierOptionPrice.clean`), because a dropdown
+    is a courtesy and not a rule: an importer or a shell writes straight past it.
+    """
+
+    class Meta:
+        fields = "__all__"
+        labels = {"price_delta": "This group pays"}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        codes = tier_group_choices()
+        current = self.instance.tier_group if self.instance.pk else ""
+        # A row pointing at a group that has since been deleted still has to
+        # render. It fails validation on save, which is the right place to hear
+        # about it.
+        if current and current not in codes:
+            codes = [current] + codes
+        self.fields["tier_group"] = forms.ChoiceField(
+            label="Dealer group",
+            choices=[("", "---------")] + [(code, code) for code in codes],
+            help_text=(
+                "Dealer groups are managed under Dealer groups. A price for a "
+                "group that does not exist is never charged to anyone."
+            ),
+        )
+
+
+class OptionSetAdminForm(forms.ModelForm):
+    """Required and the prompt type both move the floor, and so do the values."""
+
+    class Meta:
+        model = OptionSet
+        fields = "__all__"
+        labels = {
+            "label": "Question shown to the shopper",
+            "name": "Internal name",
+            "prompt_type": "How the shopper answers",
+            "note": "Help shown under the question",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.instance.floor_checked_by_formset = True
+
+
+class OptionValueAdminForm(forms.ModelForm):
+    """The choice on its own page, where the model checks it row at a time.
+
+    No `floor_checked_by_formset` here: one row submitted alone IS the whole
+    submit, so the model's own check is the right one.
+    """
+
+    class Meta:
+        model = OptionValue
+        fields = "__all__"
+        labels = VALUE_LABELS
+
+
+class OptionValueInlineForm(forms.ModelForm):
+    class Meta:
+        model = OptionValue
+        fields = "__all__"
+        labels = VALUE_LABELS
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.instance.floor_checked_by_formset = True
+
+
+class OptionValueInlineFormSet(BaseInlineFormSet):
+    """The two rules a single row cannot see, checked across the whole submit.
+
+    Three new credits added at once are each fine against the database and
+    broken together; two new choices given the same SKU code are each unique
+    against the database and identical to each other. Both were reachable from
+    the screen the merchant walk used. The formset holds every value the
+    question has, so pending against pending is the whole picture.
+    """
+
+    def clean(self):
+        super().clean()
+        if any(self.errors):
+            return
+
+        pending, removed = [], []
+        for form in self.forms:
+            if not form.cleaned_data:
+                continue
+            if form.cleaned_data.get("DELETE"):
+                if form.instance.pk:
+                    removed.append(form.instance.pk)
+                continue
+            pending.append(form)
+
+        seen = {}
+        for form in pending:
+            fragment = form.cleaned_data.get("sku_fragment")
+            if not fragment:
+                continue
+            if fragment in seen:
+                form.add_error(
+                    "sku_fragment", duplicate_fragment_error(seen[fragment], fragment)
+                )
+            else:
+                seen[fragment] = form.cleaned_data.get("name") or "another choice"
+        if any(self.errors):
+            return
+
+        product_id = getattr(self.instance, "product_id", None)
+        if not product_id:
+            return
+        values = []
+        for form in pending:
+            form.instance.option_set_id = self.instance.pk
+            values.append(form.instance)
+        floor, base = configured_floor_cents(
+            product_id,
+            pending_set=self.instance,
+            pending_values=values,
+            removed_value_pks=removed,
+        )
+        if floor is not None and floor <= 0:
+            raise ValidationError(floor_error(floor, base))

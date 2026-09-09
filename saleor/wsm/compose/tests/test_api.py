@@ -344,7 +344,9 @@ def test_a_configuration_priced_below_zero_is_refused(
     )
 
     assert response.status_code == 422
-    assert "refusing to create the line" in response.json()["violations"][0]
+    # The shopper reads this. Currency units, never cents (defect 5).
+    assert "-3,001.01" in response.json()["violations"][0]
+    assert "not a valid price" in response.json()["violations"][0]
     assert checkout.lines.count() == 0
 
 

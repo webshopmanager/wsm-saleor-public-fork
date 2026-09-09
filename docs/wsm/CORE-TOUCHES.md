@@ -31,10 +31,34 @@ Every patch this fork installs is named, once, in `saleor/wsm/patches.py` as
 with every module that holds that function as an attribute. One entry per
 function, not one per binding site.
 
+Fork migrations, after the integration squash: **three files, one per app.**
+
+| App | File |
+|---|---|
+| `wsm_compose` | `saleor/wsm/compose/migrations/0001_initial.py` |
+| `wsm_dealer` | `saleor/wsm/dealer/migrations/0001_initial.py` |
+| `wsm_containers` | `saleor/wsm/containers/migrations/0001_initial.py` |
+
+Nothing else. The 0002s and 0003s the unit branches wrote are gone: they had
+only ever run on bake-off databases, so the three apps were regenerated from
+their models rather than carrying a history no deployment has. Each 0001 is the
+whole app, constraints included, and the `wsm_dealer` one carries the
+CheckConstraint `wsm_dealer_tier_amount_at_least_a_cent`.
+`makemigrations --check` is clean and `migrate --check` is clean on
+`saleor_bakeoff_merge`, which was fake-reset to zero and then fake-initialed
+onto the squash. The two state-only migration packages described below,
+`saleor/wsm/compose/django_auth_migrations/` and `saleor/wsm/migrations/` from
+section 7, are separate and untouched by this.
+
 Both counts are assertions, not claims.
 `saleor/wsm/tests/test_core_tables_untouched.py` discovers the patches actually
 installed in the running process by sweeping `sys.modules` for a wrapper whose
-code lives under `saleor/wsm/`, and fails on any that `PINNED` does not name. It
+code lives under `saleor/wsm/`, and fails on any that `PINNED` does not name.
+That sweep believes the `__code__` of a value only when it is a real
+`types.CodeType`: a test double left in a core module namespace answers every
+attribute it is asked for, so trusting the answer made the guard die on
+`co_filename` under a full-suite run instead of reporting, and a guard that
+errors is a guard that has stopped guarding. It
 also walks every fork migration's DATABASE operations for a non-`wsm_` table,
 including the list and `(sql, params)` forms of `RunSQL` and both directions,
 and refuses a `RunPython` in a fork migration unless the file carries a

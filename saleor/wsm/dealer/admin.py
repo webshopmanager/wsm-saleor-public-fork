@@ -147,8 +147,21 @@ class DealerSettingsAdmin(WsmAdminMixin, admin.ModelAdmin):
     list_display = ("__str__", "discount_stacking")
 
     def has_add_permission(self, request):
-        # One row or none: a second would make "the toggle" ambiguous.
-        return super().has_add_permission(request) and not DealerSettings.objects.exists()
+        """Never an Add form.
+
+        The index offered "Dealer settings + Add" and nothing else, which is an
+        operator trap twice over: it invites a merchant to create a second
+        settings row, and it hides the one screen they were looking for. The
+        row is created by the doorway below instead, so the only link on the
+        index is Change.
+        """
+        return False
+
+    def _may_create(self, request):
+        """The add permission, asked directly, because `has_add_permission` is
+        now answering a different question (may a merchant open an Add FORM)."""
+        user = request.user
+        return user.is_superuser or user.has_perm("wsm_dealer.add_dealersettings")
 
     def has_delete_permission(self, request, obj=None):
         # Deleting the row would silently revert to the defaults, which is the
@@ -158,7 +171,7 @@ class DealerSettingsAdmin(WsmAdminMixin, admin.ModelAdmin):
     def changelist_view(self, request, extra_context=None):
         row = DealerSettings.objects.first()
         if row is None:
-            if not self.has_add_permission(request):
+            if not self._may_create(request):
                 self.message_user(
                     request,
                     "No dealer settings row exists yet, so the defaults apply: "

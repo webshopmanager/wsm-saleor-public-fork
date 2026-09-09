@@ -298,3 +298,25 @@ def test_validate_tier_group_code_accepts_a_real_code(group):
     from ..models import validate_tier_group_code
 
     assert validate_tier_group_code("dealer-1") is None
+
+
+def test_the_settings_singleton_offers_no_add_screen(merchant):
+    """Add was the only doorway on a table that may hold exactly one row.
+
+    A merchant granted the settings permissions saw ADD, filled the form in and
+    got "already exists" from a unique constraint, with no way to reach the row
+    that already existed. The changelist redirect below is the doorway; Add is
+    now refused even for the user who holds `add_dealersettings`.
+    """
+    DealerSettings.objects.all().delete()
+
+    refused_empty = merchant.get(f"{DEALER_SETTINGS}add/")
+    landed = merchant.get(DEALER_SETTINGS)
+    row = DealerSettings.objects.get()
+    refused_full = merchant.get(f"{DEALER_SETTINGS}add/")
+
+    # Refused with no row too: the doorway makes the row, so Add is never the
+    # way in, and a merchant who lands on Add cannot reach the row that exists.
+    assert refused_empty.status_code == 403
+    assert landed["Location"].endswith(f"{DEALER_SETTINGS}{row.pk}/change/")
+    assert refused_full.status_code == 403

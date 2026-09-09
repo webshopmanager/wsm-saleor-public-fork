@@ -82,3 +82,35 @@ def test_it_takes_back_a_permission_that_is_not_ours():
     make_role()
 
     assert stray.pk not in set(group.permissions.values_list("pk", flat=True))
+
+
+def test_the_whole_console_is_one_group_in_the_order_a_merchant_works(
+    staff_user, rf
+):
+    """One heading, and the screens under it in task order.
+
+    The stock index groups by app: WSM COMPOSE, WSM CONTAINERS and WSM DEALER
+    PRICING, three headings for one job, ordered by app label. Three apps is an
+    implementation fact about table prefixes.
+    """
+    make_role()
+    staff_user.groups.add(Group.objects.get(name="Merchant"))
+    request = rf.get("/admin/")
+    request.user = staff_user
+
+    app_list = site.get_app_list(request)
+
+    assert [app["name"] for app in app_list] == ["Products"]
+    shown = [entry["model"].__name__ for entry in app_list[0]["models"]]
+    assert shown[:8] == [
+        "OptionSet",
+        "Fee",
+        "DealerGroup",
+        "DealerCustomer",
+        "TierPrice",
+        "DealerSettings",
+        "KitConfig",
+        "SeriesConfig",
+    ]
+    # Registered and unranked screens still appear, at the end.
+    assert set(shown[8:]) == {"OptionValue", "Product"}

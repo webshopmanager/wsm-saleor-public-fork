@@ -143,6 +143,64 @@ class ComposeAdminSite(admin.AdminSite):
     site_title = "WSM Compose"
     index_title = "Product configuration"
 
+    # The order a merchant works in, not the order three AppConfigs happen to
+    # be registered in. Three apps is an implementation fact: the `wsm_` table
+    # prefixes depend on the labels, and the merchant's job never did. Anything
+    # registered and not named here still appears, at the end, so a new screen
+    # is never invisible.
+    merchant_order = (
+        ("wsm_compose", "OptionSet"),
+        ("wsm_compose", "Fee"),
+        ("wsm_dealer", "DealerGroup"),
+        ("wsm_dealer", "DealerCustomer"),
+        ("wsm_dealer", "TierPrice"),
+        ("wsm_dealer", "DealerSettings"),
+        ("wsm_containers", "KitConfig"),
+        ("wsm_containers", "SeriesConfig"),
+    )
+
+    def get_app_list(self, request, app_label=None):
+        """One group, in task order, whoever the merchant is.
+
+        The stock index groups by app, so this console showed WSM COMPOSE, WSM
+        CONTAINERS and WSM DEALER PRICING as three unrelated headings, and which
+        of them a merchant saw depended on which permissions they happened to
+        hold: two walks of the same build produced two disjoint screenshots and
+        no way to tell a permission gap from a missing feature.
+
+        `app_label` is passed only by the per-app index page, which is a page
+        about one app and is left alone.
+        """
+        if app_label is not None:
+            return super().get_app_list(request, app_label)
+
+        models = []
+        for app in self._build_app_dict(request).values():
+            models.extend(app["models"])
+        if not models:
+            return []
+
+        rank = {pair: i for i, pair in enumerate(self.merchant_order)}
+        for entry in models:
+            opts = entry["model"]._meta
+            entry["wsm_rank"] = rank.get(
+                (opts.app_label, entry["model"].__name__), len(rank)
+            )
+            if opts.app_label == "product":
+                # Registered so a lookup has somewhere to point, and read-only.
+                # Saying so stops it reading as a second "Products" screen.
+                entry["name"] = "Products (catalog lookup)"
+        models.sort(key=lambda entry: (entry["wsm_rank"], entry["name"]))
+        return [
+            {
+                "name": "Products",
+                "app_label": "wsm",
+                "app_url": reverse(f"{self.name}:index", current_app=self.name),
+                "has_module_perms": True,
+                "models": models,
+            }
+        ]
+
     def get_urls(self):
         """Every view here runs with the writer connection explicitly allowed.
 

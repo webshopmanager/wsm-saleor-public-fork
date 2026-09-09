@@ -21,6 +21,8 @@ from saleor.product.models import (
 )
 from saleor.wsm.compose import pricing
 from saleor.wsm.compose.models import (
+    CONFIGURABLE_METAFIELD,
+    CONFIGURABLE_VALUE,
     DealerTierOptionPrice,
     Fee,
     OptionSet,
@@ -346,3 +348,73 @@ def test_fee_products_are_excludable_by_product_type(crating_fee, channel_USD):
         product=variant.product, channel=channel_USD
     )
     assert listing.visible_in_listings is False
+
+
+@pytest.mark.django_db
+def test_a_question_added_by_hand_turns_the_configurator_on(product):
+    """Only the 5.0 importer ever wrote the marker the storefront gates on.
+
+    A merchant who built a set in /admin/ got a working set, a working price and
+    a PDP that asked nothing: the one screen the feature exists for.
+    """
+    assert CONFIGURABLE_METAFIELD not in product.metadata
+
+    OptionSet.objects.create(product=product, name="Color", label="Colour")
+
+    product.refresh_from_db()
+    assert product.metadata[CONFIGURABLE_METAFIELD] == CONFIGURABLE_VALUE
+
+
+@pytest.mark.django_db
+def test_a_charge_alone_makes_a_product_configurable(product):
+    """A declinable crating charge is something the PDP has to ask about."""
+    Fee.objects.create(
+        product=product, label="Crating", basis=pricing.FIXED, amount=Decimal("149")
+    )
+
+    product.refresh_from_db()
+    assert product.metadata[CONFIGURABLE_METAFIELD] == CONFIGURABLE_VALUE
+
+
+@pytest.mark.django_db
+def test_removing_the_last_one_turns_it_off_again(product):
+    """The mirror defect: a configurator on a product with nothing to configure."""
+    option_set = OptionSet.objects.create(product=product, name="Color")
+    fee = Fee.objects.create(
+        product=product, label="Crating", basis=pricing.FIXED, amount=Decimal("149")
+    )
+
+    option_set.delete()
+    product.refresh_from_db()
+    assert product.metadata[CONFIGURABLE_METAFIELD] == CONFIGURABLE_VALUE
+
+    fee.delete()
+    product.refresh_from_db()
+    assert CONFIGURABLE_METAFIELD not in product.metadata
+
+
+@pytest.mark.django_db
+def test_a_bulk_delete_updates_the_marker_too(product):
+    """The admin's "delete selected" never calls `Model.delete`."""
+    OptionSet.objects.create(product=product, name="Color")
+
+    OptionSet.objects.filter(product=product).delete()
+
+    product.refresh_from_db()
+    assert CONFIGURABLE_METAFIELD not in product.metadata
+
+
+@pytest.mark.django_db
+def test_the_importer_and_the_admin_write_the_same_marker():
+    """Two copies of the string, one storefront contract."""
+    from saleor.wsm.compose.management.commands.import_option_sets_50 import (
+        CONFIGURABLE_METAFIELD as IMPORTED_FIELD,
+    )
+    from saleor.wsm.compose.management.commands.import_option_sets_50 import (
+        CONFIGURABLE_VALUE as IMPORTED_VALUE,
+    )
+
+    assert (IMPORTED_FIELD, IMPORTED_VALUE) == (
+        CONFIGURABLE_METAFIELD,
+        CONFIGURABLE_VALUE,
+    )

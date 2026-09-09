@@ -16,20 +16,24 @@ whatever a future app drops on the default one.
 from functools import wraps
 
 from django.contrib import admin
-from django.db.models import Count
-from django.urls import URLResolver
+from django.db.models import Count, IntegerField, OuterRef, Subquery
+from django.urls import URLResolver, reverse
 from django.utils.html import format_html
 
 from ...core.db.connection import allow_writer
-from ...product.models import Product
+from ...product.models import Product, ProductChannelListing
 from .forms import (
     DealerTierOptionPriceForm,
+    DealerTierOptionPriceFormSet,
     FeeForm,
     OptionSetAdminForm,
     OptionValueAdminForm,
     OptionValueInlineForm,
     OptionValueInlineFormSet,
+    label_money_field,
+    money,
 )
+from . import pricing
 from .models import DealerTierOptionPrice, Fee, OptionSet, OptionValue
 
 
@@ -93,10 +97,118 @@ def _cell(text):
     )
 
 
+def _related_count(model):
+    """How many rows of `model` point at the product this row is."""
+    return Subquery(
+        model.objects.filter(product_id=OuterRef("pk"))
+        .order_by()
+        .values("product_id")
+        .annotate(n=Count("pk"))
+        .values("n")[:1],
+        output_field=IntegerField(),
+    )
+
+
+def _with_currency(queryset, product_path):
+    """Carry the product's channel currency on the row, not one query per row.
+
+    A money column with no currency on it is the defect; asking per row is the
+    expensive way to fix it. This is a correlated subquery on the query the
+    changelist already runs, so the page cost does not move.
+    """
+    return queryset.annotate(
+        wsm_currency=Subquery(
+            ProductChannelListing.objects.filter(
+                product_id=OuterRef(product_path)
+            ).values("currency")[:1]
+        )
+    )
+
+
+class ProductFilteredMixin:
+    """A changelist that can be opened for ONE product, from the product itself.
+
+    Django refuses a changelist query parameter that no `list_filter` declares,
+    and the honest `list_filter` here would be a dropdown of every product in
+    the catalog: the screen the pickers exist to avoid. Allowing the one exact
+    lookup keeps the sidebar empty and the link working.
+    """
+
+    def lookup_allowed(self, lookup, value, request=None):
+        if lookup == "product__id__exact":
+            return True
+        return super().lookup_allowed(lookup, value, request)
+
+    def product_url(self, product):
+        """The read-only product row, found the way the picker finds anything."""
+        return "{}?q={}".format(
+            reverse(f"{self.admin_site.name}:product_product_changelist"),
+            product.slug,
+        )
+
+
 class ComposeAdminSite(admin.AdminSite):
     site_header = "WSM Compose"
     site_title = "WSM Compose"
     index_title = "Product configuration"
+
+    # The order a merchant works in, not the order three AppConfigs happen to
+    # be registered in. Three apps is an implementation fact: the `wsm_` table
+    # prefixes depend on the labels, and the merchant's job never did. Anything
+    # registered and not named here still appears, at the end, so a new screen
+    # is never invisible.
+    merchant_order = (
+        ("wsm_compose", "OptionSet"),
+        ("wsm_compose", "Fee"),
+        ("wsm_dealer", "DealerGroup"),
+        ("wsm_dealer", "DealerCustomer"),
+        ("wsm_dealer", "TierPrice"),
+        ("wsm_dealer", "DealerSettings"),
+        ("wsm_containers", "KitConfig"),
+        ("wsm_containers", "SeriesConfig"),
+    )
+
+    def get_app_list(self, request, app_label=None):
+        """One group, in task order, whoever the merchant is.
+
+        The stock index groups by app, so this console showed WSM COMPOSE, WSM
+        CONTAINERS and WSM DEALER PRICING as three unrelated headings, and which
+        of them a merchant saw depended on which permissions they happened to
+        hold: two walks of the same build produced two disjoint screenshots and
+        no way to tell a permission gap from a missing feature.
+
+        `app_label` is passed only by the per-app index page, which is a page
+        about one app and is left alone.
+        """
+        if app_label is not None:
+            return super().get_app_list(request, app_label)
+
+        models = []
+        for app in self._build_app_dict(request).values():
+            models.extend(app["models"])
+        if not models:
+            return []
+
+        rank = {pair: i for i, pair in enumerate(self.merchant_order)}
+        for entry in models:
+            opts = entry["model"]._meta
+            entry["wsm_rank"] = rank.get(
+                (opts.app_label, entry["model"].__name__), len(rank)
+            )
+            if opts.app_label == "product":
+                # Registered so a lookup has somewhere to point, and read-only.
+                # Saying so stops it reading as a second "Products" screen.
+                entry["name"] = "Products (catalog lookup)"
+        models.sort(key=lambda entry: (entry["wsm_rank"], entry["name"]))
+        return [
+            {
+                "name": "Products",
+                "app_label": "wsm",
+                "app_url": reverse(f"{self.name}:index", current_app=self.name),
+                "has_module_perms": True,
+                "models": models,
+            }
+        ]
 
     def get_urls(self):
         """Every view here runs with the writer connection explicitly allowed.
@@ -142,16 +254,31 @@ class OptionValueInline(admin.TabularInline):
     fields = ("sort_order", "name", "sku_fragment", "price_delta", "image_url")
     show_change_link = True
 
+    def get_formset(self, request, obj=None, **kwargs):
+        formset = super().get_formset(request, obj, **kwargs)
+        label_money_field(
+            formset, "price_delta", obj.product_id if obj else None
+        )
+        return formset
+
 
 class DealerTierOptionPriceInline(admin.TabularInline):
     model = DealerTierOptionPrice
     form = DealerTierOptionPriceForm
+    formset = DealerTierOptionPriceFormSet
     extra = 1
     fields = ("tier_group", "price_delta")
 
+    def get_formset(self, request, obj=None, **kwargs):
+        formset = super().get_formset(request, obj, **kwargs)
+        label_money_field(
+            formset, "price_delta", obj.option_set.product_id if obj else None
+        )
+        return formset
+
 
 @admin.register(OptionSet, site=site)
-class OptionSetAdmin(WsmAdminMixin, admin.ModelAdmin):
+class OptionSetAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
     """The list a merchant scans to find one question on one product.
 
     Product first, because that is what they are looking for. The name is
@@ -168,10 +295,15 @@ class OptionSetAdmin(WsmAdminMixin, admin.ModelAdmin):
     # Merchants look a question up by the product it is on, and support looks it
     # up by the SKU on a ticket.
     search_fields = ("name", "label", "product__name", "product__variants__sku")
+    # The autocomplete widget pages its results, so the list it pages needs an
+    # order. Without one Postgres is free to return a row twice across pages.
+    ordering = ("product__name", "sort_order", "name")
     # A dropdown of every product is unusable past a few hundred SKUs, and the
-    # fleet's smallest catalog is larger than that. The lookup popup below is
-    # what makes this screen survive a real catalog.
-    raw_id_fields = ("product",)
+    # fleet's smallest catalog is larger than that. `autocomplete_fields` is not
+    # a dropdown: it is the AJAX search box that `ComposeProductPickerAdmin`
+    # below already answers, so the merchant sees "Bushwacker Pocket Flare"
+    # where `raw_id_fields` showed them the number 800001.
+    autocomplete_fields = ("product",)
     inlines = [OptionValueInline]
 
     def get_queryset(self, request):
@@ -180,7 +312,9 @@ class OptionSetAdmin(WsmAdminMixin, admin.ModelAdmin):
 
     @admin.display(description="Product", ordering="product__name")
     def product_name(self, obj):
-        return _cell(obj.product.name)
+        return format_html(
+            '<a href="{}">{}</a>', self.product_url(obj.product), _cell(obj.product.name)
+        )
 
     @admin.display(description="Question", ordering="name")
     def short_name(self, obj):
@@ -204,22 +338,31 @@ class OptionValueAdmin(WsmAdminMixin, admin.ModelAdmin):
         "product",
         "name",
         "sku_fragment",
-        "price_delta",
+        "price_change",
         "sort_order",
         "option_set",
     )
     list_select_related = ("option_set", "option_set__product")
     search_fields = ("name", "sku_fragment", "option_set__product__name")
-    raw_id_fields = ("option_set",)
+    autocomplete_fields = ("option_set",)
     inlines = [DealerTierOptionPriceInline]
+
+    def get_queryset(self, request):
+        return _with_currency(super().get_queryset(request), "option_set__product_id")
 
     @admin.display(description="Product", ordering="option_set__product__name")
     def product(self, obj):
         return _cell(obj.option_set.product)
 
+    @admin.display(description="Price change", ordering="price_delta")
+    def price_change(self, obj):
+        return money(
+            obj.price_delta, getattr(obj, "wsm_currency", "") or "", signed=True
+        )
+
 
 @admin.register(Fee, site=site)
-class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
+class FeeAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
     """A charge, in a merchant's words. See FeeForm for the labels.
 
     The hidden variant is created by the first configured add, never by hand, so
@@ -229,18 +372,22 @@ class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
 
     form = FeeForm
     list_display = (
-        "product",
+        "product_name",
         "label",
         "sku",
         "charged_as",
-        "amount",
+        "charge",
         "how_often",
         "required",
     )
+    # The product cell is a link to the product, so it cannot also be the link
+    # into the charge: Django nests one anchor inside the other and the merchant
+    # loses the only doorway to the row.
+    list_display_links = ("label",)
     list_select_related = ("product",)
     list_filter = ("basis", "apply_to", "required")
     search_fields = ("label", "sku", "product__name")
-    raw_id_fields = ("product",)
+    autocomplete_fields = ("product",)
     readonly_fields = ("variant",)
     fieldsets = (
         (
@@ -268,27 +415,87 @@ class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
         ),
     )
 
+    def get_queryset(self, request):
+        return _with_currency(super().get_queryset(request), "product_id")
+
+    @admin.display(description="Product", ordering="product__name")
+    def product_name(self, obj):
+        return format_html(
+            '<a href="{}">{}</a>', self.product_url(obj.product), _cell(obj.product.name)
+        )
+
     @admin.display(description="Charged as", ordering="basis")
     def charged_as(self, obj):
         return obj.get_basis_display()
+
+    @admin.display(description="Charge", ordering="amount")
+    def charge(self, obj):
+        """One column, two units: the basis decides which one this row is in."""
+        if obj.basis == pricing.PERCENT:
+            return f"{obj.amount}%"
+        return money(obj.amount, getattr(obj, "wsm_currency", "") or "")
 
     @admin.display(description="How often", ordering="apply_to")
     def how_often(self, obj):
         return obj.get_apply_to_display()
 
 
+# One product exists per fee, created by `Fee.ensure_variant` under this product
+# type, only because an order line needs a variant to hang money on. The merchant
+# walk found them sitting in the product lookup named after the charge, where
+# picking one would hang a question off something that is not on the shelf.
+FEE_CARRIER_PRODUCT_TYPE_SLUG = "wsm-fee"
+
+
 @admin.register(Product, site=site)
 class ComposeProductPickerAdmin(WsmAdminMixin, admin.ModelAdmin):
     """Read-only product list, so the option-set lookup popup resolves.
 
-    Registered because `raw_id_fields` needs a changelist to point at, not
+    Registered because `autocomplete_fields` needs a changelist to search,
     because products are edited here: Saleor's own Dashboard owns the catalog.
     Every write is refused regardless of what the user was granted.
     """
 
-    list_display = ("name", "slug", "product_type")
+    list_display = ("name", "slug", "product_type", "option_sets", "fees")
     search_fields = ("name", "slug", "variants__sku")
     ordering = ("name",)
+
+    def get_queryset(self, request):
+        """Two counts, no extra round trip and no join that multiplies rows.
+
+        A pair of `Count` aggregates over two reverse relations would cross-join
+        them and count each set once per fee; correlated subqueries are two more
+        columns on the query the changelist already runs.
+        """
+        return (
+            super()
+            .get_queryset(request)
+            .exclude(product_type__slug=FEE_CARRIER_PRODUCT_TYPE_SLUG)
+            .annotate(
+                wsm_set_count=_related_count(OptionSet),
+                wsm_fee_count=_related_count(Fee),
+            )
+        )
+
+    def _linked_count(self, obj, model_name, count):
+        # The subquery has no row to return where the product has none, so the
+        # annotation is NULL rather than 0.
+        if not count:
+            return "-"
+        url = reverse(
+            f"{self.admin_site.name}:wsm_compose_{model_name}_changelist"
+        )
+        return format_html(
+            '<a href="{}?product__id__exact={}">{}</a>', url, obj.pk, count
+        )
+
+    @admin.display(description="Option sets", ordering="wsm_set_count")
+    def option_sets(self, obj):
+        return self._linked_count(obj, "optionset", obj.wsm_set_count)
+
+    @admin.display(description="Fees", ordering="wsm_fee_count")
+    def fees(self, obj):
+        return self._linked_count(obj, "fee", obj.wsm_fee_count)
 
     def has_module_permission(self, request):
         return self.has_view_permission(request)

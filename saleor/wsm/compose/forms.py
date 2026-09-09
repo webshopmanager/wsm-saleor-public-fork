@@ -14,6 +14,8 @@ rows carry `floor_checked_by_formset` so the model skips its own single-row
 version exactly there, and nowhere else.
 """
 
+from decimal import ROUND_HALF_UP, Decimal
+
 from django import forms
 from django.core.exceptions import ValidationError
 from django.forms.models import BaseInlineFormSet
@@ -40,7 +42,7 @@ VALUE_LABELS = {
 }
 
 
-def _currency_for(product_id) -> str:
+def currency_for(product_id) -> str:
     """The currency this product is priced in, for the amount label.
 
     A merchant typing into a box labelled "Amount" has to guess. The product's
@@ -59,6 +61,44 @@ def _currency_for(product_id) -> str:
         if currency:
             return currency
     return Channel.objects.values_list("currency_code", flat=True).first() or ""
+
+
+CENT = Decimal("0.01")
+
+
+def money(amount, currency: str = "", signed: bool = False) -> str:
+    """An amount the way a merchant reads it: two places, and the currency.
+
+    Storage precision is not screen precision. `TierPrice.amount` keeps three
+    decimal places so it round-trips onto `CheckoutLine.price_override` without
+    a quantize that could move a cent, and a merchant scanning 626 rows reads
+    "228.000" as a bug and "0.000" as free. Nothing formatted here is ever
+    saved; the stored number is untouched.
+
+    `signed` is for a price CHANGE, where the plus is the whole meaning: an
+    option credit and an option surcharge are otherwise the same string.
+    """
+    if amount is None:
+        return "-"
+    shown = Decimal(amount).quantize(CENT, rounding=ROUND_HALF_UP)
+    text = f"+{shown}" if signed and shown > 0 else f"{shown}"
+    return f"{text} {currency}".strip()
+
+
+def label_money_field(formset, field_name: str, product_id) -> None:
+    """Name the currency on an inline's money column, once per page.
+
+    The alternative is asking per row, which is one query per rendered form on a
+    screen that renders every existing row plus the extras. `get_formset` builds
+    a fresh form class per call, so writing to `base_fields` here is local to
+    this page and not a process-wide mutation of the declared form.
+    """
+    field = formset.form.base_fields.get(field_name)
+    if field is None:
+        return
+    currency = currency_for(product_id)
+    if currency:
+        field.label = f"{field.label} ({currency})"
 
 
 class FeeForm(forms.ModelForm):
@@ -85,7 +125,7 @@ class FeeForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        currency = _currency_for(
+        currency = currency_for(
             self.instance.product_id or self.initial.get("product")
         )
         if currency:
@@ -121,6 +161,26 @@ class DealerTierOptionPriceForm(forms.ModelForm):
                 "group that does not exist is never charged to anyone."
             ),
         )
+
+
+class DealerTierOptionPriceFormSet(BaseInlineFormSet):
+    """Django's own duplicate message names the COLUMN, which is our word.
+
+    "Please correct the duplicate data for tier_group." is what a merchant saw
+    for pricing the same group twice on one choice. The rule is worth keeping;
+    only the wording was ours to fix.
+    """
+
+    def get_unique_error_message(self, unique_check):
+        # The check arrives as ("option_value", "tier_group") from the model
+        # constraint and as ("tier_group",) once the parent key is excluded from
+        # the inline form. Both are this rule.
+        if "tier_group" in unique_check:
+            return ValidationError(
+                "This choice already has a price for that dealer group. Change "
+                "the group, or edit the row that already has it."
+            )
+        return super().get_unique_error_message(unique_check)
 
 
 class OptionSetAdminForm(forms.ModelForm):

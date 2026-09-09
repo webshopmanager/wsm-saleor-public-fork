@@ -23,6 +23,7 @@ from ...attribute.models import Attribute
 from ..admin_pickers import PickerLabelMixin
 from ..compose.admin import WsmAdminMixin
 from ..compose.admin import site as merchant_site
+from . import pricing
 from .models import KitConfig, KitMember, SeriesConfig
 
 
@@ -34,10 +35,13 @@ class SeriesConfigForm(forms.ModelForm):
         label="Axes",
         widget=forms.TextInput(attrs={"size": "60"}),
         help_text=(
-            "The questions the configurator asks, in the order it asks them, as "
-            "product attribute slugs separated by commas. Example: "
-            "bed-length, color. Every slug must already exist as an attribute in "
-            "the store."
+            "The questions the configurator asks, in the order it asks them, "
+            "separated by commas. Example: bed-length, color. Each one is a "
+            "product attribute SLUG: the short lowercase name an attribute is "
+            "stored under, which is not always what the attribute is called on "
+            "screen. Find it in the Saleor dashboard under Configuration, "
+            "Attributes, on the attribute itself. Every slug has to already "
+            "exist there."
         ),
     )
 
@@ -101,7 +105,7 @@ class KitMemberInline(PickerLabelMixin, WsmAdminMixin, admin.TabularInline):
 
 
 class KitConfigAdmin(PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin):
-    list_display = ("collection_name", "discount_kind", "discount_amount", "active")
+    list_display = ("collection_name", "saving", "active")
     list_filter = ("active", "discount_kind")
     list_select_related = ("collection",)
     search_fields = ("collection__slug", "collection__name")
@@ -112,6 +116,17 @@ class KitConfigAdmin(PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin):
     @admin.display(description="Collection", ordering="collection__name")
     def collection_name(self, obj):
         return f"{obj.collection.name} ({obj.collection.slug})"
+
+    @admin.display(description="Saving", ordering="discount_amount")
+    def saving(self, obj):
+        """Two columns said "fixed" and "0.00"; one column says what that means."""
+        if not obj.discount_amount:
+            return "None (sells at the sum of its parts)"
+        amount = f"{obj.discount_amount:.2f}"
+        if obj.discount_kind == pricing.PERCENT:
+            # The column is read, not summed: 10.00% is two characters of noise.
+            return f"{amount.rstrip('0').rstrip('.')}% off the kit"
+        return f"{amount} off the kit"
 
 
 def register(site):

@@ -360,6 +360,39 @@ second for the zone allow-list only when a product in the order carries a row.
 `get_plugins_manager()` rather than the plugin class, so the registration is
 part of what is proved.
 
+## 10. `saleor/settings.py`, one line moved, +7 comment lines (2026-09-09)
+
+`saleor.wsm.compose.apps.WsmAuthConfig` moved out of the admin block at the top
+of `INSTALLED_APPS` to sit directly below `saleor.account`. No behaviour line
+was added or removed: the app is still installed, still under the label
+`django_auth`, still with `MIGRATION_MODULES` pointing at the fork module.
+
+**The regression it fixes.** `saleor/account/tests/test_account_command.py`
+passed 3/3 on upstream `a1ab3a23a3f5` and failed 3/3 on `wsm/bakeoff` with
+`AttributeError: 'UserManager' object has no attribute 'create_superuser'`.
+Django resolves a management command name to the first app in `INSTALLED_APPS`
+that ships one (`get_commands()` walks `reversed(app_configs)` and overwrites,
+so the earlier app wins). `django.contrib.auth` ships `createsuperuser` and
+`changepassword`, and `saleor/account/management/commands/` overrides both.
+Installed above `saleor.account`, auth won, and Django's own `createsuperuser`
+calls `_default_manager.create_superuser()`, which Saleor's `UserManager`
+(`saleor/account/models.py:132`, a `BaseUserManager`) does not define. Below
+`saleor.account`, Saleor's command wins again, which is upstream behaviour.
+
+**Why the fix is here and not in the wsm layer.** The broken value is a list
+order, and `INSTALLED_APPS` is the layer that owns it. The alternatives all add
+code to work around that order: a `create_superuser` shim on Saleor's manager
+(a core edit, for a command the fork does not even use), overriding the auth
+AppConfig's `path` so its `management/` directory is not found (which also
+hides auth's templates and locales), or monkey patching `get_commands`. Moving
+the entry fixes the whole class: any command `django.contrib.auth` ships now
+defers to a `saleor.account` override.
+
+**Verified by** the three upstream tests above, red then green on a fresh test
+DB, plus `saleor/wsm/tests/test_management_commands.py` (new, fork-owned, two
+asserts), which pins `createsuperuser` and `changepassword` to `saleor.account`
+and was proven able to fail: it is red on `wsm/bakeoff` before the move.
+
 # Monkey patches
 
 Expected: zero. Actual: **two**, in U3 and U7. Every entry names the exact

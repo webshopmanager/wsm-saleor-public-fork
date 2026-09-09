@@ -313,10 +313,8 @@ INSTALLED_APPS = [
     # Django modules
     "django.contrib.contenttypes",
     # WSM-FORK: the Django admin is the merchant UI for Compose (bake-off design
-    # section 6) and it hard-requires these four. `auth` is loaded through a
-    # fork-owned AppConfig because Saleor renamed auth_permission out from under
-    # it. See docs/wsm/CORE-TOUCHES.md.
-    "saleor.wsm.compose.apps.WsmAuthConfig",
+    # section 6) and it hard-requires these four. The fourth, `django.contrib.auth`,
+    # is installed further down, below `saleor.account`. See docs/wsm/CORE-TOUCHES.md.
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.admin",
@@ -333,6 +331,15 @@ INSTALLED_APPS = [
     "saleor.auth",
     "saleor.plugins",
     "saleor.account",
+    # WSM-FORK: `django.contrib.auth`, loaded through a fork-owned AppConfig
+    # because Saleor renamed auth_permission out from under it. It has to stay
+    # BELOW `saleor.account`: Django resolves a management command name to the
+    # first app in this list that ships one, so above it, auth's own
+    # `createsuperuser` and `changepassword` shadow the ones `saleor.account`
+    # overrides, and auth's `createsuperuser` calls `create_superuser()` on
+    # Saleor's UserManager, which does not have it.
+    # See docs/wsm/CORE-TOUCHES.md.
+    "saleor.wsm.compose.apps.WsmAuthConfig",
     "saleor.discount",
     "saleor.giftcard",
     "saleor.product",

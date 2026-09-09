@@ -269,24 +269,26 @@ def test_a_second_run_of_the_command_writes_nothing(priced):
         if query["sql"].lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE"))
     ]
     assert writes == []
-    # Seven reads for one product and no write: the two that pick the products
-    # to look at, then the product row, its sets, their values, its fees and one
-    # grouped query for every channel's base price. Pinned because a number that
-    # moves here is a cost regression on the merchant save path.
-    assert len(captured.captured_queries) == 7, [
+    # Eight reads for one product and no write: the two that pick the products
+    # to look at, then the product row, its sets, their values, its fees, one
+    # grouped query for every channel's base price, and since design section 11
+    # its compliance row. Pinned because a number that moves here is a cost
+    # regression on the merchant save path.
+    assert len(captured.captured_queries) == 8, [
         query["sql"][:70] for query in captured.captured_queries
     ]
 
 
-def test_one_answer_saved_costs_seven_queries_on_top_of_the_write(
+def test_one_answer_saved_costs_eight_queries_on_top_of_the_write(
     priced, django_assert_num_queries
 ):
     """The whole cost of the stamp, on the path a merchant drives by hand.
 
-    Eight: the value's own UPDATE, then the product id one join away, the
+    Nine: the value's own UPDATE, then the product id one join away, the
     product row, its sets, their values, its fees, one grouped query for every
-    channel's base price, and one UPDATE of `metadata`. Zero of them are on any
-    shopper path, which is the entire point of stamping.
+    channel's base price, its compliance row (design section 11), and one
+    UPDATE of `metadata`. Zero of them are on any shopper path, which is the
+    entire point of stamping.
     """
     option_set = OptionSet.objects.create(
         product=priced, name="Finish", required=True
@@ -296,5 +298,5 @@ def test_one_answer_saved_costs_seven_queries_on_top_of_the_write(
     )
 
     value.price_delta = Decimal("-12")
-    with django_assert_num_queries(8):
+    with django_assert_num_queries(9):
         value.save()

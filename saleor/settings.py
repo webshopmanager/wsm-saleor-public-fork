@@ -1002,6 +1002,10 @@ BUILTIN_PLUGINS = [
     "saleor.plugins.admin_email.plugin.AdminEmailPlugin",
     "saleor.plugins.sendgrid.plugin.DeprecatedSendgridEmailPlugin",
     "saleor.plugins.openid_connect.plugin.OpenIDConnectPlugin",
+    # WSM-FORK (U8): shipping restrictions refuse an order whose destination a
+    # product in it is not serviced for. A native plugin hook rather than a
+    # fourth monkey patch; see saleor/wsm/compose/plugin.py and CORE-TOUCHES 9.
+    "saleor.wsm.compose.plugin.ComposeCompliancePlugin",
 ]
 
 # Plugin discovery

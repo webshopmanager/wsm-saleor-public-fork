@@ -40,7 +40,7 @@ from ..dealer.tax import bind_tax_exemption
 from ..checkout import LineRefused, check_addable, whole_number
 from ..http import storefront_key_required
 from . import pricing
-from .models import Fee, OptionSet, to_cents
+from .models import Fee, OptionSet, ProductCompliance, to_cents
 
 # Line metadata keys. The storefront reads these; they are contract, not detail.
 META_OPTIONS = "wsm.options"
@@ -98,6 +98,31 @@ def _tier_group(customer_gid, db):
     return dealer_pricing.tier_group_for(
         _from_gid(customer_gid or "", "User"), database_connection_name=db
     )
+
+
+def _warnings(product_pk, using=None):
+    """The disclosures this product must show, in one indexed read.
+
+    `[{"type": "prop65"}]` with a `"text"` only where the merchant wrote their
+    own wording: an absent text means "draw the standard short-form warning",
+    which is the contract the interim Compose service published and the reason
+    the flag alone is enough. Absent product row means an empty list, and an
+    empty list means the product says nothing, never that we do not know.
+
+    The same answer is stamped on the product as `pl.rules.prop65`, so a
+    consumer that already fetches the product pays nothing to read it; this is
+    for the two callers that ask Compose directly and hold no product.
+    """
+    rows = ProductCompliance.objects.filter(product_id=product_pk, prop65=True)
+    if using is not None:
+        rows = rows.using(using)
+    row = rows.only("prop65_text").first()
+    if row is None:
+        return []
+    warning = {"type": "prop65"}
+    if row.prop65_text.strip():
+        warning["text"] = row.prop65_text.strip()
+    return [warning]
 
 
 @require_GET
@@ -169,6 +194,10 @@ def option_sets(request, product_gid):
                 }
                 for f in fees
             ],
+            # Fourth query, and only on a product the storefront was already
+            # asking about. Prop 65 is California law rather than a feature, so
+            # the PDP that draws the configurator draws the warning with it.
+            "warnings": _warnings(product_pk, using=replica),
         }
     )
 
@@ -430,5 +459,9 @@ def configured_line(request):
             "unitPrice": _money(priced.unit_cents),
             "compositeSku": priced.composite_sku,
             "feeTotal": _money(priced.fee_total_cents),
+            # The cart draws the same warning the PDP drew, off the line it just
+            # got, without a second round trip to ask about a product it already
+            # configured.
+            "warnings": _warnings(product_pk),
         }
     )

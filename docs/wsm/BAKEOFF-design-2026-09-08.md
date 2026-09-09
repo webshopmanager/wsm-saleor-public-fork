@@ -476,7 +476,7 @@ question IS the floor. `DealerTierOptionPrice` is deliberately not hooked, becau
 stamps through the same function in its own final pass, so an imported catalog and a hand-built one can never carry a different
 answer.
 
-**Cost.** Six queries per affected product per merchant save: the sets, their values, the fees, the product row, the per-channel
+**Cost.** Seven queries per affected product per merchant save (six before the compliance row of section 11): the sets, their values, the fees, the product row, the compliance row, the per-channel
 base prices (one grouped query, not one per channel), and one `UPDATE` of `metadata`. Nothing at all when the answer has not
 changed, which is what makes a re-run free. **Zero queries on any shopper path**, which is the whole point: index-time
 denormalization, never a read cache. A `Fee` row has a single product FK, so a fee touches exactly one product and there is no
@@ -499,3 +499,75 @@ tampered stamp costs nothing, because **checkout never reads it**: `price_config
 refuses at or below zero, so the worst a wrong stamp can do is advertise a price the shopper is not charged, which is a
 merchandising defect and not a money one. The clamp at zero exists for the same reason in reverse: a bad row should mislead a feed
 as little as possible while it is being found.
+
+## 11. Prop 65 and shipping restrictions (Dana, 2026-09-09)
+
+Dana ruled that **every tenant needs Prop 65**, because California law is not a
+feature a merchant opts into, and that **shipping restrictions are the same
+class of fact** (a CARB part that cannot be sold into California), so both come
+across from the interim Compose service now.
+
+**One table, `ProductCompliance`, one row per product.** `prop65` and
+`prop65_text` are the disclosure; `restricted_states` (comma separated US
+codes), `include_shipping_zones` (an optional allow-list of zones) and
+`restriction_message` are the destination rule. One table because it is one
+merchant decision made on one screen, and because a product carries at most one
+of each: several states is a list, not several rows. No money anywhere in it,
+so nothing here is on a pricing path.
+
+**Three seams, one per surface.**
+
+| Surface | Carries | How |
+|---|---|---|
+| PDP | the warning | `warnings` in the option-sets payload, plus `pl.rules.prop65` on the product |
+| Cart | the warning | `warnings` in the configured-line response |
+| Order creation | the restriction | `ComposeCompliancePlugin.preprocess_order_creation` |
+
+**The stamp.** `pl.rules.prop65` = `"true"` and `pl.rules.prop65.text` are
+PUBLIC product metadata, written by `sync_product_stamps` alongside
+`compose.configurable` and `wsm.price_floor`: one function, one read, one
+UPDATE for all three. The key names are the interim service's own
+(`external_apps/compose/rules/metadata.py`), so a consumer written against that
+service reads this one unchanged. The warning TYPE is the key rather than a
+value, which keeps the contract closed: a second kind of warning gets a second
+key, and until one exists no reader parses anything. Text is stamped only when
+the merchant wrote their own; the flag with no text means "draw the standard
+short-form warning, pictogram included", which is the storefront's call to
+render.
+
+**Fail SAFE means do LESS.** The interim service failed CLOSED: an undecidable
+destination vetoed the checkout, and a rule scoped to no states matched
+everywhere. Today's ruling inverts both.
+
+- A destination we cannot read is SERVICED. `countryArea` is a free string
+  whenever a caller disables Saleor's address normalization, so "California"
+  spelled out is a destination we cannot prove is CA, and a checkout with no
+  address yet is the normal early state. Blocking on either turns one bad
+  string into a store that takes no orders; the failure it would prevent is a
+  part shipped where it is not legal, which is a return.
+- A row that names no states and no zones restricts NOTHING. That is the
+  likeliest half-filled row on the screen, and the version of it that blocks
+  every order in every state is the one failure this subsystem must never have.
+
+**What the shopper reads.** The merchant's `restriction_message` where they
+wrote one, otherwise `"<product> cannot be shipped to <state>."`, one sentence
+per refused product, joined into the one checkout error.
+
+**Cost.** Zero queries on any browse or cart path. One extra indexed read on
+the option-sets endpoint (a configured product is 4 queries now, not 3) and one
+on the configured add. At order creation, one read, plus one for the zone
+allow-list when a product in the order carries a row. On a merchant save, the
+compliance read joins the six the floor already pays for.
+
+**Admin.** One screen, "Product compliance", in the same console: Prop 65 and
+the restriction as two fieldsets on one row, the state codes validated against
+ISO 3166-2:US so a typo is refused where it was typed. A screen rather than an
+inline because the product page here is a read-only picker on purpose (Saleor's
+Dashboard owns the catalog), so there is no product form to hang an inline on.
+
+**Storefront.** Zero code change, and zero effect: the fields are additive, the
+storefront reads neither today. Its only Prop 65 today is a per-tenant static
+cart notice in `tenants/<tag>.json` (`cart.notices`), which is a store-wide
+sentence and not a per-product warning. Rendering the per-product badge off
+`pl.rules.prop65` (or off `warnings` in the payload it already fetches) is a
+storefront follow-up, in its own lane.

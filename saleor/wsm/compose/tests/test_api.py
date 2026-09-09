@@ -192,8 +192,9 @@ def test_option_sets_stays_inside_its_query_budget(
     client, stage_2_kit, omit_parts, crating_fee, django_assert_num_queries
 ):
     # Design section 5: one read for the sets and their values (a prefetch is
-    # two statements), one for the fees. Anything more is an N+1 creeping in.
-    with django_assert_num_queries(3):
+    # two statements), one for the fees, and since design section 11 one for the
+    # product's Prop 65 row. Anything more is an N+1 creeping in.
+    with django_assert_num_queries(4):
         client.get(OPTION_SETS_URL.format(gid("Product", stage_2_kit.product_id)))
 
 
@@ -219,6 +220,9 @@ def test_configured_line_prices_server_side_and_writes_one_line(
         "unitPrice": CONFIGURED_UNIT,
         "compositeSku": "L600084-NOFF-NOFL-NOPA",
         "feeTotal": FEE_AMOUNT,
+        # Design section 11: the disclosures the cart has to draw, empty here
+        # because this product carries no compliance row.
+        "warnings": [],
     }
 
     lines = list(checkout.lines.all())

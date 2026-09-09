@@ -501,6 +501,130 @@ CONFIGURABLE_VALUE = "true"
 # "Price floor stamp".
 PRICE_FLOOR_METAFIELD = "wsm.price_floor"
 
+# Prop 65 rides the same public-stamp lane, under the key names the interim
+# Compose service published (`external_apps/compose/rules/metadata.py`), so a
+# consumer written against that service reads this one without a change. The
+# warning TYPE is the key rather than a value, which is what keeps the contract
+# closed: a second kind of warning gets a second key, and until one exists no
+# reader has to parse anything.
+PROP65_METAFIELD = "pl.rules.prop65"
+PROP65_TEXT_METAFIELD = "pl.rules.prop65.text"
+PROP65_VALUE = "true"
+
+
+class ProductCompliance(models.Model):
+    """What a product must SAY, and where it may not GO. One row per product.
+
+    Dana's ruling (2026-09-09): every tenant needs Prop 65, because California
+    law is not a feature, and shipping restrictions are the same class of fact
+    (a CARB part that may not be sold into California). One table because they
+    are one merchant decision, made in one place, on one screen: a product
+    carries at most one disclosure and at most one destination rule, and the
+    several-states case is the `restricted_states` list, not several rows.
+
+    Nothing here is money, so nothing here is on a pricing path. The disclosure
+    is denormalized onto the product at WRITE time (`sync_product_stamps`) the
+    way the floor is; the destination rule is read once, at order creation, by
+    `restrictions.is_destination_serviced`.
+    """
+
+    product = models.OneToOneField(
+        "product.Product",
+        related_name="wsm_compliance",
+        on_delete=models.CASCADE,
+        help_text="The product this warning and these restrictions belong to.",
+    )
+    prop65 = models.BooleanField(
+        default=False,
+        help_text=(
+            "Show the California Proposition 65 warning on this product. The "
+            "storefront draws the standard short-form warning, pictogram "
+            "included, unless you write your own wording below."
+        ),
+    )
+    prop65_text = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Optional. Your own Prop 65 wording, e.g. the exact WARNING "
+            "sentence the supplier gives you. Empty means the standard one."
+        ),
+    )
+    restricted_states = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=(
+            "US state codes this product cannot ship to, comma separated, e.g. "
+            "CA for a part that is not CARB legal. Empty restricts nothing."
+        ),
+    )
+    include_shipping_zones = models.ManyToManyField(
+        "shipping.ShippingZone",
+        blank=True,
+        related_name="wsm_compliance_rows",
+        help_text=(
+            "Optional. Naming zones here means this product ships ONLY to the "
+            "countries those zones cover. Empty means every destination is "
+            "serviced, which is what almost every product wants."
+        ),
+    )
+    restriction_message = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=(
+            "What the shopper reads when their destination is refused. Empty "
+            "means a standard sentence naming the item and the destination."
+        ),
+    )
+
+    class Meta:
+        verbose_name = "product compliance"
+        verbose_name_plural = "product compliance"
+
+    def __str__(self):
+        return f"{self.product.name}: compliance"
+
+    @property
+    def state_codes(self) -> tuple[str, ...]:
+        """The stored codes, normalised, for the matcher to compare against."""
+        return tuple(
+            code.strip().upper()
+            for code in (self.restricted_states or "").split(",")
+            if code.strip()
+        )
+
+    def refusal_message(self, where: str) -> str:
+        """The sentence the shopper reads. The merchant's wording wins."""
+        if self.restriction_message.strip():
+            return self.restriction_message.strip()
+        return f"{self.product.name} cannot be shipped to {where}."
+
+    def clean(self):
+        """A state code nothing can match is a restriction that does nothing.
+
+        Checked here, on the screen the typo was made on, rather than at
+        checkout: a merchant who writes CAL for California gets told so while
+        they are looking at the field, and never finds out from an order that
+        should have been refused and was not.
+        """
+        from .restrictions import US_SUBDIVISIONS
+
+        codes = self.state_codes
+        unknown = [code for code in codes if code not in US_SUBDIVISIONS]
+        if unknown:
+            raise ValidationError(
+                {
+                    "restricted_states": (
+                        "Not US state codes: "
+                        + ", ".join(unknown)
+                        + ". Use two-letter codes, e.g. CA, HI, AK."
+                    )
+                }
+            )
+        self.restricted_states = ", ".join(codes)
+
 
 def _channel_bases(product_id):
     """Every channel this product is priced in, with its cheapest listed price.
@@ -598,7 +722,7 @@ def price_floor_by_channel(product_id, *, option_sets=None, fees=None) -> dict:
 
 
 def sync_product_stamps(product_id, product=None) -> set:
-    """Make both of this product's public stamps equal to what its rows say.
+    """Make this product's three public stamps equal to what its rows say.
 
     `compose.configurable` gates the PDP configurator: the storefront asks a
     product nothing without it, so a merchant who built a question or a charge
@@ -608,9 +732,14 @@ def sync_product_stamps(product_id, product=None) -> set:
     Merchant Center suspends a feed on a zero price, and a PLP tile with no
     number is not a tile anyone clicks.
 
-    ONE function and ONE write for both, because every door that can move one
-    can move the other, and two hooks on the same save paths would be two reads
-    and two UPDATEs of one column.
+    `pl.rules.prop65` (and its text) is the California disclosure, on the same
+    lane for the same reason: it is a fact about the product that a storefront
+    has to draw, and computing it on a shopper read would be a join per PDP for
+    an answer that only changes when a merchant saves.
+
+    ONE function and ONE write for all three, because every door that can move
+    one can move another, and three hooks on the same save paths would be three
+    reads and three UPDATEs of one column.
 
     Index-time denormalization, Dana's standing rule: the floor is computed here
     on a merchant save and stamped, never computed on a shopper read. Nothing on
@@ -661,6 +790,31 @@ def sync_product_stamps(product_id, product=None) -> set:
         else:
             product.metadata[PRICE_FLOOR_METAFIELD] = blob
         changed.add(PRICE_FLOOR_METAFIELD)
+
+    # The disclosure. One indexed read on a unique column, and the row is
+    # absent for almost every product. Text is stamped only when the merchant
+    # wrote their own: an absent text key with the flag present means "draw the
+    # standard short-form warning", which is the interim service's contract and
+    # the reason the flag alone is enough for a storefront.
+    compliance = (
+        ProductCompliance.objects.filter(product_id=product_id)
+        .only("prop65", "prop65_text")
+        .first()
+    )
+    wanted_prop65 = {}
+    if compliance is not None and compliance.prop65:
+        wanted_prop65[PROP65_METAFIELD] = PROP65_VALUE
+        if compliance.prop65_text.strip():
+            wanted_prop65[PROP65_TEXT_METAFIELD] = compliance.prop65_text.strip()
+    for key in (PROP65_METAFIELD, PROP65_TEXT_METAFIELD):
+        if wanted_prop65.get(key) == product.metadata.get(key):
+            continue
+        if key in wanted_prop65:
+            product.metadata[key] = wanted_prop65[key]
+        else:
+            # Absent, never blank: a reader takes a missing key as "no warning".
+            product.metadata.pop(key, None)
+        changed.add(key)
 
     if changed:
         product.save(update_fields=["metadata"])
@@ -1046,10 +1200,14 @@ def _ensure_fee_variant(fee, channel):
 #
 # DealerTierOptionPrice is deliberately NOT here: the stamp is retail only, and
 # a tier row moves no retail number.
+# ProductCompliance is here for the disclosure alone: it moves no price and no
+# marker, and the flag it does move is read off the product by every storefront
+# that draws a Prop 65 badge.
 for _sender, _receiver in (
     (OptionSet, _sync_stamps_from),
     (Fee, _sync_stamps_from),
     (OptionValue, _sync_stamps_from_value),
+    (ProductCompliance, _sync_stamps_from),
 ):
     post_save.connect(
         _receiver,

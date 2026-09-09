@@ -330,6 +330,36 @@ Removal cost: delete the line, the decorator and `saleor/wsm/http.py`.
 
 ---
 
+## 9. `saleor/settings.py`, +5 lines, 1 of them code (U8, 2026-09-09)
+
+One entry appended to `BUILTIN_PLUGINS`:
+`saleor.wsm.compose.plugin.ComposeCompliancePlugin`. The other four lines are
+the comment that says why.
+
+**What it buys.** Shipping restrictions have to be enforced where a checkout
+becomes an order, and `preprocess_order_creation` is the only plugin-manager
+hook that fires there. Core calls it on all three completion paths
+(`complete_checkout.py:754` and `:987`, `checkout_cleaner.py:467`, which is the
+`orderCreateFromCheckout` path the storefront actually uses), and both call
+sites catch `TaxError` only, so the `ValidationError` our plugin raises reaches
+the mutation and comes back as a checkout error.
+
+**Why this is not a fourth monkey patch.** MP3's own notes rejected this hook
+for REPRICING, because a plugin here can refuse an order but cannot correct
+one. A restriction only ever wants to refuse. So the seam MP3 could not use is
+exactly the right one for this, and the fork gains a behaviour with a settings
+line instead of another wrapped core function.
+
+**Cost.** One more plugin class in the manager's list. The method itself runs
+once per order creation and never on a browse, PDP, cart or shipping-step
+request; inside it, one indexed read of `wsm_compose_productcompliance`, and a
+second for the zone allow-list only when a product in the order carries a row.
+
+**Verified by** `test_the_registered_plugin_refuses_a_california_order` in
+`saleor/wsm/compose/tests/test_compliance.py`, which goes through
+`get_plugins_manager()` rather than the plugin class, so the registration is
+part of what is proved.
+
 # Monkey patches
 
 Expected: zero. Actual: **two**, in U3 and U7. Every entry names the exact

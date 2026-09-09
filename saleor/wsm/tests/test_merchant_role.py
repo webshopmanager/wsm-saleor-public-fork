@@ -102,9 +102,10 @@ def test_the_whole_console_is_one_group_in_the_order_a_merchant_works(
 
     assert [app["name"] for app in app_list] == ["Products"]
     shown = [entry["model"].__name__ for entry in app_list[0]["models"]]
-    assert shown[:8] == [
+    assert shown[:9] == [
         "OptionSet",
         "Fee",
+        "ProductCompliance",
         "DealerGroup",
         "DealerCustomer",
         "TierPrice",
@@ -113,4 +114,4 @@ def test_the_whole_console_is_one_group_in_the_order_a_merchant_works(
         "SeriesConfig",
     ]
     # Registered and unranked screens still appear, at the end.
-    assert set(shown[8:]) == {"OptionValue", "Product"}
+    assert set(shown[9:]) == {"OptionValue", "Product"}

@@ -48,7 +48,13 @@ from .forms import (
     money,
 )
 from . import pricing
-from .models import DealerTierOptionPrice, Fee, OptionSet, OptionValue
+from .models import (
+    DealerTierOptionPrice,
+    Fee,
+    OptionSet,
+    OptionValue,
+    ProductCompliance,
+)
 
 
 # The merchant console mounts on the same host as the public API, so
@@ -232,6 +238,7 @@ class ComposeAdminSite(admin.AdminSite):
     merchant_order = (
         ("wsm_compose", "OptionSet"),
         ("wsm_compose", "Fee"),
+        ("wsm_compose", "ProductCompliance"),
         ("wsm_dealer", "DealerGroup"),
         ("wsm_dealer", "DealerCustomer"),
         ("wsm_dealer", "TierPrice"),
@@ -670,6 +677,94 @@ class FeeAdmin(
     @admin.display(description="How often", ordering="apply_to")
     def how_often(self, obj):
         return obj.get_apply_to_display()
+
+
+@admin.register(ProductCompliance, site=site)
+class ProductComplianceAdmin(
+    EmptyStateMixin, ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin
+):
+    """Prop 65 and shipping restrictions, one product at a time.
+
+    One screen and not two, because it is one row: the merchant walk reads it
+    as "the legal stuff about this part", and splitting it would put two
+    half-empty lists in a console whose whole point is that a merchant can find
+    the thing they mean.
+
+    A screen rather than an inline on the product page, because that page is a
+    read-only picker on purpose (Saleor's Dashboard owns the catalog), so there
+    is no product form here to hang an inline on.
+    """
+
+    empty_state = (
+        "No compliance rows yet.",
+        "A compliance row is the Prop 65 warning a product must show, and the "
+        "states it cannot be shipped to.",
+        "Add the first one",
+    )
+    list_display = ("product_name", "prop65", "cannot_ship_to")
+    # The row IS the product's compliance, so the product name is the doorway
+    # into it rather than a link back out to the catalog lookup.
+    list_display_links = ("product_name",)
+    list_select_related = ("product",)
+    list_filter = ("prop65",)
+    search_fields = ("product__name", "restricted_states")
+    autocomplete_fields = ("product",)
+    filter_horizontal = ("include_shipping_zones",)
+    fieldsets = (
+        (None, {"fields": ("product",)}),
+        (
+            "California Proposition 65",
+            {
+                "fields": ("prop65", "prop65_text"),
+                "description": (
+                    "Prop 65 is California law, not a feature: a product that "
+                    "needs the warning needs it in every store."
+                ),
+            },
+        ),
+        (
+            "Shipping restrictions",
+            {
+                "fields": (
+                    "restricted_states",
+                    "include_shipping_zones",
+                    "restriction_message",
+                ),
+                "description": (
+                    "An order is refused when its destination is restricted, "
+                    "and only then: a row that names no states and no zones "
+                    "restricts nothing, and a destination we cannot read is "
+                    "always shipped."
+                ),
+            },
+        ),
+    )
+
+    def get_queryset(self, request):
+        """The zone count as a column on the query the changelist already runs.
+
+        `obj.include_shipping_zones.count()` in the cell would be one query per
+        row, on a screen whose whole job is to show many rows at once.
+        """
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(wsm_zone_count=Count("include_shipping_zones"))
+        )
+
+    @admin.display(description="Product", ordering="product__name")
+    def product_name(self, obj):
+        return _cell(obj.product.name)
+
+    @admin.display(description="Cannot ship to", ordering="restricted_states")
+    def cannot_ship_to(self, obj):
+        """The merchant reads the restriction without opening the row."""
+        states = ", ".join(obj.state_codes)
+        zones = obj.wsm_zone_count
+        if zones:
+            only = f"only {zones} shipping zone{'s' if zones > 1 else ''}"
+            return f"{states} ({only})" if states else only.capitalize()
+        return states or "-"
 
 
 # One product exists per fee, created by `Fee.ensure_variant` under this product

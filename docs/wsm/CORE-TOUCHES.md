@@ -603,6 +603,37 @@ snapshot says `tier_applied`, and `_mark_dealer` rewrites or clears it on every
 recalculation, because a tier can start or stop applying in between (a quantity
 change, a group change, the merchant deleting the row).
 
+**Kit member lines are re-derived through the kit, not through the ladder.** A
+member line is an ordinary checkout line by design, and its price is not an
+ordinary price: it is that member's prorated share of the kit's discount, or a
+dealer tier where that is cheaper. MP3 did not re-derive it. A member that took
+no tier carried whatever the add stamped on it for the life of the cart, so a
+merchant who changed the kit's discount, or a member's list price, went on
+selling the old number to every cart already holding one. Measured: a member
+added at 9.00 stayed at 9.00 after the merchant doubled the kit discount to 50
+percent, where the kit's own arithmetic says 5.00.
+
+*The overcharge.* A member that DID take a tier carries the dealer stamp, and
+MP3 read that stamp and re-ran the flat per-variant LADDER over the line,
+knowing nothing about the kit it came from. When the merchant then withdrew that
+tier, there was no ladder left to find, so the override was cleared outright and
+the line fell back to LIST: not to the kit price the shopper was still entitled
+to. Measured on the fixture kit: 25.00 on tier, 27.00 entitled, 30.00 charged.
+The shopper paid the whole kit discount back on that member without touching
+their cart, and nothing on the line said so.
+
+Members are now re-priced together, from the kit, through the same `price_kit`
+the add uses, and the lines still in the cart take their unit from that answer.
+A shopper who deletes one member keeps the others at their own prices, which is
+the kits ruling and not an accident. The kit a line came from, and the kit
+quantity it was priced at, are a PRIVATE stamp (`wsm.kit`) written at add time,
+for the reason every other pricing input is private: the public copy the
+storefront groups the cart on is writable by any unauthenticated caller, and one
+that could be forged would hang a retail line off a heavily discounted kit. Cost:
+FOUR queries per distinct kit on the checkout (the kit, its members, their
+channel prices, and one ladder read covering every member), and zero on a
+checkout carrying none.
+
 **Correct and proceed** is the behaviour for drift. **A read never raises**, and
 that is the whole of the policy for everything else. This funnel runs on every
 price recalculation, and a recalculation is what a cart READ is, so an exception

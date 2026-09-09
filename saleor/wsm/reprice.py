@@ -61,6 +61,7 @@ from ..checkout.models import CheckoutLine
 from ..core.db.connection import allow_writer
 from . import patches
 from .compose import pricing as compose_pricing
+from .containers import pricing as kit_pricing
 from .compose.models import Fee, OptionSet, to_cents
 from .compose.views import (
     META_ACCEPTED,
@@ -70,6 +71,10 @@ from .compose.views import (
     META_PARENT,
     META_SKU,
     PRICE_OVERRIDE_REASON as COMPOSE_REASON,
+)
+from .containers.pricing import (
+    META_KIT,
+    PRICE_OVERRIDE_REASON as KIT_REASON,
 )
 from .dealer import pricing as dealer_pricing
 from .dealer.no_stacking import (
@@ -201,9 +206,9 @@ def reprice(checkout_info, lines) -> list:
         if quantity and line_info.line not in requantified:
             requantified.append(line_info.line)
 
-    configured, fee_lines, dealer_lines = _classify(lines)
+    configured, fee_lines, kit_lines, dealer_lines = _classify(lines)
     _disown_forged_stamps(lines, mark)
-    if not configured and not fee_lines and not dealer_lines and not moved:
+    if not (configured or fee_lines or kit_lines or dealer_lines or moved):
         return []
 
     # One writer block for the whole pass. Core restricts the writer on a cart
@@ -213,8 +218,12 @@ def reprice(checkout_info, lines) -> list:
         if dealer_lines:
             _reprice_dealer(checkout_info, dealer_lines, database_connection_name, mark)
         dropped = []
+        if kit_lines:
+            dropped += _reprice_kits(
+                checkout_info, kit_lines, database_connection_name, mark
+            )
         if configured or fee_lines:
-            dropped = _reprice_configured(
+            dropped += _reprice_configured(
                 checkout_info,
                 configured,
                 fee_lines,
@@ -257,6 +266,112 @@ def _drop(dropped):
     CheckoutLine.objects.filter(pk__in={info.line.pk for info in dropped}).delete()
 
 
+def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
+    """Re-derive every kit member line through the kit's own money.
+
+    A member line is an ORDINARY checkout line by design, and its price is not an
+    ordinary price: it is the member's prorated share of the kit's discount, or a
+    dealer tier where that is cheaper. Nothing re-derived it. A member that took
+    no tier carried whatever the add stamped on it for the life of the cart, so a
+    merchant who changed the kit's discount, or a member's list price, sold the
+    old number to every cart already holding one. A member that DID take a tier
+    fell to `_reprice_dealer`, which knows only the flat per-variant ladder: when
+    the merchant then withdrew that tier, the line did not fall back to the kit
+    price it was still entitled to, it fell all the way back to LIST, and the
+    shopper was overcharged the whole kit discount on that member.
+
+    Members are re-priced together, from the kit, because that is the only way
+    the proration is right; the ones still IN the cart take their unit from that
+    answer. A shopper who deleted a member keeps the others at their own prices,
+    which is the kits ruling, not an accident.
+
+    Cost: FOUR queries per distinct kit on the checkout (the kit, its members,
+    their channel prices, and one ladder read covering every member), and zero
+    on a checkout carrying none.
+    """
+    from .containers.models import KitConfig
+    from .containers.views import resolve_tier_lookup
+
+    token = checkout_info.checkout.token
+    user = checkout_info.user
+    if user is not None and not getattr(user, "is_authenticated", False):
+        user = None
+
+    groups: dict[tuple, list] = defaultdict(list)
+    dropped = []
+    for line_info in kit_lines:
+        try:
+            stamp = json.loads(line_info.line.private_metadata[META_KIT]) or {}
+            key = (str(stamp["collection"]), int(stamp["quantity"]))
+        except (KeyError, TypeError, ValueError):
+            _log_drop(token, line_info, "this item does not say which kit priced it")
+            dropped.append(line_info)
+            continue
+        groups[key].append(line_info)
+
+    for (slug, quantity), infos in groups.items():
+        try:
+            kit = KitConfig.objects.filter(collection__slug=slug).first()
+            if kit is None:
+                raise kit_pricing.KitRefusal(f"the kit {slug} no longer exists")
+            priced = kit_pricing.price_kit(
+                kit.pricing_members(checkout_info.channel),
+                kit.discount_kind,
+                kit.discount_amount,
+                kit_quantity=quantity,
+                tier_lookup=resolve_tier_lookup(
+                    kit, checkout_info.checkout, user, group_code=_kit_group(infos)
+                ),
+                user=user,
+            )
+        except kit_pricing.KitRefusal as problem:
+            for line_info in infos:
+                _log_drop(token, line_info, str(problem))
+            dropped.extend(infos)
+            continue
+
+        by_variant = {row.member.variant.pk: row for row in priced.lines}
+        for line_info in infos:
+            line = line_info.line
+            row = by_variant.get(line.variant_id)
+            if row is None:
+                _log_drop(token, line_info, "this item is no longer part of its kit")
+                dropped.append(line_info)
+                continue
+            before = _snapshot_of(line)
+            line.price_override = Decimal(row.unit_cents) / 100
+            line.price_override_reason = DEALER_REASON if row.on_tier else KIT_REASON
+            if row.on_tier:
+                line.store_value_in_private_metadata(
+                    {DEALER_META: line.private_metadata.get(DEALER_META) or "{}"}
+                )
+            else:
+                # The tier went away, so the line stops being a dealer line and
+                # a voucher may reach it again.
+                line.delete_value_from_private_metadata(DEALER_META)
+            if before != _snapshot_of(line):
+                mark(line_info)
+    return dropped
+
+
+def _kit_group(infos):
+    """The dealer group these member lines were priced against, if any.
+
+    One group per kit add, so the first line that carries one answers for all.
+    """
+    for line_info in infos:
+        raw = (line_info.line.private_metadata or {}).get(DEALER_META)
+        if not raw:
+            continue
+        try:
+            code = (json.loads(raw) or {}).get("group")
+        except ValueError:
+            continue
+        if code:
+            return code
+    return None
+
+
 def _classify(lines):
     """Split the checkout's lines into the three kinds we own. No queries.
 
@@ -266,19 +381,24 @@ def _classify(lines):
     is the storefront's add, not this function's enforcement. A line carrying a
     forged PUBLIC copy of one of these keys is, for the same reason, not ours.
     """
-    configured, fee_lines, dealer_lines = [], [], []
+    configured, fee_lines, kit_lines, dealer_lines = [], [], [], []
     for line_info in lines:
         stamps = line_info.line.private_metadata or {}
         if META_FEE in stamps:
             fee_lines.append(line_info)
         elif META_OPTIONS in stamps:
             configured.append(line_info)
+        elif META_KIT in stamps:
+            # Before the dealer test, deliberately: a kit member that took a
+            # tier carries BOTH stamps, and its price is the kit's arithmetic
+            # rather than the plain per-variant ladder.
+            kit_lines.append(line_info)
         elif (
             DEALER_META in stamps
             or line_info.line.price_override_reason == DEALER_REASON
         ):
             dealer_lines.append(line_info)
-    return configured, fee_lines, dealer_lines
+    return configured, fee_lines, kit_lines, dealer_lines
 
 
 def _disown_forged_stamps(lines, mark):

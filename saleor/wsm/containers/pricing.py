@@ -322,10 +322,33 @@ def add_kit_to_checkout(
 
     from ...checkout.models import CheckoutLine
 
-    on_tier = []
+    stamped = []
     for line in priced.lines:
-        row = ours.get(line.member.variant.pk) if line.on_tier else None
+        row = ours.get(line.member.variant.pk)
         if row is None:
+            continue
+        # What MP3 re-derives this line from on every later recalculation. It is
+        # PRIVATE because it is a pricing input: the public copy above is what
+        # the storefront cart groups on and is display only, and stock Saleor
+        # lets any unauthenticated caller write public line metadata. A shopper
+        # who could write this one could hang a retail line off a heavily
+        # discounted kit. The kit quantity is carried because the member line's
+        # own quantity is the kit's times the member's, and dividing it back out
+        # is a guess the moment a shopper edits it.
+        row.store_value_in_private_metadata(
+            {
+                META_KIT: json.dumps(
+                    {
+                        "collection": collection_slug,
+                        "group": group_id,
+                        "quantity": quantity,
+                    },
+                    sort_keys=True,
+                )
+            }
+        )
+        stamped.append(row)
+        if not line.on_tier:
             continue
         # A member line that took a tier IS a dealer line, and the no-stacking
         # guard finds one by the PRESENCE of this key
@@ -338,8 +361,7 @@ def add_kit_to_checkout(
         row.store_value_in_private_metadata(
             {DEALER_KEY: json.dumps({"group": tier_group} if tier_group else {})}
         )
-        on_tier.append(row)
-    if on_tier:
-        CheckoutLine.objects.bulk_update(on_tier, ["private_metadata"])
+    if stamped:
+        CheckoutLine.objects.bulk_update(stamped, ["private_metadata"])
 
     return group_id, priced, ours

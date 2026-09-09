@@ -305,6 +305,74 @@ def test_a_tiered_kit_member_is_written_as_a_dealer_line(
     }
 
 
+def recalculate(checkout):
+    """What every cart read does: run the funnel over the checkout's lines."""
+    from saleor.checkout.fetch import fetch_checkout_info, fetch_checkout_lines
+    from saleor.plugins.manager import get_plugins_manager
+    from saleor.wsm.reprice import reprice
+
+    lines, _ = fetch_checkout_lines(checkout)
+    manager = get_plugins_manager(allow_replica=False)
+    reprice(fetch_checkout_info(checkout, lines, manager), lines)
+    return {line.variant_id: line.price_override for line in checkout.lines.all()}
+
+
+def test_a_member_that_loses_its_tier_falls_back_to_the_kit_price_not_to_list(
+    client, checkout, kit, customer_user
+):
+    """The overcharge MP3 used to write on the first recalculation after a change.
+
+    A kit member that took a dealer tier carries the dealer stamp, and MP3 read
+    that stamp and re-ran the plain per-variant LADDER over the line: it knew
+    nothing about the kit the line came from. So when the merchant withdrew the
+    tier, the line did not fall back to the kit price it was still entitled to.
+    It fell back to LIST, and the shopper paid the whole kit discount back on
+    that member without touching their cart.
+    """
+    from saleor.wsm.dealer.models import DealerCustomer, DealerGroup, TierPrice
+
+    group = DealerGroup.objects.create(code="tier-1", name="Tier 1")
+    DealerCustomer.objects.create(user=customer_user, group=group)
+    dear = kit.members.order_by("-sort_order").first().variant
+    TierPrice.objects.create(
+        variant=dear, group=group, min_quantity=1, amount=Decimal("25.00")
+    )
+    assert post_kit(client, checkout, kit.collection_id, customer=customer_user).status_code == 200
+    on_tier = checkout.lines.get(variant_id=dear.pk).price_override
+    assert on_tier == Decimal("25.00")
+
+    TierPrice.objects.all().delete()
+    after = recalculate(checkout)
+
+    kit_price = pricing.price_kit(
+        kit.pricing_members(checkout.channel), kit.discount_kind, kit.discount_amount
+    )
+    entitled = {
+        row.member.variant.pk: Decimal(row.unit_cents) / 100 for row in kit_price.lines
+    }
+    assert after[dear.pk] == entitled[dear.pk]
+    assert after[dear.pk] < dear.channel_listings.get().price_amount, "never list"
+
+
+def test_the_kit_money_is_re_derived_on_every_read(client, checkout, kit):
+    """Nothing re-derived a member that took no tier, so a stale cart kept a
+    discount the merchant had already changed, for the life of that cart.
+    """
+    assert post_kit(client, checkout, kit.collection_id).status_code == 200
+    before = {line.variant_id: line.price_override for line in checkout.lines.all()}
+
+    kit.discount_amount = Decimal(50)
+    kit.save(update_fields=["discount_amount"])
+    after = recalculate(checkout)
+
+    kit_price = pricing.price_kit(
+        kit.pricing_members(checkout.channel), kit.discount_kind, kit.discount_amount
+    )
+    for row in kit_price.lines:
+        assert after[row.member.variant.pk] == Decimal(row.unit_cents) / 100
+        assert after[row.member.variant.pk] < before[row.member.variant.pk]
+
+
 @pytest.fixture
 def bakeoff_kit(collection, product_list, channel_USD):
     """The two bake-off kits as one container: 3998.99 + 6399.00, 10 percent off.

@@ -145,3 +145,37 @@ def test_a_discount_that_eats_the_kit_is_refused():
 def test_an_empty_kit_is_refused():
     with pytest.raises(pricing.KitRefusal):
         pricing.price_kit([], pricing.FIXED, Decimal("1.00"))
+
+
+# --- verdict "KitMember quantity 0 and prorate residue" ----------------------
+
+
+def test_a_member_holding_none_of_its_variant_is_refused_not_a_crash():
+    """`prorate` divides by the member quantity: 0 came out as ZeroDivisionError.
+
+    A merchant typing 0 into a kit line read as a 500 on the product page rather
+    than as the bad kit row it is. `KitMember.quantity` refuses it at the screen
+    now; this is the money's own guard, for the rows a screen never touched.
+    """
+    kit = [member(1, "10.00", quantity=0), member(2, "10.00")]
+
+    with pytest.raises(pricing.KitRefusal):
+        pricing.price_kit(kit, pricing.PERCENT, Decimal(10))
+
+
+def test_a_discount_no_member_quantity_can_carry_is_reported_as_nothing_taken():
+    """Two 1.00 units on one member, 0.01 off: no unit price can carry half a cent.
+
+    The unit discount is a per-unit number, so 1 cent over a member of quantity
+    2 allocates nothing. The kit used to report `discount_cents` of 1 against a
+    total that had not moved, so `list_total - discount` and the sum of the lines
+    disagreed by a cent: an order that says it discounted money it charged.
+    """
+    kit = [member(1, "1.00", quantity=2)]
+
+    priced = pricing.price_kit(kit, pricing.FIXED, Decimal("0.01"))
+
+    assert priced.list_total_cents == 200
+    assert priced.total_cents == 200
+    assert priced.discount_cents == 0
+    assert priced.list_total_cents - priced.discount_cents == priced.total_cents

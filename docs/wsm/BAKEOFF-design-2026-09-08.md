@@ -89,10 +89,11 @@ caller; a future one inherits the rules by calling `full_clean()`.
   one-of contributes its lowest delta, a many-of contributes every credit it
   carries, an optional one-of contributes its lowest delta or nothing). The
   floor has to stay above zero, because `pricing.price_configured` refuses at
-  or below it (requirement 1.3). Dealer tier deltas are excluded: `delta_for`
-  floors a positive tier row at retail and takes a credit verbatim, so a dealer
-  floor is a dealer rule and belongs on the dealer rows. A product with no
-  priced listing is not checked at all.
+  or below it (requirement 1.3). The floor is computed once for retail and once
+  for EVERY dealer group with a tier row on the product, pricing each choice the
+  way `delta_for` would price it for that group: the retail floor is only an
+  upper bound on a dealer's, and a group whose credits are deeper goes under
+  first. A product with no priced listing is not checked at all.
 - **A SKU code is unique inside one question.** Two choices with the same
   `sku_fragment` produce one composite SKU at two different prices, and the
   order cannot say which was bought. Enforced in `clean()` and NOT as a UNIQUE
@@ -111,6 +112,63 @@ caller; a future one inherits the rules by calling `full_clean()`.
 - **A charge is money the shopper owes.** `Fee.clean()` refuses a negative
   amount (a reduction belongs on an option choice as a credit, where the floor
   rule guards it) and a percentage above 100. No override flag.
+
+### Money rules added after the Wild West review (2026-09-08)
+
+Nine reviewers walked the fork and every money defect below was reproduced
+before it was fixed. Each carries what it let through.
+
+- **One rounding rule for the fork, `saleor/wsm/money.py`, HALF_UP.** The same
+  conversion was written three times in two modes: `compose.models.to_cents`
+  quantized with the Decimal default, HALF_EVEN, while the dealer ladders and
+  the kit math rounded HALF_UP. A tier price of 8.005, which the field's three
+  decimals invite, was quoted to the shopper at 8.01 by the dealer endpoint and
+  charged at 8.00 by anything that priced through Compose: the shop's own two
+  surfaces disagreed by a cent on the same row, every time, in whichever
+  direction the merchant did not expect. Both names still exist and both now
+  point at the one function, so no caller changed. HALF_UP is the rule because
+  it is what the ladders already quote and what a merchant means by half a cent;
+  Saleor's own `quantize_price` stays HALF_EVEN and is untouched.
+- **A dealer tier price is at least one cent.** `TierPrice.amount` is an
+  absolute price, not a discount, so a zero or negative one is not a deep
+  discount but a line that pays the shopper. Nothing checked it: on the bake-off
+  box a row of -50 priced a real checkout line at a unit price of -50.00, and a
+  dealer could have ordered a cart that owed him money. Three statements of one
+  rule now: a `MinValueValidator` on the field for the merchant, a
+  `CheckConstraint` on our own `wsm_dealer_tierprice` table for the importer and
+  the shell, and a floor in `ladders()`, which is the single read every dealer
+  price comes out of, for the rows written before either existed. The floor is a
+  cent rather than "above zero" because the amount carries three decimals and is
+  charged at two: 0.004 is a positive number and a zero charge.
+- **An option-value tier delta is bounded on both sides.** Above, a tier row
+  higher than the retail delta (floored at zero) is refused at save, in the
+  field, naming the retail amount. It used to save clean, quote retail on the
+  product page and then refuse the add-to-cart from `pricing.delta_for` with a
+  message written for a developer, so a merchant who priced a free option at
+  25.00 for one dealer group broke that group's cart and got told nothing.
+  Below, the charge is the BETTER OF the tier delta and retail: a -300.00 dealer
+  credit sitting where retail credits -445.00 is a legal row and used to stand
+  verbatim, which the merchant walk measured as a dealer quoted 3,698.99 for the
+  configuration a walk-in shopper buys at 3,553.99. A dealer never pays more
+  than retail for the same choice, and a line that lost to retail is not stamped
+  as tier-priced, so promotions still reach it.
+- **A kit member holds at least one of its variant, and the discount reported is
+  the discount taken.** `KitMember.quantity` of 0 divided by zero inside the
+  proration and surfaced as a 500 rather than as the bad kit row it is. And a
+  fixed discount smaller than the member quantities can carry (two 1.00 units,
+  one cent off) allocated nothing while `discount_cents` still reported the ask,
+  so the kit's own arithmetic disagreed with itself by a cent: an order that
+  said it discounted money it had charged. The residue is not invented onto a
+  unit price it cannot divide into; `price_kit` reports what the members
+  actually took, and `list_total - discount == total` holds again.
+- **The 5.0 importer validates every row it writes.** Twelve write sites went
+  straight to `save()`, so every rule above was bypassed by the one writer that
+  touches a whole tenant at once: sub-zero configurations, dealer deltas above
+  retail and tier groups naming no dealer group all landed, and the MERCHANT met
+  the refusal weeks later on a screen that would not save until they fixed a row
+  they had never written. Each write now runs `full_clean()` first, and a
+  refused row is a reported skip carrying its reason, never a crash that costs
+  the tenant the import and never a silent write.
 
 Where one submit changes several rows at once, the value inline formset
 (`compose/forms.py`) runs both cross-row rules over the whole POST and the rows

@@ -16,6 +16,7 @@ GraphQL schema for a collection page to render a series.
 import json
 
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 
 from . import pricing
@@ -327,7 +328,8 @@ class KitMember(models.Model):
     )
     quantity = models.PositiveIntegerField(
         default=1,
-        help_text="How many of this SKU one kit contains.",
+        validators=[MinValueValidator(1)],
+        help_text="How many of this SKU one kit contains, and at least one.",
     )
     sort_order = models.IntegerField(
         default=0,

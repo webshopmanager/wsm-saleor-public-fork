@@ -49,6 +49,7 @@ import subprocess
 from collections import defaultdict
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils.text import slugify
@@ -227,6 +228,45 @@ class _Report(dict):
     def bump(self, key, n=1):
         self[key] = self.get(key, 0) + n
 
+    def note(self, key, entry):
+        if entry not in self[key]:
+            self[key].append(entry)
+
+
+def _reasons(refused: ValidationError) -> str:
+    """A ValidationError as one line a merchant can act on."""
+    if hasattr(refused, "message_dict"):
+        return "; ".join(
+            f"{field}: {' '.join(messages)}"
+            for field, messages in refused.message_dict.items()
+        )
+    return " ".join(refused.messages)
+
+
+def _save(instance, report, kind: str, what: str) -> bool:
+    """Validate the row the way the merchant screens do, then write it.
+
+    Every rule this import can break lives in a model `clean()`: a configuration
+    whose cheapest legal answer is at or below zero, a tier group naming no
+    dealer group, a dealer delta above retail, a negative fee, a tier price at
+    or below zero, two choices sharing one SKU code. None of them was checked
+    here, so the import wrote them and the MERCHANT was refused later, on a row
+    they did not break, from a screen that would not save until they fixed it.
+
+    A refused row is a reported skip: the import finishes, everything sound
+    lands, and the report names what did not and why. Refusing the whole run
+    would hand back a tenant with no configurator; writing it anyway is what
+    this is here to stop.
+    """
+    try:
+        instance.full_clean()
+    except ValidationError as refused:
+        report.bump(f"{kind}_refused")
+        report.note("refused", f"{what}: {_reasons(refused)}")
+        return False
+    instance.save()
+    return True
+
 
 def apply(payload, *, channel_slug, include_hidden=False, image_base="", dry_run=False):
     """Write the 5.0 payload into Compose's tables. Returns the count report.
@@ -238,6 +278,7 @@ def apply(payload, *, channel_slug, include_hidden=False, image_base="", dry_run
     report["unmatched_skus"] = []
     report["unknown_desc"] = []
     report["orphan_tier_keys"] = []
+    report["refused"] = []
 
     price_groups = {
         row["name"]: slugify(row["name"])
@@ -263,11 +304,15 @@ def apply(payload, *, channel_slug, include_hidden=False, image_base="", dry_run
     with transaction.atomic():
         groups = {}
         for name, code in sorted(price_groups.items()):
-            group, created = DealerGroup.objects.get_or_create(
-                code=code, defaults={"name": name}
-            )
+            group = DealerGroup.objects.filter(code=code).first()
+            if group is None:
+                group = DealerGroup(code=code, name=name)
+                if not _save(group, report, "groups", f"dealer group {code!r}"):
+                    continue
+                report.bump("groups_created")
+            else:
+                report.bump("groups_unchanged")
             groups[name] = group
-            report.bump("groups_created" if created else "groups_unchanged")
 
         configurable = set()
         for row in payload["sets"]:
@@ -277,8 +322,7 @@ def apply(payload, *, channel_slug, include_hidden=False, image_base="", dry_run
             product_id = by_sku.get(row["sku"])
             if product_id is None:
                 report.bump("sets_unmatched")
-                if row["sku"] not in report["unmatched_skus"]:
-                    report["unmatched_skus"].append(row["sku"])
+                report.note("unmatched_skus", row["sku"])
                 continue
             prompt = PROMPT_BY_50_TYPE.get(row["type"])
             if prompt is None:
@@ -296,16 +340,19 @@ def apply(payload, *, channel_slug, include_hidden=False, image_base="", dry_run
             option_set = OptionSet.objects.filter(
                 product_id=product_id, name=row["name"]
             ).first()
+            what = f"option set {row['name']!r} on {row['sku']}"
             if option_set is None:
                 option_set = OptionSet(
                     product_id=product_id, name=row["name"], **fields
                 )
-                option_set.save()
+                if not _save(option_set, report, "sets", what):
+                    continue
                 report.bump("sets_created")
             elif any(getattr(option_set, k) != v for k, v in fields.items()):
                 for k, v in fields.items():
                     setattr(option_set, k, v)
-                option_set.save()
+                if not _save(option_set, report, "sets", what):
+                    continue
                 report.bump("sets_updated")
             else:
                 report.bump("sets_unchanged")
@@ -324,6 +371,8 @@ def apply(payload, *, channel_slug, include_hidden=False, image_base="", dry_run
             payload["tier_prices"], by_sku, groups, price_groups, report
         )
 
+        # Product is a core Saleor model and its rules are Saleor's, not ours:
+        # full_clean() here would judge a catalog this import did not write.
         for product in Product.objects.filter(pk__in=configurable):
             if product.metadata.get(CONFIGURABLE_METAFIELD) == CONFIGURABLE_VALUE:
                 report.bump("metafield_unchanged")
@@ -350,21 +399,22 @@ def _import_values(option_set, rows, price_groups, image_base, report):
             # A `desc` naming no customer group is prose on the value, not a
             # tier, and there is no retail row it could be a tier OF.
             report.bump("values_desc_not_a_group")
-            entry = f"{option_set.name}: {desc}"
-            if entry not in report["unknown_desc"]:
-                report["unknown_desc"].append(entry)
+            report.note("unknown_desc", f"{option_set.name}: {desc}")
             continue
         tiers[(row["name"], row.get("sku") or "")].append((desc, row["price"]))
 
     seen = set()
     for row in retail:
         key = (row["name"], row.get("sku") or "")
+        # A refused row is still a row 5.0 has: it counts as seen so the report
+        # does not also call it stale or call its tier rows orphans.
         seen.add(key)
         fields = {
             "price_delta": Decimal(row["price"]),
             "image_url": _image_url(row, image_base),
             "sort_order": int(row.get("priority") or 0),
         }
+        what = f"{option_set.name}: choice {row['name']!r}"
         value = OptionValue.objects.filter(
             option_set=option_set, name=row["name"], sku_fragment=key[1]
         ).first()
@@ -372,12 +422,14 @@ def _import_values(option_set, rows, price_groups, image_base, report):
             value = OptionValue(
                 option_set=option_set, name=row["name"], sku_fragment=key[1], **fields
             )
-            value.save()
+            if not _save(value, report, "values", what):
+                continue
             report.bump("values_created")
         elif any(getattr(value, k) != v for k, v in fields.items()):
             for k, v in fields.items():
                 setattr(value, k, v)
-            value.save()
+            if not _save(value, report, "values", what):
+                continue
             report.bump("values_updated")
         else:
             report.bump("values_unchanged")
@@ -385,18 +437,20 @@ def _import_values(option_set, rows, price_groups, image_base, report):
         for desc, amount in tiers.get(key, []):
             code = price_groups[desc]
             delta = Decimal(amount)
+            tier_what = f"{what}, {code} price"
             tier = DealerTierOptionPrice.objects.filter(
                 option_value=value, tier_group=code
             ).first()
             if tier is None:
-                DealerTierOptionPrice.objects.create(
+                tier = DealerTierOptionPrice(
                     option_value=value, tier_group=code, price_delta=delta
                 )
-                report.bump("tiers_created")
+                if _save(tier, report, "tiers", tier_what):
+                    report.bump("tiers_created")
             elif tier.price_delta != delta:
                 tier.price_delta = delta
-                tier.save()
-                report.bump("tiers_updated")
+                if _save(tier, report, "tiers", tier_what):
+                    report.bump("tiers_updated")
             else:
                 report.bump("tiers_unchanged")
 
@@ -407,9 +461,7 @@ def _import_values(option_set, rows, price_groups, image_base, report):
         if key in seen:
             continue
         report.bump("tiers_orphaned", len(rows_for_key))
-        entry = f"{option_set.name}: {key[0]!r}/{key[1]!r}"
-        if entry not in report["orphan_tier_keys"]:
-            report["orphan_tier_keys"].append(entry)
+        report.note("orphan_tier_keys", f"{option_set.name}: {key[0]!r}/{key[1]!r}")
 
     stale = sum(
         1
@@ -439,15 +491,17 @@ def _import_fees(rows, by_sku, report):
             "decline_label": row.get("return_first_label") or "",
         }
         label = row.get("fee_label") or ""
+        what = f"charge {label!r} on {row['sku']}"
         fee = Fee.objects.filter(product_id=product_id, label=label).first()
         if fee is None:
-            Fee.objects.create(product_id=product_id, label=label, **fields)
-            report.bump("fees_created")
+            fee = Fee(product_id=product_id, label=label, **fields)
+            if _save(fee, report, "fees", what):
+                report.bump("fees_created")
         elif any(getattr(fee, k) != v for k, v in fields.items()):
             for k, v in fields.items():
                 setattr(fee, k, v)
-            fee.save()
-            report.bump("fees_updated")
+            if _save(fee, report, "fees", what):
+                report.bump("fees_updated")
         else:
             report.bump("fees_unchanged")
 
@@ -477,15 +531,17 @@ def _import_tier_prices(rows, by_sku, groups, price_groups, report):
         tier = TierPrice.objects.filter(
             variant=variant, group=group, min_quantity=min_quantity
         ).first()
+        what = f"{row['group']} price on {row['sku']} from {min_quantity}"
         if tier is None:
-            TierPrice.objects.create(
+            tier = TierPrice(
                 variant=variant, group=group, min_quantity=min_quantity, amount=amount
             )
-            report.bump("tier_prices_created")
+            if _save(tier, report, "tier_prices", what):
+                report.bump("tier_prices_created")
         elif tier.amount != amount:
             tier.amount = amount
-            tier.save()
-            report.bump("tier_prices_updated")
+            if _save(tier, report, "tier_prices", what):
+                report.bump("tier_prices_updated")
         else:
             report.bump("tier_prices_unchanged")
 

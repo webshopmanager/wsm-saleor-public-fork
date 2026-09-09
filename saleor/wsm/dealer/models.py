@@ -19,8 +19,12 @@ A free-text tier group that matches no row is a price that silently never
 applies, which is the failure this pair is here to turn into a field error.
 """
 
+from decimal import Decimal
+
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
+from django.db.models import Q
 
 
 class DealerGroupQuerySet(models.QuerySet):
@@ -111,6 +115,12 @@ class DealerCustomer(models.Model):
         return f"{self.user_id} @ {self.group_id}"
 
 
+# The smallest amount that is still a price once it is rounded to the cent it
+# will be charged at. Named because the field validator, the table constraint
+# and the pricing floor are three statements of the same rule.
+MIN_TIER_AMOUNT = Decimal("0.01")
+
+
 class TierPrice(models.Model):
     """One quantity break: this group pays `amount` each from `min_quantity` up.
 
@@ -141,13 +151,19 @@ class TierPrice(models.Model):
     )
     # Matched to CheckoutLine.price_override so the number round-trips onto the
     # line without a quantize step that could move a cent.
+    #
+    # A tier price is an absolute price, so a zero or negative one is not a big
+    # discount, it is a line that pays the shopper. The floor is ONE CENT rather
+    # than "above zero" because the amount carries three decimals and is charged
+    # at two: 0.004 is a positive number that charges 0.00.
     amount = models.DecimalField(
         max_digits=12,
         decimal_places=3,
+        validators=[MinValueValidator(MIN_TIER_AMOUNT)],
         help_text=(
-            "What this group pays EACH, in the shop's currency. A price, not a "
-            "discount: no voucher or promotion is added on top unless discount "
-            "stacking is turned on in Dealer settings."
+            "What this group pays EACH, in the shop's currency, and at least one "
+            "cent. A price, not a discount: no voucher or promotion is added on "
+            "top unless discount stacking is turned on in Dealer settings."
         ),
     )
 
@@ -157,7 +173,15 @@ class TierPrice(models.Model):
             models.UniqueConstraint(
                 fields=["variant", "group", "min_quantity"],
                 name="wsm_dealer_one_row_per_break",
-            )
+            ),
+            # The backstop under the field validator, for the writers that never
+            # call full_clean(): the 5.0 importer, a shell, a SQL fixup. Live on
+            # the bake-off box an amount of -50 reached a checkout line and
+            # quoted a unit price of -50.00.
+            models.CheckConstraint(
+                condition=Q(amount__gte=MIN_TIER_AMOUNT),
+                name="wsm_dealer_tier_amount_at_least_a_cent",
+            ),
         ]
 
     def __str__(self):

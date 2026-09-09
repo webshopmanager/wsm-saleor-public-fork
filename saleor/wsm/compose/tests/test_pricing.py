@@ -121,10 +121,8 @@ def test_line_total_eaten_by_a_negative_fee_refuses():
     assert caught.value.line is True
 
 
-def test_tier_row_on_a_credit_is_verbatim_smaller_credit():
-    """Requirement 2.2: a dealer credit of -300 against a retail credit of -445
-    is the natural merchant intent and is taken as written."""
-    sets = [
+def gasket_sets(tier_cents):
+    return [
         OptionSet(
             id=3,
             name="Gasket set",
@@ -133,14 +131,28 @@ def test_tier_row_on_a_credit_is_verbatim_smaller_credit():
                     id=33,
                     name="Delete",
                     price_delta=GASKET_SET,
-                    tier_deltas=(TierDelta(tier_group="dealer-1", price_delta=-30000),),
+                    tier_deltas=(
+                        TierDelta(tier_group="dealer-1", price_delta=tier_cents),
+                    ),
                 ),
             ),
         )
     ]
-    result = price_configured(STAGE_2_BASE, sets, pick(3), "dealer-1")
-    assert result.unit_cents == 399899 - 30000
-    assert result.snapshot["tier_applied"] is True
+
+
+def test_a_shallower_dealer_credit_never_costs_the_dealer_more_than_retail():
+    """Verdict 7, measured on the merchant walk: 3,698.99 against 3,553.99.
+
+    A -300.00 dealer row where retail credits -445.00 is a legal row, not a
+    surcharge, and it used to stand verbatim: the same delete, on the same
+    product, quoted the dealer 145.00 MORE than the shopper next to him. Better
+    of, so retail's credit wins and the line is not stamped as tier-priced.
+    """
+    result = price_configured(STAGE_2_BASE, gasket_sets(-30000), pick(3), "dealer-1")
+
+    assert result.unit_cents == 355399
+    assert price_configured(STAGE_2_BASE, gasket_sets(-30000), pick(3)).unit_cents == 355399
+    assert result.snapshot["tier_applied"] is False
 
 
 def test_tier_row_on_a_credit_is_verbatim_larger_credit():

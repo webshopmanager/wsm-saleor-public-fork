@@ -110,3 +110,27 @@ def test_the_backend_never_reads_the_writer(staff_user, site_settings):
         )
         assert backend.get_user(staff_user.pk) == staff_user
         assert backend.get_user_permissions(staff_user) == set()
+
+
+# --- verdict "auth.py .get() on SiteSettings 500s login" --------------------
+
+
+def test_a_shop_with_no_settings_row_is_denied_rather_than_broken(
+    staff_user, site_settings
+):
+    """The read was a bare `.get()`, so a missing row raised out of authenticate.
+
+    This backend is in `AUTHENTICATION_BACKENDS`, so the exception did not stop
+    at /admin/: every sign-in in the process, staff and customer, 500ed. A switch
+    this backend cannot read is a switch it treats as off, which fails towards
+    refusing a password rather than towards accepting one.
+    """
+    _with_password(staff_user)
+    site_settings.delete()
+
+    assert (
+        AdminPasswordBackend().authenticate(
+            username=staff_user.email, password=PASSWORD
+        )
+        is None
+    )

@@ -255,3 +255,13 @@ def test_an_update_that_touches_no_stamped_field_reads_no_rows(
 
     with django_assert_num_queries(1):
         SeriesConfig.objects.filter(pk=series.pk).update(collection=collection)
+
+
+def test_a_kit_member_holding_none_of_its_variant_is_refused(collection, variant):
+    """0 divides by zero in the proration, so it never becomes a saved row."""
+    kit = KitConfig.objects.create(collection=collection)
+
+    with pytest.raises(ValidationError) as refused:
+        KitMember(kit=kit, variant=variant, quantity=0).full_clean()
+
+    assert "quantity" in refused.value.message_dict

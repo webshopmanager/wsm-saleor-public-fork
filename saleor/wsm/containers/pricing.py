@@ -24,6 +24,8 @@ import uuid
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
+from .. import money
+
 FIXED = "fixed"
 PERCENT = "percent"
 DISCOUNT_KINDS = (FIXED, PERCENT)
@@ -43,9 +45,9 @@ class KitRefusal(Exception):
     """A kit whose numbers cannot be charged. Never swallowed, never guessed past."""
 
 
-def to_cents(amount) -> int:
-    """Two-decimal currency to integer cents. Exact where a float is not."""
-    return int(Decimal(amount).quantize(_CENT, rounding=ROUND_HALF_UP) * 100)
+# The fork's one rounding rule, HALF_UP. Re-exported because `containers/models`
+# and the tests reach it as `pricing.to_cents`.
+to_cents = money.to_cents
 
 
 @dataclass(frozen=True)
@@ -111,13 +113,19 @@ def prorate(members, discount_cents: int) -> tuple[int, ...]:
     to declaration order: the residue goes to the highest-value line, as the kit
     money spec says.
 
-    ponytail: when a member quantity exceeds 1 the last few cents of a discount
-    can be indivisible by that quantity (3 cents over a member of quantity 2).
-    Those cents are dropped, in the merchant's favour, never invented: the
-    charged total is always ``sum(unit * quantity)``, which is what the customer
-    is billed. The upgrade path, if a merchant ever notices, is a per-unit
-    price_override plus a one-cent adjustment line, which is a worse cart to
-    read than a discount that is one cent shy.
+    When a member quantity exceeds 1 the last few cents of a discount can be
+    indivisible by that quantity (3 cents over a member of quantity 2, or the
+    whole of a 1 cent discount over two $1 units). Those cents are not
+    allocated, in the merchant's favour, never invented: the charged total is
+    always ``sum(unit * quantity)``, which is what the customer is billed.
+    `price_kit` therefore REPORTS what this function allocated rather than what
+    was asked for, so the kit's own arithmetic adds up: a discount of 1 cent
+    that reached no line is reported as 0, not as 1 against an unchanged total.
+
+    ponytail: the ceiling is that a merchant asking for a discount smaller than
+    the member quantities can carry gets less than they typed. The upgrade path,
+    if one ever notices, is a per-unit price_override plus a one-cent adjustment
+    line, which is a worse cart to read than a discount one cent shy.
     """
     weights = [m.unit_list_cents * m.quantity for m in members]
     total = sum(weights)
@@ -177,9 +185,22 @@ def price_kit(
     if kit_quantity < 1:
         raise KitRefusal("quantity must be at least 1")
 
+    if any(m.quantity < 1 for m in members):
+        # prorate divides by the member quantity: a zero reached this as a
+        # ZeroDivisionError, which reads as a crash rather than as the bad kit
+        # row it is. `KitMember.quantity` refuses it at the model now too.
+        raise KitRefusal("a kit member holds fewer than one of its variant")
+
     list_total = sum(m.unit_list_cents * m.quantity for m in members)
     discount = kit_discount_cents(discount_kind, discount_amount, list_total)
     per_unit_discount = prorate(members, discount)
+    # What the members actually took, which is what the kit discounted. Asking
+    # for a cent that no member quantity can carry allocates nothing, and
+    # reporting the ask would leave list_total - discount != total.
+    allocated = sum(
+        unit * member.quantity
+        for unit, member in zip(per_unit_discount, members, strict=True)
+    )
 
     lines = []
     for member, unit_discount in zip(members, per_unit_discount, strict=True):
@@ -208,7 +229,7 @@ def price_kit(
     return KitPrice(
         lines=tuple(lines),
         list_total_cents=list_total * kit_quantity,
-        discount_cents=discount * kit_quantity,
+        discount_cents=allocated * kit_quantity,
         total_cents=sum(line.unit_cents * line.line_quantity for line in lines),
     )
 

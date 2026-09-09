@@ -7,12 +7,13 @@ variants is one round trip and not two; the retail price each row must sit under
 rides along as a correlated subquery in the same statement. Design budget,
 section 5: "Dealer display batch: 1 query for up to 100 variants."
 
-The retail floor is applied HERE, once, rather than at each caller: a tier row
-above the channel's retail price is not an offer, so it never reaches a ladder
-and never reaches a line. Refusing rather than clamping is Compose's rule for
-option-value tiers (`AboveRetailError`); a variant tier is a whole price rather
-than a delta, and a shopper standing on a product page is the wrong audience for
-a merchant's data bug, so here the bad row is simply not offered and the buyer
+Both bounds are applied HERE, once, rather than at each caller: a tier row above
+the channel's retail price is not an offer, and neither is one at or below zero,
+so neither reaches a ladder and neither reaches a line. Refusing rather than
+clamping is Compose's rule for option-value tiers (`AboveRetailError`); a variant
+tier is a whole price rather than a delta, and a shopper standing on a product
+page is the wrong audience for a merchant's data bug, so the bad row is simply
+not offered and the buyer
 falls back to retail.
 
 Every amount leaves here already rounded to the cent it will be charged at, by
@@ -26,7 +27,7 @@ and 8.01 on the other. One quantize, here, and both paths charge 8.01.
 from __future__ import annotations
 
 from collections import defaultdict
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import NamedTuple
 
 import graphene
@@ -34,6 +35,7 @@ from django.conf import settings
 from django.db.models import OuterRef, Q, Subquery
 
 from ...product.models import ProductVariantChannelListing
+from .. import money
 from .models import DealerCustomer, TierPrice
 
 # Endpoint 3's cap. A storefront asking about more variants than a page can show
@@ -64,18 +66,9 @@ def tier_group_for(user_pk, *, database_connection_name=None) -> str | None:
     )
 
 
-_CENT = Decimal("0.01")
-
-
-def to_money(amount) -> Decimal:
-    """A stored tier amount as the money that will actually be charged.
-
-    ROUND_HALF_UP, which is what a merchant means by a half cent and what the
-    containers cent conversion already did. Saleor's own `quantize_price` is
-    ROUND_HALF_EVEN and would send 8.005 down to 8.00, so it cannot be the
-    shared point here.
-    """
-    return Decimal(amount).quantize(_CENT, rounding=ROUND_HALF_UP)
+# A stored tier amount as the money that will actually be charged. The fork's one
+# rounding rule, HALF_UP, lives in wsm/money.py; see its docstring for why.
+to_money = money.to_money
 
 
 class DealerPrice(NamedTuple):
@@ -135,12 +128,18 @@ def ladders(
 
     found: dict[int, list[DealerPrice]] = defaultdict(list)
     for variant_id, min_quantity, amount, group_code, retail_amount in rows:
-        # Rounded before the floor is applied, so the comparison is against the
-        # number the buyer would actually be charged.
-        money = to_money(amount)
-        if retail_amount is not None and money > retail_amount:
+        # Rounded before either bound is applied, so both comparisons are
+        # against the number the buyer would actually be charged.
+        charged = to_money(amount)
+        # A price at or below nothing is not an offer at any quantity. The field
+        # validator and the table constraint stop new ones; this catches the
+        # rows written before they existed, and the 0.004 that is a positive
+        # number and a zero charge.
+        if charged <= 0:
             continue
-        found[variant_id].append(DealerPrice(money, min_quantity, group_code))
+        if retail_amount is not None and charged > retail_amount:
+            continue
+        found[variant_id].append(DealerPrice(charged, min_quantity, group_code))
     return dict(found)
 
 

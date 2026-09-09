@@ -12,11 +12,13 @@ replacement price and no mode enum. "At or below zero refuses" holds on the unit
 and on the line (1.3): money that came to nothing is a data bug, and clamping
 would hide it.
 
-Dealer tiers follow requirement 2.2 as corrected: a tier row on a NEGATIVE
-retail delta is taken VERBATIM, because a credit is a component of the
-configured price and not a discount on it. The refusal guards everything above
-that: the ceiling is the retail delta floored at zero, so a tier row can never
-turn a free or credited value into a surcharge a retail shopper does not pay.
+Dealer tiers follow requirement 2.2 as corrected: a tier row is a component of
+the configured price and not a discount on it, so a credit stands as written.
+Two bounds hold around it. The ceiling is the retail delta floored at zero, and
+a row above it is refused, so a tier row can never turn a free or credited value
+into a surcharge a retail shopper does not pay. Under the ceiling the charge is
+the BETTER OF the tier delta and the retail one, so a shallower dealer credit
+cannot quote a dealer a higher price than retail for the same configuration.
 """
 
 from __future__ import annotations
@@ -187,10 +189,17 @@ def delta_for(value: Value, tier_group: str | None) -> tuple[int, bool]:
     drift apart.
 
     Requirement 2.2 as corrected: the ceiling is the retail delta floored at
-    zero. A credit stands verbatim, larger or smaller, because a credit is part
-    of the price rather than a discount on it; the floor is what stops a tier
-    row from charging a dealer for a value retail gets free, which was live for
-    every value whose retail delta is exactly zero.
+    zero, and a tier row above it is refused rather than clamped, because a
+    dealer surcharge on a value retail gives away is a data bug nobody would
+    ever find if it silently priced at retail.
+
+    Under that ceiling the answer is the BETTER OF the two deltas, which is the
+    same rule a kit member already prices by ("dealer on a kit is better of,
+    never both"). A tier row that is a SMALLER credit than retail is legal, is
+    not a surcharge, and used to stand verbatim: the merchant walk measured a
+    dealer quoted 3,698.99 for the configuration retail buys at 3,553.99, off a
+    -300.00 tier credit sitting where retail gives -445.00. A dealer never pays
+    more than retail for the same choice.
     """
     if not tier_group:
         return value.price_delta, False
@@ -205,7 +214,12 @@ def delta_for(value: Value, tier_group: str | None) -> tuple[int, bool]:
                 amount=row.price_delta,
                 retail=value.price_delta,
             )
-        return row.price_delta, True
+        charged = min(row.price_delta, value.price_delta)
+        # `tier_applied` records whether the tier was HONORED, not whether a row
+        # was found: a row that lost to retail leaves the buyer at retail on this
+        # value, and a line stamped as dealer-priced when it is not is how a
+        # promotion gets suppressed on a retail price.
+        return charged, charged == row.price_delta
     return value.price_delta, False
 
 

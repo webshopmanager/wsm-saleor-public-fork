@@ -259,3 +259,90 @@ def test_a_tier_credit_the_product_can_carry_still_saves(listed_product, dealer_
     DealerTierOptionPrice(
         option_value=value, tier_group="dealer-1", price_delta=Decimal("-150.00")
     ).full_clean()
+
+
+FEE_PRICING_QUERY = """
+    query FeeProduct($slug: String!, $channel: String!) {
+      product(slug: $slug, channel: $channel) {
+        productType { slug hasVariants isShippingRequired }
+        variants { sku pricing { price { gross { amount } } } }
+      }
+    }
+"""
+
+
+def test_a_minted_fee_product_answers_variant_pricing_anonymously(
+    crating_fee, channel_USD, api_client
+):
+    """A fee product is a public URL, so its public fields have to resolve.
+
+    Stock `get_variant_availability` guards a NULL `price` and then dereferences
+    `discounted_price` unguarded, so a variant listing carrying only the first
+    of the two amounts turns `variants { pricing }` into a 500 for anyone, with
+    no login, on every fee a merchant has ever sold.
+    """
+    from saleor.graphql.tests.utils import get_graphql_content
+    from saleor.wsm.compose import models as compose_models
+
+    compose_models._ensure_fee_variant(crating_fee, channel_USD)
+
+    response = api_client.post_graphql(
+        FEE_PRICING_QUERY,
+        {"slug": f"wsm-fee-{crating_fee.pk}", "channel": channel_USD.slug},
+    )
+    product = get_graphql_content(response)["data"]["product"]
+
+    amounts = [v["pricing"]["price"]["gross"]["amount"] for v in product["variants"]]
+    assert amounts == [0.0]
+
+
+def test_a_fee_variant_listing_minted_before_the_fix_is_repaired_in_place(
+    crating_fee, channel_USD
+):
+    """The rows already in the two bake-off databases repair themselves.
+
+    A one-off management command would be a second way to do the same write.
+    The minting path already reads this listing on every configured add, so the
+    repair is a branch on a row it holds, costing one UPDATE once per bad row.
+    """
+    from saleor.product.models import ProductVariantChannelListing
+    from saleor.wsm.compose import models as compose_models
+
+    variant = compose_models._ensure_fee_variant(crating_fee, channel_USD)
+    listing = ProductVariantChannelListing.objects.get(
+        variant=variant, channel=channel_USD
+    )
+    # The shape the fee minter wrote before this fix, and the shape the four
+    # live rows are in today.
+    ProductVariantChannelListing.objects.filter(pk=listing.pk).update(
+        discounted_price_amount=None
+    )
+    compose_models._ENSURED_FEE_VARIANTS.discard((crating_fee.pk, channel_USD.pk))
+
+    compose_models._ensure_fee_variant(Fee.objects.get(pk=crating_fee.pk), channel_USD)
+
+    listing.refresh_from_db()
+    assert listing.discounted_price_amount == Decimal("0")
+
+
+def test_fee_products_are_excludable_by_product_type(crating_fee, channel_USD):
+    """`wsm-fee` is the key the storefront, sitemap and feed exclude on.
+
+    Named here so a rename breaks a test in this repo rather than a page in
+    another one. Not shipping required: a Fee carries no freight marker of its
+    own (`freight_class` lives on KitConfig, on the kit, not on the charge), so
+    the charge itself never asks the shipping engine for a rate.
+    """
+    from saleor.product.models import ProductChannelListing
+    from saleor.wsm.compose import models as compose_models
+
+    variant = compose_models._ensure_fee_variant(crating_fee, channel_USD)
+
+    product_type = variant.product.product_type
+    assert product_type.slug == "wsm-fee"
+    assert product_type.has_variants is False
+    assert product_type.is_shipping_required is False
+    listing = ProductChannelListing.objects.get(
+        product=variant.product, channel=channel_USD
+    )
+    assert listing.visible_in_listings is False

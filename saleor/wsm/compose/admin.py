@@ -33,13 +33,21 @@ from .forms import (
 from .models import DealerTierOptionPrice, Fee, OptionSet, OptionValue
 
 
+# The merchant console mounts on the same host as the public API, so
+# `/admin/login/` is a crawlable 200. One header on the way out keeps the whole
+# site out of an index, login page included, without a robots.txt Disallow
+# publishing the path to anyone who reads it.
+NOINDEX = "noindex, nofollow"
+
+
 def _writer_view(view):
-    """One admin view, allowed to use the writer connection."""
+    """One admin view, allowed to use the writer connection and never indexed."""
 
     @wraps(view)
     def wrapper(*args, **kwargs):
         with allow_writer():
             response = view(*args, **kwargs)
+            response["X-Robots-Tag"] = NOINDEX
             # The admin returns a lazy TemplateResponse and Django renders it
             # after the view has returned, so half the queries a page makes
             # (the index's recent-actions list, for one) would land outside

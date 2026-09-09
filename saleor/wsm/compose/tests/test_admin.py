@@ -62,3 +62,23 @@ def test_the_login_page_renders(client):
     response = client.get("/admin/login/")
 
     assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_every_admin_response_carries_x_robots_tag(client, merchant):
+    """The console shares a host with the public API, so login is crawlable.
+
+    Asserted on the anonymous login page and on a logged-in screen, because the
+    header is set at the site and not on one view: a merchant screen that lost
+    it would mean the wrap had been moved, not that one template changed.
+    """
+    anonymous = client.get("/admin/login/")
+
+    assert anonymous.status_code == 200
+    assert anonymous["X-Robots-Tag"] == "noindex, nofollow"
+
+    client.force_login(merchant, backend=BACKEND)
+    index = client.get("/admin/")
+
+    assert index.status_code == 200
+    assert index["X-Robots-Tag"] == "noindex, nofollow"

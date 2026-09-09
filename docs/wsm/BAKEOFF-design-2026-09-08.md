@@ -243,3 +243,43 @@ Not fixed here, and reported as a follow-up: one logical axis appears once per
 product rather than once per catalog, which is the shape the 5.0 import
 produces (97 products carry 126 questions, four of them the same QSST pump
 question repeated).
+
+## 8. Fee products are catalog plumbing (added 2026-09-08 after the SEO walk)
+
+A fee reaches the order as its own checkout line, with its own SKU and label,
+because that is what 5.0 did and what the ERP export reads. A line needs a
+variant, so the first shopper who buys a fee mints one: product type `wsm-fee`,
+one product at slug `wsm-fee-<pk>`, one variant, one channel listing at zero.
+The listing is published and available for purchase because
+`add_variants_to_checkout` refuses an unpublished variant, so the existence of
+the page is load-bearing and cannot be switched off from this side.
+
+Both channel listings carry `discounted_price_amount`, not only `price_amount`.
+Stock `get_variant_availability` guards a NULL `price` and then dereferences
+`discounted_price` unguarded, so a variant listing with one of the two set
+answered `variants { pricing }` with a 500 to any anonymous caller, on every fee
+product, and broke the ordinary `lines { variant { pricing } }` cart query for
+exactly the checkouts that carry a fee. Every fee variant listing ever minted is
+in that state, because the writer had no other branch: 3 rows on the box on
+09-08 (2 in saleor_bakeoff, 1 in saleor_bakeoff_import; saleor_bakeoff_fub holds
+no fee product at present and saleor_bakeoff_merge none either).
+`_ensure_fee_variant` repairs a NULL in place the next time it runs for that fee
+and channel, so the integrator repairs them by exercising the fee path once per
+fee and channel, not by running a command.
+
+### The consumer contract, in one sentence
+
+Fee products are catalog plumbing: the storefront route 404s product type
+`wsm-fee`, the sitemap excludes it, the Merchant Center feed excludes it, and the
+PartsLogic indexer skips it.
+
+`productType.slug == "wsm-fee"` is the key. It is unique, it already exists, and
+it costs no new field. `visible_in_listings=False` stays, which is what already
+keeps fees out of `products()`, out of search and off category pages, and the
+type is `has_variants=False` and not shipping required (a `Fee` carries no
+freight marker of its own; `freight_class` lives on `KitConfig`, on the kit).
+
+A fee page fetched by its exact slug still resolves through the API by design.
+The job of the API is to answer for a row that exists; deciding that a URL should
+not be served belongs to the storefront. This is a storefront-lane follow-up in
+wsm-storefront and the indexer, not a change in this fork.

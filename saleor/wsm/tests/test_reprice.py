@@ -451,6 +451,48 @@ def test_a_checkout_this_fork_does_not_own_costs_no_queries(checkout_with_items)
     assert captured.captured_queries == []
 
 
+def test_a_configured_checkout_costs_the_queries_the_doc_says_it_does(
+    client, checkout, stage_2_kit, omit_parts, crating_fee, customer_user,
+):
+    """The claim in CORE-TOUCHES MP3, asserted rather than asserted-in-prose.
+
+    This is the STEADY read: a configured line and its fee, priced already, read
+    again with nothing moving. It is the cost every cart render pays, so the
+    number in the doc has to be this one and not a guess. The doc said three.
+    """
+    configure(client, checkout, stage_2_kit, omit_parts)
+    checkout_info, lines = checkout_info_for(checkout)
+
+    with CaptureQueriesContext(connection) as captured:
+        moved = reprice(checkout_info, lines)
+
+    assert moved == [], "nothing moved, so nothing is written"
+    tables = [q["sql"].split(" FROM ")[-1].split()[0] for q in captured.captured_queries]
+    assert tables == [
+        # The option sets on the configured products, with their values and the
+        # dealer deltas on those values: one prefetch, three queries.
+        '"wsm_compose_optionset"',
+        '"wsm_compose_optionvalue"',
+        '"wsm_compose_dealertieroptionprice"',
+        # The fees on those same products.
+        '"wsm_compose_fee"',
+    ]
+
+    # And the fifth, on a checkout that carries its buyer: their group, once for
+    # the whole checkout. An anonymous one skips it, which is why the number is
+    # a range and not a number.
+    checkout.user = customer_user
+    checkout.save(update_fields=["user"])
+    checkout_info, lines = checkout_info_for(checkout)
+
+    with CaptureQueriesContext(connection) as captured:
+        reprice(checkout_info, lines)
+
+    assert len(captured.captured_queries) == 5, [
+        q["sql"][:90] for q in captured.captured_queries
+    ]
+
+
 def test_a_price_correction_does_not_write_back_a_stale_quantity(
     client, checkout, stage_2_kit, omit_parts, crating_fee,
 ):

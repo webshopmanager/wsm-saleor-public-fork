@@ -671,13 +671,25 @@ the next read does not see the row at all.
 ### Cost
 
 A checkout holding no wsm-owned line costs **zero queries**: `_classify` decides
-from the private metadata already loaded onto `CheckoutLineInfo`. One that does costs, for
-the WHOLE checkout and not per line: one dealer-ladder query, one option-set
-query, one fee query, one buyer-group query, and one `bulk_update` only when a
-number actually moved. The wrapper reproduces the original's `price_expiration`
-early return, so a checkout whose prices are still fresh costs nothing at all.
-Dropping adds **one** query, and only on the recalculation that finds a line it
-cannot price, which is not a state a healthy cart reaches twice.
+from the private metadata already loaded onto `CheckoutLineInfo`. Everything below
+is per CHECKOUT, not per line.
+
+A checkout carrying configured lines costs **four**, measured, not estimated: the
+option sets on those products, their values, the dealer deltas on those values
+(one `prefetch_related`, three queries), and the fees on the same products. It
+costs a **fifth** when the checkout carries its buyer, which is the one group
+lookup; the storefront's key-gated add resolves the customer server side and
+leaves the checkout anonymous, so the common shape is four. An earlier version of
+this section said three, which was never true of the code.
+
+A plain dealer line adds **one** ladder query. Each distinct KIT on the checkout
+adds **four**: the kit, its members, their channel prices, and one ladder read
+covering every member. A `bulk_update` runs only when a number actually moved,
+and a second one, by pk, only when a fee line's quantity moved with its parent.
+Dropping adds **one** more, and only on the recalculation that finds a line it
+cannot price, which is not a state a healthy cart reaches twice. The wrapper
+reproduces the original's `price_expiration` early return, so a checkout whose
+prices are still fresh costs nothing at all.
 
 That `bulk_update` writes `price_override`, `price_override_reason`, `metadata`
 and `private_metadata`, and **not `quantity`**. Core loads the line objects this
@@ -692,5 +704,8 @@ a per-unit fee is one line of its parent's quantity, and those go in a second
 
 `saleor/wsm/tests/test_reprice.py`, which drives both exploits end to end
 through the real endpoints, the real `checkoutLinesUpdate` mutation and
-`create_order_from_checkout`, and asserts on the ORDER lines. The query-count
-claim above is an assertion in that file, not prose.
+`create_order_from_checkout`, and asserts on the ORDER lines. Every query count
+above is an assertion in that file, not prose:
+`test_a_checkout_this_fork_does_not_own_costs_no_queries` for the zero and
+`test_a_configured_checkout_costs_the_queries_the_doc_says_it_does` for the four
+and the five, which asserts the TABLES, so adding a query reddens it by name.

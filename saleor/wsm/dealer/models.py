@@ -53,7 +53,10 @@ class DealerGroup(models.Model):
         ordering = ("code",)
 
     def __str__(self):
-        return self.name or self.code
+        # Both vocabularies in one string: the dealer screens show the name, the
+        # compose screens store and show the code, and a merchant renaming a
+        # group has to know they are the same thing.
+        return f"{self.name} ({self.code})" if self.name else self.code
 
 
 def validate_tier_group_code(code):
@@ -108,7 +111,10 @@ class DealerCustomer(models.Model):
         ordering = ("pk",)
 
     def __str__(self):
-        return f"{self.user_id} @ {self.group_id}"
+        # `user_id` is a UUID and `group_id` is a row number, so the old string
+        # named nobody on the one page where it matters most: the delete
+        # confirmation.
+        return f"{self.user.email} in {self.group}"
 
 
 class TierPrice(models.Model):
@@ -161,7 +167,20 @@ class TierPrice(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.group_id} x{self.min_quantity}: {self.amount}"
+        """What this row IS, on the pages Django titles with it.
+
+        The old string was "7 x1: 228.000": a DealerGroup row id the merchant has
+        never seen, no product, no SKU. That is the heading of the change page,
+        the breadcrumb, the history and, worst, the delete confirmation.
+
+        Two joins, on the three pages that call this and none on the changelist,
+        which lists explicit columns. The currency is deliberately not looked up
+        here: it would be a third query on every row of a delete confirmation,
+        and the form's own label carries it where a merchant is typing.
+        """
+        variant = self.variant
+        sku = variant.sku or variant.product.name
+        return f"{sku} - {self.group} at qty {self.min_quantity}: {self.amount:.2f}"
 
 
 class DealerSettings(models.Model):

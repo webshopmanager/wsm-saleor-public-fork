@@ -135,7 +135,8 @@ class SeriesConfig(models.Model):
         ordering = ("pk",)
 
     def __str__(self):
-        return f"series: {self.collection.slug}"
+        # A slug is the URL, not the name a merchant knows the series by.
+        return f"Series: {self.collection.name}"
 
     def clean(self):
         """Refuse a published series that has not earned one. Unpublished is never checked.
@@ -276,7 +277,7 @@ class KitConfig(models.Model):
         ordering = ("pk",)
 
     def __str__(self):
-        return f"kit: {self.collection.slug}"
+        return f"Kit: {self.collection.name}"
 
     def pricing_members(self, channel):
         """Price this kit's members in one channel, in two queries, in member order.
@@ -344,4 +345,10 @@ class KitMember(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.quantity} x {self.variant}"
+        # `ProductVariant.__str__` is the variant name, which is the string
+        # "Base" on every single-variant product in the fleet.
+        variant = self.variant
+        return (
+            f"{self.quantity} x {variant.product.name} "
+            f"[{variant.sku or 'no SKU'}]"
+        )

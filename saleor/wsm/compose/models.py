@@ -251,7 +251,9 @@ class OptionSet(models.Model):
         ordering = ("sort_order", "pk")
 
     def __str__(self):
-        return self.label or self.name
+        # A question means nothing without the product it is asked on, and this
+        # is the string on the delete confirmation and in every picker.
+        return f"{self.product.name}: {self.label or self.name}"
 
     def clean(self):
         """Making a set required, or one-of, can push the floor under zero too.
@@ -334,7 +336,9 @@ class OptionValue(models.Model):
         ordering = ("sort_order", "pk")
 
     def __str__(self):
-        return self.name
+        # "Black" alone does not say which question, on which product, is about
+        # to lose a choice.
+        return f"{self.name} ({self.option_set})"
 
     def clean(self):
         """The two rules that were saving a broken buy button with a success message.
@@ -533,7 +537,9 @@ class Fee(models.Model):
         ordering = ("pk",)
 
     def __str__(self):
-        return self.label
+        # Charges repeat across products ("Freight crating" is on hundreds), so
+        # the label alone cannot identify the row being deleted.
+        return f"{self.label} on {self.product.name}"
 
     def clean(self):
         """A charge is money the shopper OWES: never negative, never over 100%.

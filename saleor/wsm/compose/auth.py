@@ -34,12 +34,45 @@ from django.db.models import Q
 
 from ...account.models import User
 from ...core.auth_backend import BaseBackend
+from ...core.db.connection import allow_writer
 from ...permission.models import Permission
 from ...site import PasswordLoginMode
 from ...site.models import SiteSettings
 
 WSM_APP_LABEL_PREFIX = "wsm_"
 REPLICA = settings.DATABASE_CONNECTION_REPLICA_NAME
+
+
+def _password_login_mode():
+    """The merchant's password-login switch, or None when there is no row to read.
+
+    Was a bare `.get()` on the replica, so a shop with no `SiteSettings` row, or
+    a replica that had not caught up with a fresh install, raised
+    `SiteSettings.DoesNotExist` out of `authenticate()`. This backend is in
+    `AUTHENTICATION_BACKENDS`, so that was a 500 on every sign-in, staff and
+    customer alike, instead of a denial.
+
+    The WRITER is read in exactly one case: the replica has no row. That is the
+    only state where lag would deny a merchant who did configure the shop, and
+    it happens once, on a miss, never on the hot path. A genuine no-row shop
+    still ends at None, and the caller denies: this backend cannot tell whether
+    password login was turned off, and a switch it cannot read is a switch it
+    treats as off.
+    """
+    mode = (
+        SiteSettings.objects.using(REPLICA)
+        .filter(site_id=settings.SITE_ID)
+        .values_list("password_login_mode", flat=True)
+        .first()
+    )
+    if mode is not None:
+        return mode
+    with allow_writer():
+        return (
+            SiteSettings.objects.filter(site_id=settings.SITE_ID)
+            .values_list("password_login_mode", flat=True)
+            .first()
+        )
 
 
 class AdminPasswordBackend(BaseBackend):
@@ -63,12 +96,8 @@ class AdminPasswordBackend(BaseBackend):
         # proved right, so a wrong password costs no extra query and the answer
         # tells an attacker nothing new. `AUTHENTICATION_BACKENDS` is app-wide:
         # a shop that turned password login off turned it off here too.
-        mode = (
-            SiteSettings.objects.using(REPLICA)
-            .values_list("password_login_mode", flat=True)
-            .get(site_id=settings.SITE_ID)
-        )
-        if mode == PasswordLoginMode.DISABLED:
+        mode = _password_login_mode()
+        if mode is None or mode == PasswordLoginMode.DISABLED:
             return None
         if mode == PasswordLoginMode.CUSTOMERS_ONLY and user.is_staff:
             return None

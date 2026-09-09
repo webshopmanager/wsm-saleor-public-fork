@@ -19,6 +19,7 @@ from saleor.product.models import (
     ProductChannelListing,
     ProductType,
     ProductVariant,
+    ProductVariantChannelListing,
 )
 from saleor.wsm.compose import pricing
 from saleor.wsm.compose.management.commands.import_option_sets_50 import (
@@ -279,3 +280,71 @@ def test_a_dealer_pays_the_tier_delta_on_an_imported_value(payload, catalog):
     dealer = price_configured(10000, [color.to_pricing()], selections, "dealer-2")
     assert retail.unit_cents == 13400
     assert dealer.unit_cents == 12197
+
+
+# --- verdict "the 5.0 importer never full_clean()s" -------------------------
+#
+# Every rule this import can break is a model `clean()`, and none of them ran:
+# the import wrote the row, said it worked, and the MERCHANT met the refusal
+# later, from a screen that would not save until they fixed a row they had not
+# written. A refused row is a reported skip now: the run finishes, everything
+# sound lands, and the report names what did not and why.
+
+LONG_GROUP = "Dealer Tier 1 " + "West Coast Distributor " * 5
+
+
+@pytest.fixture
+def priced_catalog(catalog):
+    """A listed price, which is what turns the configured floor into a number."""
+    channel = Channel.objects.get(slug=CHANNEL)
+    variant = ProductVariant.objects.get(sku=COLOR_SKU)
+    ProductVariantChannelListing.objects.create(
+        variant=variant,
+        channel=channel,
+        price_amount=Decimal("10.00"),
+        discounted_price_amount=Decimal("10.00"),
+        currency="USD",
+    )
+    return catalog
+
+
+def test_a_value_that_prices_the_product_below_zero_is_a_reported_skip(
+    payload, priced_catalog
+):
+    """A 500.00 credit on a 10.00 product: the configurator would price at -490."""
+    payload["values"].append(_value(1, 97, "Bargain", "Retail", "-500.00", "3", 9))
+
+    report = apply(payload, channel_slug=CHANNEL)
+
+    assert report["values_refused"] == 1
+    assert not OptionValue.objects.filter(name="Bargain").exists()
+    assert [entry for entry in report["refused"] if "Bargain" in entry]
+    # The run still finished and the rest of the tenant's configurator landed.
+    assert report["values_created"] == 10
+    assert report["sets_created"] == 6
+
+
+def test_a_tier_row_naming_no_dealer_group_is_a_reported_skip(payload, catalog):
+    """5.0 group names are free text and our group code is 100 characters.
+
+    The group is refused, so the code its tier rows name exists nowhere, and a
+    tier row against a group nobody belongs to is a price that can never be
+    charged: written before, reported now, with the retail row it hangs off
+    still imported.
+    """
+    payload["groups"].append(
+        {"id": 6000, "name": LONG_GROUP, "is_price_group": 1, "active": 1}
+    )
+    payload["values"].append(_value(1, 98, "Red", LONG_GROUP, "30.00", "2", 9))
+
+    report = apply(payload, channel_slug=CHANNEL)
+
+    assert report["groups_refused"] == 1
+    assert report["tiers_refused"] == 1
+    assert report["groups_created"] == 2
+    assert DealerGroup.objects.count() == 2
+    assert DealerTierOptionPrice.objects.count() == 4
+    assert any("no dealer group" in entry for entry in report["refused"])
+    # The choice itself is sound, so it is imported: one bad dealer row does not
+    # cost the merchant the answer their shoppers pick.
+    assert OptionValue.objects.filter(name="Red").count() == 1

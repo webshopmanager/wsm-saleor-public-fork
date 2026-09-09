@@ -151,6 +151,14 @@ before it was fixed. Each carries what it let through.
   configuration a walk-in shopper buys at 3,553.99. A dealer never pays more
   than retail for the same choice, and a line that lost to retail is not stamped
   as tier-priced, so promotions still reach it.
+- **The 5.0 importer validates every row it writes.** Twelve write sites went
+  straight to `save()`, so every rule above was bypassed by the one writer that
+  touches a whole tenant at once: sub-zero configurations, dealer deltas above
+  retail and tier groups naming no dealer group all landed, and the MERCHANT met
+  the refusal weeks later on a screen that would not save until they fixed a row
+  they had never written. Each write now runs `full_clean()` first, and a
+  refused row is a reported skip carrying its reason, never a crash that costs
+  the tenant the import and never a silent write.
 
 Where one submit changes several rows at once, the value inline formset
 (`compose/forms.py`) runs both cross-row rules over the whole POST and the rows

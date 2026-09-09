@@ -16,9 +16,10 @@ whatever a future app drops on the default one.
 from functools import wraps
 
 from django.contrib import admin
-from django.db.models import Count, IntegerField, OuterRef, Subquery
+from django.db.models import Count, IntegerField, OuterRef, Prefetch, Subquery
 from django.urls import URLResolver, reverse
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
+from django.utils.safestring import mark_safe
 
 from ...core.db.connection import allow_writer
 from ...product.models import Product, ProductChannelListing
@@ -246,13 +247,103 @@ class WsmAdminMixin:
         return any(self.get_model_perms(request).values())
 
 
+def _dealer_delta_prefetch():
+    """Every dealer tier row for the whole page, in ONE query, already named.
+
+    `DealerTierOptionPrice.tier_group` stores a `DealerGroup` CODE, so a column
+    that showed the merchant's word for the group would be a lookup per row on a
+    screen that renders every choice a question has. The name rides back on the
+    prefetch as a correlated column instead, which costs nothing extra: it is
+    one more column on a query that had to run anyway.
+    """
+    from ..dealer.models import DealerGroup
+
+    return Prefetch(
+        "tier_deltas",
+        queryset=DealerTierOptionPrice.objects.annotate(
+            wsm_group_name=Subquery(
+                DealerGroup.objects.filter(code=OuterRef("tier_group")).values(
+                    "name"
+                )[:1]
+            )
+        ).order_by("tier_group"),
+    )
+
+
 class OptionValueInline(admin.TabularInline):
     model = OptionValue
     form = OptionValueInlineForm
     formset = OptionValueInlineFormSet
     extra = 3
-    fields = ("sort_order", "name", "sku_fragment", "price_delta", "image_url")
+    fields = (
+        "sort_order",
+        "name",
+        "sku_fragment",
+        "price_delta",
+        "image_url",
+        "dealer_prices",
+    )
+    readonly_fields = ("dealer_prices",)
     show_change_link = True
+
+    def get_queryset(self, request):
+        """One prefetch for the tier rows, one annotated column for the currency.
+
+        The merchant walk of 2026-09-08 opened a question that carries 1,062
+        dealer tier rows across its choices and the screen said nothing about
+        any of them: a merchant editing a retail price could not see that the
+        same choice was priced separately for two dealer groups. Django cannot
+        nest an inline inside an inline and a dependency that fakes it is not
+        worth the money, so this column REPORTS the tier rows and links to the
+        one screen that edits them.
+
+        A choice prints itself as "Black (Fuel Lab QSST: Colour)", so every row
+        Django renders asks for its question and that question's product. That
+        was two queries a row before this column existed; `select_related` pays
+        for them once, and the query-count pin below holds it there.
+        """
+        rows = (
+            super()
+            .get_queryset(request)
+            .select_related("option_set__product")
+            .prefetch_related(_dealer_delta_prefetch())
+        )
+        return _with_currency(rows, "option_set__product_id")
+
+    @admin.display(description="Dealer prices")
+    def dealer_prices(self, obj):
+        """Read from the prefetch. Never a query per row, whatever the row count.
+
+        One group per line and no wrapping inside a line: rendered as running
+        text the cell folded "Dealer 1 +6.65 USD, Dealer 2 +4.52 USD" into a
+        nine line ribbon and made every row of the inline 200 pixels tall.
+        The row's own "Change" link, above, is the way in to edit these.
+        """
+        if obj is None or obj.pk is None:
+            # One of the blank rows the inline offers. It has no tier prices
+            # because it is not a choice yet.
+            return "-"
+        rows = list(obj.tier_deltas.all())
+        if not rows:
+            return format_html(
+                '<a href="{}">Add dealer prices</a>',
+                reverse(
+                    f"{self.admin_site.name}:wsm_compose_optionvalue_change",
+                    args=[obj.pk],
+                ),
+            )
+        currency = getattr(obj, "wsm_currency", "") or ""
+        return format_html_join(
+            mark_safe("<br>"),
+            '<span style="white-space: nowrap">{} {}</span>',
+            (
+                (
+                    row.wsm_group_name or row.tier_group,
+                    money(row.price_delta, currency, signed=True),
+                )
+                for row in rows
+            ),
+        )
 
     def get_formset(self, request, obj=None, **kwargs):
         formset = super().get_formset(request, obj, **kwargs)

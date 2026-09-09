@@ -17,7 +17,15 @@ from django.contrib.contenttypes.models import ContentType
 
 from saleor.permission.models import Permission
 from saleor.wsm.compose import pricing
-from saleor.wsm.compose.models import Fee, OptionSet, OptionValue
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+
+from saleor.wsm.compose.models import (
+    DealerTierOptionPrice,
+    Fee,
+    OptionSet,
+    OptionValue,
+)
 
 BACKEND = "saleor.wsm.compose.auth.AdminPasswordBackend"
 
@@ -266,3 +274,99 @@ def test_the_fee_carriers_are_not_in_the_product_lookup(
     assert carrier.product_type.slug == "wsm-fee"
     assert product.name in body
     assert carrier.slug not in body
+
+
+# --- dealer tier prices, reported on the question that owns the choice --------
+
+
+def _priced_choice(option_set, name, delta, *groups):
+    """A choice, with one tier row per named dealer group."""
+    value = OptionValue.objects.create(
+        option_set=option_set, name=name, price_delta=Decimal(delta)
+    )
+    for code, tier_delta in groups:
+        DealerTierOptionPrice.objects.create(
+            option_value=value, tier_group=code, price_delta=Decimal(tier_delta)
+        )
+    return value
+
+
+@pytest.fixture
+def two_dealer_groups(db):
+    from saleor.wsm.dealer.models import DealerGroup
+
+    return [
+        DealerGroup.objects.create(code="dealer-1", name="Dealer 1"),
+        DealerGroup.objects.create(code="dealer-2", name="Dealer 2"),
+    ]
+
+
+@pytest.mark.django_db
+def test_the_question_screen_reports_each_choices_dealer_prices(
+    client, merchant, product, two_dealer_groups
+):
+    """1,062 tier rows sit under Fuel Lab's questions and the screen said nothing.
+
+    A merchant editing a retail price could not see that the same choice was
+    priced separately for two dealer groups, so the deeper price was silently
+    the one that shipped.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
+    priced = _priced_choice(
+        option_set, "Black", "25", ("dealer-1", "-50"), ("dealer-2", "-75")
+    )
+    bare = _priced_choice(option_set, "Silver", "0")
+
+    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+
+    assert "Dealer 1 -50.00 USD" in body
+    assert "Dealer 2 -75.00 USD" in body
+    assert "Add dealer prices" in body
+    assert f"/admin/wsm_compose/optionvalue/{priced.pk}/change/" in body
+    assert f"/admin/wsm_compose/optionvalue/{bare.pk}/change/" in body
+
+
+@pytest.mark.django_db
+def test_the_dealer_price_column_names_the_group_not_its_code(
+    client, merchant, product, two_dealer_groups
+):
+    """`tier_group` stores a code. A merchant knows the group by its name."""
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
+    _priced_choice(option_set, "Black", "25", ("dealer-1", "-50"))
+
+    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+
+    assert "Dealer 1 -50.00 USD" in body
+
+
+@pytest.mark.django_db
+def test_the_dealer_price_column_costs_no_query_per_choice(
+    client, merchant, product, two_dealer_groups
+):
+    """The pin. One prefetch for the page, whatever the page holds.
+
+    Three more choices and six more tier rows have to cost the same number of
+    queries, or the column is a lookup per row wearing a summary's clothes.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
+    _priced_choice(option_set, "Black", "25", ("dealer-1", "-50"), ("dealer-2", "-75"))
+    url = f"/admin/wsm_compose/optionset/{option_set.pk}/change/"
+    client.get(url)  # warm anything cached per process, not per page
+
+    with CaptureQueriesContext(connection) as one_choice:
+        assert client.get(url).status_code == 200
+
+    for name in ("Silver", "Red", "Gunmetal"):
+        _priced_choice(
+            option_set, name, "25", ("dealer-1", "-50"), ("dealer-2", "-75")
+        )
+
+    with CaptureQueriesContext(connection) as four_choices:
+        assert client.get(url).status_code == 200
+
+    assert len(four_choices.captured_queries) == len(one_choice.captured_queries), [
+        query["sql"] for query in four_choices.captured_queries
+    ]

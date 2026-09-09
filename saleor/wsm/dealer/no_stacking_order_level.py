@@ -1,5 +1,11 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md ("Monkey patches", MP2).
-"""Requirement 2.4, order-level half: an ENTIRE_ORDER discount misses dealer lines.
+"""The order-level half: an ENTIRE_ORDER discount misses the excluded lines.
+
+Which lines are excluded is MP1's `split_discountable` and is not decided again
+here: a dealer line while the merchant leaves stacking off, and a fee line
+always. Both halves have to hold or neither does. An order-level voucher on a
+cart holding one dealer line and its required crate charge put the whole 100.00
+onto the charge while MP2 only knew about dealer lines (probe P10, 2026-09-08).
 
 MP1 (no_stacking.py) covers LINE-level discounts. An ENTIRE_ORDER voucher and an
 order promotion are not line-level discounts in Saleor: each is a single amount
@@ -45,25 +51,9 @@ from __future__ import annotations
 
 from functools import wraps
 
-from .no_stacking import install_guard, is_dealer_line, stacking_enabled
+from .no_stacking import install_guard, line_of_info, split_discountable
 
 _installed = False
-
-
-def _split_line_infos(lines_info):
-    """(dealer, retail) over LineInfo objects. One pass, no query."""
-    dealer, retail = [], []
-    for info in lines_info:
-        (dealer if is_dealer_line(info.line) else retail).append(info)
-    return dealer, retail
-
-
-def _split_lines(lines):
-    """(dealer, retail) over bare OrderLine objects. One pass, no query."""
-    dealer, retail = [], []
-    for line in lines:
-        (dealer if is_dealer_line(line) else retail).append(line)
-    return dealer, retail
 
 
 def _order_lines_total(lines, currency):
@@ -90,15 +80,19 @@ def checkout_voucher_amount_guard(original):
     ):
         from ...discount.utils.voucher import is_order_level_voucher
 
-        dealer, retail = _split_line_infos(lines)
-        if not dealer or not is_order_level_voucher(voucher) or stacking_enabled():
+        # The cheapest test first: it reads the voucher already in hand, where
+        # the split can cost one settings read.
+        if not is_order_level_voucher(voucher):
             return original(manager, voucher, checkout_info, lines, address)
-        # Retail lines only, so the percentage is taken of the money the voucher
+        eligible, excluded = split_discountable(lines, line_of_info)
+        if not excluded:
+            return original(manager, voucher, checkout_info, lines, address)
+        # Eligible lines only, so the percentage is taken of the money the voucher
         # is allowed to touch. It also means the voucher's minimum spend and
         # minimum quantity are judged on those same lines, which is the same rule
-        # read the other way round: a dealer line cannot help qualify a checkout
-        # for a discount that dealer line will not receive.
-        return original(manager, voucher, checkout_info, retail, address)
+        # read the other way round: money the discount will not reach cannot help
+        # qualify the checkout for it.
+        return original(manager, voucher, checkout_info, eligible, address)
 
     return get_voucher_discount_for_checkout
 
@@ -113,15 +107,15 @@ def checkout_spread_guard(original):
     def _propagate_checkout_discount_on_checkout_lines_prices(
         lines, total_discount, currency
     ):
-        dealer, retail = _split_line_infos(lines)
-        if not dealer or stacking_enabled():
+        eligible, excluded = split_discountable(lines, line_of_info)
+        if not excluded:
             yield from original(lines, total_discount, currency)
             return
 
         from ...checkout.base_calculations import calculate_base_line_total_price
 
-        yield from original(retail, total_discount, currency)
-        for info in dealer:
+        yield from original(eligible, total_discount, currency)
+        for info in excluded:
             yield info.line, calculate_base_line_total_price(info)
 
     return _propagate_checkout_discount_on_checkout_lines_prices
@@ -135,14 +129,14 @@ def order_amount_guard(original):
 
     @wraps(original)
     def propagate_order_discount_on_order_prices(order, lines):
-        dealer, retail = _split_lines(lines)
-        if not dealer or stacking_enabled():
+        eligible, excluded = split_discountable(lines)
+        if not excluded:
             return original(order, lines)
         # The original resizes every OrderDiscount row from the subtotal it is
-        # handed, so it has to be handed the retail subtotal. The dealer money
-        # goes back afterwards: it belongs in the order total, not in the base.
-        subtotal, shipping_price = original(order, retail)
-        return subtotal + _order_lines_total(dealer, order.currency), shipping_price
+        # handed, so it has to be handed the discountable subtotal. The excluded
+        # money goes back afterwards: it belongs in the order total, not the base.
+        subtotal, shipping_price = original(order, eligible)
+        return subtotal + _order_lines_total(excluded, order.currency), shipping_price
 
     return propagate_order_discount_on_order_prices
 
@@ -157,16 +151,18 @@ def order_spread_guard(original):
     def propagate_order_discount_on_order_lines_prices(
         lines, base_subtotal, subtotal_discount
     ):
-        dealer, retail = _split_lines(lines)
-        if not dealer or stacking_enabled():
+        eligible, excluded = split_discountable(lines)
+        if not excluded:
             yield from original(lines, base_subtotal, subtotal_discount)
             return
 
         from ...order.base_calculations import base_order_line_total
 
-        dealer_total = _order_lines_total(dealer, base_subtotal.currency)
-        yield from original(retail, base_subtotal - dealer_total, subtotal_discount)
-        for line in dealer:
+        excluded_total = _order_lines_total(excluded, base_subtotal.currency)
+        yield from original(
+            eligible, base_subtotal - excluded_total, subtotal_discount
+        )
+        for line in excluded:
             yield line, base_order_line_total(line).price_with_discounts.net
 
     return propagate_order_discount_on_order_lines_prices
@@ -182,8 +178,8 @@ def order_promotion_amount_guard(original):
     def create_discount_objects_for_order_promotions(
         order_or_checkout, lines_info, subtotal, channel, country, **kwargs
     ):
-        dealer, _retail = _split_line_infos(lines_info)
-        if not dealer or stacking_enabled():
+        _eligible, excluded = split_discountable(lines_info, line_of_info)
+        if not excluded:
             return original(
                 order_or_checkout, lines_info, subtotal, channel, country, **kwargs
             )
@@ -192,13 +188,13 @@ def order_promotion_amount_guard(original):
 
         # variant_discounted_price is the one per-unit price that both
         # CheckoutLineInfo and EditableOrderLineInfo expose; on a dealer line it
-        # is the tier. Taking it out of the base also takes it out of the rule's
-        # own threshold test, which is the same ruling: dealer money does not buy
-        # a discount it cannot receive.
-        dealer_total = Money(0, subtotal.currency)
-        for info in dealer:
-            dealer_total += info.variant_discounted_price * info.line.quantity
-        base = max(subtotal - dealer_total, Money(0, subtotal.currency))
+        # is the tier and on a fee line it is the charge. Taking it out of the
+        # base also takes it out of the rule's own threshold test, which is the
+        # same ruling: money a discount cannot reach does not buy that discount.
+        excluded_total = Money(0, subtotal.currency)
+        for info in excluded:
+            excluded_total += info.variant_discounted_price * info.line.quantity
+        base = max(subtotal - excluded_total, Money(0, subtotal.currency))
         return original(order_or_checkout, lines_info, base, channel, country, **kwargs)
 
     return create_discount_objects_for_order_promotions

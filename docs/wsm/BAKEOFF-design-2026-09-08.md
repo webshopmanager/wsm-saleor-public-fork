@@ -172,6 +172,22 @@ before it was fixed. Each carries what it let through.
   refused row is a reported skip carrying its reason, never a crash that costs
   the tenant the import and never a silent write.
 
+- **A fee line is never discountable.** A voucher, an order promotion and a
+  catalogue promotion all reach every line in the cart, and a fee is a line. The
+  live re-walk measured a 100.00 order voucher on a dealer-priced configured item
+  plus its required crate charge: the dealer line was protected, so the entire
+  100.00 landed on `CRATE-01` and it billed at 49.00 instead of 149.00, and a
+  larger code would have zeroed a mandatory pass-through charge. Retail carts were
+  open more widely still, since nothing protected either line. 5.0 is the rule
+  restored: a coupon comes off the merchandise subtotal and never off a product
+  fee, because crating, core and environmental charges are money the merchant
+  passes through rather than margin to give away. One function, MP1's
+  `split_discountable`, decides it for both halves of the no-stacking patch, from
+  the private `compose.fee` stamp the line already carries, required charge and
+  optional one alike. Where the cart holds nothing else discountable, the code is
+  accepted and takes 0.00, which is right on the money and thin for the shopper:
+  the "merchandise only" message belongs on the storefront.
+
 Where one submit changes several rows at once, the value inline formset
 (`compose/forms.py`) runs both cross-row rules over the whole POST and the rows
 carry `floor_checked_by_formset` so the model skips its single-row version

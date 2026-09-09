@@ -377,16 +377,36 @@ in `saleor/wsm/tests/test_reprice.py`, which drives the forgery through the
 stock `updateMetadata` mutation unauthenticated, asserts the mutation is
 accepted, and then asserts the price does not move.
 
-## MP1. Dealer lines are excluded from checkout line discounts
+## MP1. Dealer lines and fee lines are excluded from checkout line discounts
 
 Installed by `saleor/wsm/dealer/apps.py` `DealerConfig.ready()`; the whole patch
 is `saleor/wsm/dealer/no_stacking.py`. Two functions are wrapped, neither is
 reimplemented: each wrapper calls the original with a smaller list of lines.
 
+**Which lines get left out is one function, `split_discountable`**, and MP1 and
+MP2 both read it, so the line-level half and the order-level half cannot drift
+apart. It excludes two kinds of line:
+
+- Any line carrying the private `compose.fee` stamp, always. A fee is money the
+  merchant passes through (crating, core, environmental) rather than margin, and
+  in 5.0 a coupon came off the merchandise subtotal and never off a product fee.
+  There is no toggle on this one, because "discount my crate charge" has no
+  merchant reading that a discount on the merchandise line cannot express.
+  Required and optional charges are treated alike: `required` lives on the `Fee`
+  row and is deliberately not snapshotted onto the line (the stamp carries the
+  label and `apply_to` only), and the answer would be the same if it were.
+- Any line carrying the private `wsm.dealer` stamp, while the merchant leaves
+  discount stacking off. That is requirement 2.4 and its toggle, unchanged.
+
+The toggle is read at most once per call and only once a dealer line has
+actually been seen, so a cart of retail lines and charges still costs no
+settings query, and a cart with neither kind takes the original path on the
+original arguments.
+
 | Replaced function | Module | What the wrapper does |
 |---|---|---|
-| `attach_voucher_to_line_info(voucher_info, lines_info)` | `saleor/discount/utils/voucher.py` | Runs the original, then clears `voucher` and `voucher_code` from any line info whose line carries the private `wsm.dealer` stamp. |
-| `prepare_checkout_line_discount_objects_for_catalogue_promotions(lines_info)` | `saleor/discount/utils/checkout.py` | Calls the original with the retail lines only, and adds any catalogue discount already sitting on a dealer line to the returned removal list. |
+| `attach_voucher_to_line_info(voucher_info, lines_info)` | `saleor/discount/utils/voucher.py` | Runs the original, then clears `voucher` and `voucher_code` from every line info `split_discountable` excludes. |
+| `prepare_checkout_line_discount_objects_for_catalogue_promotions(lines_info)` | `saleor/discount/utils/checkout.py` | Calls the original with the discountable lines only, and adds any catalogue discount already sitting on an excluded line to the returned removal list. |
 
 The voucher function is rebound in every module that holds it as its own
 attribute: the module that defines it, plus `saleor.order.fetch` and
@@ -445,7 +465,7 @@ them alone. U3 filed that gap rather than fixing it; MP2 below closes it.
 
 ---
 
-## MP2. Dealer lines are excluded from ORDER-LEVEL discounts
+## MP2. Dealer lines and fee lines are excluded from ORDER-LEVEL discounts
 
 Installed by `saleor/wsm/dealer/apps.py` `DealerConfig.ready()`, right after MP1;
 the whole patch is `saleor/wsm/dealer/no_stacking_order_level.py`. Five functions
@@ -487,6 +507,10 @@ the function and the new module, rather than an order-level discount that quietl
 lands on a dealer line. The sweep matches by identity, not by name, so
 `import ... as` cannot hide a site either.
 
+Which lines are handed to the original is MP1's `split_discountable` in every one
+of the five, so a fee line is out of the AMOUNT and out of the SPREAD on the
+checkout and on the order alike.
+
 Why (requirement 2.4, Dana's ruling 2026-09-08): "no discount combines with dealer
 pricing", as a per-tenant toggle defaulting OFF. This is the "known limit,
 deliberate" paragraph at the end of MP1, now closed.
@@ -505,6 +529,30 @@ checkout total is 9159.10. Measured both ways in
 `saleor/wsm/dealer/tests/test_no_stacking.py`: with the install line commented out
 the same tests fail on `Money('979.90') == Money('639.90')` and
 `Money('3060.00') == Money('3400.00')`.
+
+**What the live re-walk found with only the dealer half in place (probe P10,
+2026-09-08).** A cart holding one dealer-priced configured item and the required
+crate charge that comes with it, `CRATE-01` at 149.00, and a 100.00 fixed
+ENTIRE_ORDER voucher. MP2 kept the discount off the dealer line, correctly, and
+Saleor then put the whole 100.00 on the only other line in the cart: the charge
+billed at 49.00. A voucher of 149.00 or more would have zeroed a mandatory
+pass-through charge outright, and a merchant issuing a 200.00 code would have
+been paying the crate company out of margin without a number on any screen
+saying so. Retail carts were open the same way and more widely, because a retail
+line is not excluded from anything: every fee line in the fleet was discountable,
+so a percentage code took its cut of every crating and core charge in every cart
+that carried one.
+
+Now the charge is excluded on both halves, and the money lands where 5.0 put it.
+On the P10 cart nothing in it is discountable at all, so Saleor is handed an
+empty line set, sizes the discount on a subtotal of zero and ACCEPTS the code at
+0.00 rather than refusing it (`get_voucher_discount_for_checkout` raises
+`NotApplicable` only from the voucher's own validation, and a code with no
+minimum spend passes that on an empty set). The money is right and the shopper is
+under-informed: they see the code accepted and the total unchanged. That is
+acceptable for the bake-off and is the one deliberate rough edge in this rule; a
+storefront message ("this code applies to merchandise only") is the fix and it is
+storefront work, which acceptance bar B6 keeps out of this repo.
 
 Why a patch and not a stock lever, all three candidates checked in the 3.23.31
 source first:

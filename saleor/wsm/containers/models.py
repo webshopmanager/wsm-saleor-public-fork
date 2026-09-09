@@ -20,7 +20,16 @@ from django.db import models
 
 from . import pricing
 
-DISCOUNT_KIND_CHOICES = [(k, k) for k in pricing.DISCOUNT_KINDS]
+# The raw values are the pricing module's vocabulary. A merchant reads the
+# structurally identical Fee.basis as "A flat amount of money"; this field read
+# "fixed", two screens away, for the same idea.
+DISCOUNT_KIND_LABELS = {
+    pricing.FIXED: "An amount off the whole kit",
+    pricing.PERCENT: "A percentage off the whole kit",
+}
+DISCOUNT_KIND_CHOICES = [
+    (k, DISCOUNT_KIND_LABELS.get(k, k)) for k in pricing.DISCOUNT_KINDS
+]
 
 SERIES_METADATA_KEY = "wsm.series"
 
@@ -133,6 +142,8 @@ class SeriesConfig(models.Model):
 
     class Meta:
         ordering = ("pk",)
+        verbose_name = "series"
+        verbose_name_plural = "series"
 
     def __str__(self):
         # A slug is the URL, not the name a merchant knows the series by.
@@ -246,8 +257,8 @@ class KitConfig(models.Model):
         choices=DISCOUNT_KIND_CHOICES,
         default=pricing.FIXED,
         help_text=(
-            "How the saving below is read: 'fixed' is an amount off the whole "
-            "kit, 'percentage' is a share off it."
+            "Whether the saving below is money off the kit or a share of "
+            "what the kit's own members add up to."
         ),
     )
     discount_amount = models.DecimalField(
@@ -275,6 +286,8 @@ class KitConfig(models.Model):
 
     class Meta:
         ordering = ("pk",)
+        verbose_name = "kit"
+        verbose_name_plural = "kits"
 
     def __str__(self):
         return f"Kit: {self.collection.name}"

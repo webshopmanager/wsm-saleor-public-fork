@@ -187,3 +187,52 @@ def test_the_series_list_names_the_collection_and_the_axes(
 
     assert collection.slug in body
     assert "WeatherTech" in body
+
+
+# --- what the screens say, in the merchant's words ---------------------------
+
+
+def test_the_kit_discount_kinds_are_named_not_coded(collection):
+    """The list said "fixed", which is our enum, next to "0.00", which is money.
+
+    A merchant reading a kit row could not tell a kit that gives nothing away
+    from one that takes ten percent off.
+    """
+    from ..models import KitConfig
+
+    labels = dict(KitConfig._meta.get_field("discount_kind").choices)
+
+    assert labels["fixed"] == "An amount off the whole kit"
+    assert labels["percent"] == "A percentage off the whole kit"
+
+
+def test_a_kit_row_says_what_it_takes_off(merchant, collection):
+    from decimal import Decimal
+
+    from ....product.models import Collection
+
+    from ..models import KitConfig
+
+    KitConfig.objects.create(
+        collection=collection, discount_kind="percent", discount_amount=Decimal("10")
+    )
+
+    KitConfig.objects.create(
+        collection=Collection.objects.create(name="Crate kit", slug="crate-kit"),
+        discount_kind="fixed",
+        discount_amount=Decimal("25"),
+    )
+
+    body = merchant.get("/admin/wsm_containers/kitconfig/").content.decode()
+
+    assert "10% off the kit" in body
+    assert "25.00 off the kit" in body
+    assert ">fixed<" not in body
+
+
+def test_the_axes_help_says_what_a_slug_is_and_where_to_find_one(merchant):
+    """"Axes" with no help text is a field a merchant cannot fill in at all."""
+    body = merchant.get(SERIES_ADD).content.decode()
+
+    assert "product attribute SLUG" in body
+    assert "Configuration, Attributes" in body

@@ -24,6 +24,7 @@ from ...core.db.connection import allow_writer
 from ...product.models import Product, ProductChannelListing
 from .forms import (
     DealerTierOptionPriceForm,
+    DealerTierOptionPriceFormSet,
     FeeForm,
     OptionSetAdminForm,
     OptionValueAdminForm,
@@ -256,6 +257,7 @@ class OptionValueInline(admin.TabularInline):
 class DealerTierOptionPriceInline(admin.TabularInline):
     model = DealerTierOptionPrice
     form = DealerTierOptionPriceForm
+    formset = DealerTierOptionPriceFormSet
     extra = 1
     fields = ("tier_group", "price_delta")
 

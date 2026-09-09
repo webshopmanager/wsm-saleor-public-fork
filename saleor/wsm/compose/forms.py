@@ -162,6 +162,26 @@ class DealerTierOptionPriceForm(forms.ModelForm):
         )
 
 
+class DealerTierOptionPriceFormSet(BaseInlineFormSet):
+    """Django's own duplicate message names the COLUMN, which is our word.
+
+    "Please correct the duplicate data for tier_group." is what a merchant saw
+    for pricing the same group twice on one choice. The rule is worth keeping;
+    only the wording was ours to fix.
+    """
+
+    def get_unique_error_message(self, unique_check):
+        # The check arrives as ("option_value", "tier_group") from the model
+        # constraint and as ("tier_group",) once the parent key is excluded from
+        # the inline form. Both are this rule.
+        if "tier_group" in unique_check:
+            return ValidationError(
+                "This choice already has a price for that dealer group. Change "
+                "the group, or edit the row that already has it."
+            )
+        return super().get_unique_error_message(unique_check)
+
+
 class OptionSetAdminForm(forms.ModelForm):
     """Required and the prompt type both move the floor, and so do the values."""
 

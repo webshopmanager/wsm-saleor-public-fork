@@ -183,6 +183,46 @@ def test_a_product_row_counts_its_questions_and_charges(client, merchant, produc
 
 
 @pytest.mark.django_db
+def test_pricing_the_same_dealer_group_twice_says_so_in_english(
+    client, merchant, product
+):
+    """Django's message named our column: "duplicate data for tier_group"."""
+    from saleor.wsm.dealer.models import DealerGroup
+
+    client.force_login(merchant, backend=BACKEND)
+    DealerGroup.objects.create(code="dealer-1", name="Dealer 1")
+    option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
+    value = OptionValue.objects.create(
+        option_set=option_set, name="Black", price_delta=Decimal("25")
+    )
+
+    response = client.post(
+        f"/admin/wsm_compose/optionvalue/{value.pk}/change/",
+        {
+            "option_set": option_set.pk,
+            "name": "Black",
+            "sku_fragment": "",
+            "image_url": "",
+            "sort_order": "0",
+            "price_delta": "25",
+            "tier_deltas-TOTAL_FORMS": "2",
+            "tier_deltas-INITIAL_FORMS": "0",
+            "tier_deltas-MIN_NUM_FORMS": "0",
+            "tier_deltas-MAX_NUM_FORMS": "1000",
+            "tier_deltas-0-tier_group": "dealer-1",
+            "tier_deltas-0-price_delta": "20.00",
+            "tier_deltas-1-tier_group": "dealer-1",
+            "tier_deltas-1-price_delta": "21.00",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert "already has a price for that dealer group" in body
+    assert "duplicate data for tier_group" not in body
+
+
+@pytest.mark.django_db
 def test_the_fee_carriers_are_not_in_the_product_lookup(
     client, merchant, product, channel_USD
 ):

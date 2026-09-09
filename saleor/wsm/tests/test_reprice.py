@@ -13,13 +13,14 @@ so there is exactly one definition of the Stage 2 Kit and one of the dealer
 ladder, and a drift in either reddens both suites at once.
 """
 
+import datetime
 import json
 from decimal import Decimal
 
 import pytest
-from django.core.exceptions import ValidationError
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
 
 from saleor.checkout.complete_checkout import create_order_from_checkout
 from saleor.checkout.fetch import fetch_checkout_info, fetch_checkout_lines
@@ -30,6 +31,7 @@ from saleor.wsm.compose.tests.test_api import (  # noqa: F401
     CONFIGURED_UNIT,
     FEE_AMOUNT,
     crating_fee,
+    dealer_credit,
     gid,
     omit_parts,
     post_line,
@@ -42,6 +44,8 @@ from saleor.wsm.dealer.tests.test_views import (  # noqa: F401
     post,
     tiers,
 )
+from saleor.wsm.compose.views import META_OPTIONS as OPTIONS_KEY
+from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from saleor.wsm.reprice import reprice
 
 pytestmark = pytest.mark.django_db
@@ -221,6 +225,218 @@ def test_a_per_unit_fee_line_follows_its_parent_upwards_too(
     assert fee_line.quantity == 3
 
 
+# --- exploit 3: the dealer group a shopper writes for themselves ------------
+
+
+LINES_ADD = """
+    mutation($id: ID!, $variant: ID!, $quantity: Int!) {
+      checkoutLinesAdd(id: $id, lines: [{variantId: $variant, quantity: $quantity}]) {
+        errors { field message code }
+      }
+    }"""
+
+UPDATE_METADATA = """
+    mutation($id: ID!, $input: [MetadataInput!]!) {
+      updateMetadata(id: $id, input: $input) {
+        errors { field message code }
+        item { metadata { key value } }
+      }
+    }"""
+
+ADD_PROMO_CODE = """
+    mutation($id: ID!, $code: String!) {
+      checkoutAddPromoCode(id: $id, promoCode: $code) {
+        errors { field message }
+        checkout { lines {
+          variant { id }
+          totalPrice { gross { amount } }
+        } }
+      }
+    }"""
+
+READ_CHECKOUT = """
+    query($id: ID!) {
+      checkout(id: $id) { lines { unitPrice { gross { amount } } } }
+    }"""
+
+
+def graphql(client, query, variables):
+    response = client.post(
+        "/graphql/",
+        data=json.dumps({"query": query, "variables": variables}),
+        content_type="application/json",
+    )
+    assert response.status_code == 200, response.content
+    body = response.json()
+    assert "errors" not in body, body["errors"]
+    return body["data"]
+
+
+def test_a_dealer_stamp_a_shopper_wrote_for_themselves_buys_nothing(
+    client, checkout, variant, tiers, channel_USD, stock,
+):
+    """Anonymous shopper stamps their own line with a dealer group code.
+
+    Stock Saleor maps CheckoutLine PUBLIC metadata to `no_permissions`
+    (saleor/graphql/meta/permissions.py), so `updateMetadata` on a line in your
+    own checkout takes no key, no login and no dealer account. Group codes are
+    short and guessable. Before the stamps moved to private metadata, MP3's
+    anonymous branch read this key and priced the line at that group's ladder:
+    10 units at 10.00 came back at 7.00.
+
+    The forgery is asserted to SUCCEED. Closing this by refusing the write would
+    mean patching a core permission map; it is closed instead by MP3 pricing
+    from the private copy only, which no unauthenticated caller can write.
+    """
+    assert checkout.user is None
+    errors = graphql(
+        client,
+        LINES_ADD,
+        {
+            "id": gid("Checkout", checkout.token),
+            "variant": gid("ProductVariant", variant.pk),
+            "quantity": 10,
+        },
+    )["checkoutLinesAdd"]["errors"]
+    assert errors == [], errors
+    line = CheckoutLine.objects.get(checkout_id=checkout.pk)
+
+    forged = graphql(
+        client,
+        UPDATE_METADATA,
+        {
+            "id": gid("CheckoutLine", line.pk),
+            "input": [
+                {"key": "wsm.dealer", "value": json.dumps({"group": tiers.code})}
+            ],
+        },
+    )["updateMetadata"]
+    assert forged["errors"] == [], "the public write is open, and that is the point"
+
+    # The next price recalculation, which is every cart read once the checkout
+    # goes stale. Nothing else about the line changed.
+    checkout.price_expiration = timezone.now() - datetime.timedelta(hours=1)
+    checkout.save(update_fields=["price_expiration"])
+    read = graphql(client, READ_CHECKOUT, {"id": gid("Checkout", checkout.token)})
+
+    assert read["checkout"]["lines"][0]["unitPrice"]["gross"]["amount"] == float(RETAIL)
+    line.refresh_from_db()
+    assert line.price_override is None
+    assert line.price_override_reason is None
+    assert "wsm.dealer" not in line.metadata, "the forged key is cleared, not kept"
+    assert "wsm.dealer" not in line.private_metadata
+
+
+# --- exploit 4: the dealer group a configured line quietly loses -------------
+
+
+# The dealer's own price for the Stage 2 Kit configured with all three credits:
+# 3998.99 less 29.99, 30.00 and the dealer's 545.00 in place of retail's 445.00.
+DEALER_CONFIGURED = Decimal("3394.00")
+
+
+def test_a_configured_dealer_line_keeps_its_group_on_an_anonymous_checkout(
+    client, checkout, stage_2_kit, omit_parts, dealer_credit,
+):
+    """The storefront's normal shape: a dealer priced, no user on the checkout.
+
+    The key-gated add resolves the customer server side and never attaches them,
+    so `checkout_info.user` is None on every recalculation that follows. Before
+    the stamped-group fallback, the first one repriced this line at RETAIL and
+    rewrote the snapshot to match: 3494.00, silently, 100.00 more than the
+    dealer agreed to and with nothing left on the line to say a tier ever
+    applied. `_reprice_dealer` has had this fallback all along.
+    """
+    option_set, values = omit_parts
+    post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+        customer=dealer_credit,
+    )
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert line.price_override == DEALER_CONFIGURED
+    assert checkout.user is None, "the add attaches nobody, which is the point"
+
+    checkout_info, lines = checkout_info_for(checkout)
+    reprice(checkout_info, lines)
+
+    line.refresh_from_db()
+    assert line.price_override == DEALER_CONFIGURED
+    assert json.loads(line.private_metadata[OPTIONS_KEY])["tier_applied"] is True
+
+
+def test_a_signed_in_retail_shopper_cannot_inherit_a_stamped_group(
+    client, checkout, stage_2_kit, omit_parts, dealer_credit, staff_user,
+):
+    """The fallback is for a checkout with NO buyer, never for the wrong one.
+
+    Same line, same stamp, but the checkout now knows who is buying and it is
+    not the dealer. The group on the line loses to the buyer on the checkout,
+    and the price goes back to retail because this buyer really does pay retail.
+    """
+    option_set, values = omit_parts
+    post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+        customer=dealer_credit,
+    )
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert line.price_override == DEALER_CONFIGURED
+
+    checkout.user = staff_user
+    checkout.save(update_fields=["user"])
+    checkout_info, lines = checkout_info_for(checkout)
+    reprice(checkout_info, lines)
+
+    line.refresh_from_db()
+    assert line.price_override == Decimal(CONFIGURED_UNIT)
+
+
+def test_a_voucher_does_not_stack_on_a_configured_line_that_took_a_tier(
+    client, checkout, stage_2_kit, omit_parts, dealer_credit, voucher_percentage,
+):
+    """Better of, never both, on a configured line as much as a plain one.
+
+    MP1 finds a dealer line by the presence of the `wsm.dealer` stamp and by
+    nothing else. A configured line never carried it, so a SPECIFIC_PRODUCT
+    voucher came straight off a price that was already the dealer's: 10 percent
+    off 3394.00 is 3054.60, which is the stack this refuses.
+    """
+    from saleor.discount import VoucherType
+
+    option_set, values = omit_parts
+    voucher_percentage.type = VoucherType.SPECIFIC_PRODUCT
+    voucher_percentage.save(update_fields=["type"])
+    voucher_percentage.products.add(stage_2_kit.product)
+
+    post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+        customer=dealer_credit,
+    )
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert DEALER_KEY in line.private_metadata, "a tiered line says it is a dealer line"
+
+    payload = graphql(
+        client,
+        ADD_PROMO_CODE,
+        {"id": gid("Checkout", checkout.token), "code": voucher_percentage.codes.first().code},
+    )["checkoutAddPromoCode"]
+    assert payload["errors"] == [], payload["errors"]
+
+    totals = {
+        row["variant"]["id"]: row["totalPrice"]["gross"]["amount"]
+        for row in payload["checkout"]["lines"]
+    }
+    assert totals[gid("ProductVariant", stage_2_kit.pk)] == float(DEALER_CONFIGURED)
+
+
 # --- the cost, and the one case that refuses -------------------------------
 
 
@@ -235,22 +451,215 @@ def test_a_checkout_this_fork_does_not_own_costs_no_queries(checkout_with_items)
     assert captured.captured_queries == []
 
 
-def test_a_configured_line_whose_option_vanished_refuses_rather_than_guesses(
+def test_a_configured_checkout_costs_the_queries_the_doc_says_it_does(
+    client, checkout, stage_2_kit, omit_parts, crating_fee, customer_user,
+):
+    """The claim in CORE-TOUCHES MP3, asserted rather than asserted-in-prose.
+
+    This is the STEADY read: a configured line and its fee, priced already, read
+    again with nothing moving. It is the cost every cart render pays, so the
+    number in the doc has to be this one and not a guess. The doc said three.
+    """
+    configure(client, checkout, stage_2_kit, omit_parts)
+    checkout_info, lines = checkout_info_for(checkout)
+
+    with CaptureQueriesContext(connection) as captured:
+        moved = reprice(checkout_info, lines)
+
+    assert moved == [], "nothing moved, so nothing is written"
+    tables = [q["sql"].split(" FROM ")[-1].split()[0] for q in captured.captured_queries]
+    assert tables == [
+        # The option sets on the configured products, with their values and the
+        # dealer deltas on those values: one prefetch, three queries.
+        '"wsm_compose_optionset"',
+        '"wsm_compose_optionvalue"',
+        '"wsm_compose_dealertieroptionprice"',
+        # The fees on those same products.
+        '"wsm_compose_fee"',
+    ]
+
+    # And the fifth, on a checkout that carries its buyer: their group, once for
+    # the whole checkout. An anonymous one skips it, which is why the number is
+    # a range and not a number.
+    checkout.user = customer_user
+    checkout.save(update_fields=["user"])
+    checkout_info, lines = checkout_info_for(checkout)
+
+    with CaptureQueriesContext(connection) as captured:
+        reprice(checkout_info, lines)
+
+    assert len(captured.captured_queries) == 5, [
+        q["sql"][:90] for q in captured.captured_queries
+    ]
+
+
+def test_a_price_correction_does_not_write_back_a_stale_quantity(
     client, checkout, stage_2_kit, omit_parts, crating_fee,
 ):
-    """No correction can invent the right price, so the cart says so."""
+    """This funnel owns the price on a line. It does not own the quantity.
+
+    Core loads the line objects it hands us on the REPLICA, so their `quantity`
+    is whatever that replica last saw. Writing the whole set of fields back
+    meant a recalculation triggered by anything at all, a merchant editing what
+    an option costs, silently undid a quantity the shopper had committed in
+    another request moments earlier: they get charged for one when they asked
+    for four, or for four when they cut back to one, with nothing in the cart
+    saying it changed. It only takes replica lag, not a race.
+    """
+    parent, _ = configure(client, checkout, stage_2_kit, omit_parts)
+    checkout_info, lines = checkout_info_for(checkout)
+    # Committed by another request, after the line objects above were read.
+    CheckoutLine.objects.filter(pk=parent.pk).update(quantity=4)
+    # And the merchant edits an option price, so this line does have to move.
+    OptionValue.objects.filter(pk=omit_parts[1][0].pk).update(
+        price_delta=Decimal("-50.00")
+    )
+
+    reprice(checkout_info, lines)
+
+    parent.refresh_from_db()
+    assert parent.quantity == 4, "MP3 owns the price on this line, not the quantity"
+    assert parent.price_override != CONFIGURED_UNIT, "the price correction still lands"
+
+
+# --- the cart that can no longer be priced, and still reads -----------------
+
+
+LINES_DELETE = """
+    mutation($id: ID!, $lines: [ID!]!) {
+      checkoutLinesDelete(id: $id, linesIds: $lines) {
+        errors { field message code }
+      }
+    }"""
+
+
+@pytest.fixture
+def handling_fee(stage_2_kit):
+    """A fee the shopper may decline, which the required crating fee is not."""
+    from saleor.wsm.compose.models import Fee
+
+    return Fee.objects.create(
+        product=stage_2_kit.product,
+        label="Handling",
+        sku="HANDLE-01",
+        basis="fixed",
+        amount=Decimal("25.00"),
+        apply_to="line",
+        required=False,
+    )
+
+
+def ident(checkout):
+    return {"id": gid("Checkout", checkout.token)}
+
+
+def prices(read):
+    return [row["unitPrice"]["gross"]["amount"] for row in read["checkout"]["lines"]]
+
+
+def delete_lines(client, checkout, *lines):
+    """The stock mutation any cart's remove button calls."""
+    payload = graphql(
+        client,
+        LINES_DELETE,
+        {
+            "id": gid("Checkout", checkout.token),
+            "lines": [gid("CheckoutLine", line.pk) for line in lines],
+        },
+    )["checkoutLinesDelete"]
+    assert payload["errors"] == [], payload["errors"]
+
+
+def configure(client, checkout, stage_2_kit, omit_parts, accepted=()):
     option_set, values = omit_parts
-    post_line(
+    response = post_line(
         client,
         checkout,
         stage_2_kit,
         selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
-        accepted=[crating_fee.pk],
+        accepted=[fee.pk for fee in accepted],
     )
-    OptionValue.objects.filter(pk=values[0].pk).delete()
+    assert response.status_code == 200, response.content
+    parent = checkout.lines.get(variant_id=stage_2_kit.pk)
+    return parent, list(checkout.lines.exclude(pk=parent.pk))
+
+
+def test_deleting_an_optional_fee_line_declines_it_and_keeps_the_item(
+    client, checkout, stage_2_kit, omit_parts, handling_fee,
+):
+    """The wedge, and the shape of the answer.
+
+    Every price recalculation runs through this funnel, and a recalculation is
+    what a cart READ is. Raising here did not warn the shopper about one line,
+    it made the whole checkout impossible to render, impossible to repair and
+    impossible to empty, reachable with the stock remove button on a fee line.
+
+    A charge the shopper was allowed to decline, declined the hard way, is a
+    decline: the fee goes, the item stays, the cart reads.
+    """
+    parent, fees = configure(
+        client, checkout, stage_2_kit, omit_parts, accepted=[handling_fee]
+    )
+    assert len(fees) == 1
+
+    delete_lines(client, checkout, fees[0])
+    read = graphql(client, READ_CHECKOUT, ident(checkout))
+
+    assert prices(read) == [float(CONFIGURED_UNIT)]
+    parent.refresh_from_db()
+    assert parent.price_override == Decimal(CONFIGURED_UNIT)
+
+
+def test_deleting_a_required_fee_line_takes_the_item_with_it(
+    client, checkout, stage_2_kit, omit_parts, crating_fee,
+):
+    """A required charge cannot be declined, so the item it belongs to goes.
+
+    Leaving the parent would sell a crated item without the crate, which is the
+    undercharge that deleting the line would otherwise buy. The cart still
+    READS, which is the whole point of the policy; it just no longer holds an
+    item this fork cannot price correctly.
+    """
+    parent, fees = configure(client, checkout, stage_2_kit, omit_parts)
+    assert len(fees) == 1, "the crating fee is required, so it is charged unasked"
+
+    delete_lines(client, checkout, fees[0])
+    read = graphql(client, READ_CHECKOUT, {"id": gid("Checkout", checkout.token)})
+
+    # The render that does the dropping had already loaded the line, so it draws
+    # it one last time at nothing, which is what the total it shows says too.
+    assert prices(read) == [0.0]
+    assert not CheckoutLine.objects.filter(pk=parent.pk).exists()
+    assert prices(graphql(client, READ_CHECKOUT, ident(checkout))) == []
+
+
+def test_deleting_the_configured_parent_takes_its_charges_with_it(
+    client, checkout, stage_2_kit, omit_parts, crating_fee,
+):
+    """A crate with nothing to crate is not a thing anyone owes money for."""
+    parent, fees = configure(client, checkout, stage_2_kit, omit_parts)
+
+    delete_lines(client, checkout, parent)
+    read = graphql(client, READ_CHECKOUT, ident(checkout))
+
+    assert prices(read) == [0.0]
+    assert not CheckoutLine.objects.filter(pk=fees[0].pk).exists()
+    assert prices(graphql(client, READ_CHECKOUT, ident(checkout))) == []
+
+
+def test_a_configured_line_whose_option_vanished_leaves_the_cart_readable(
+    client, checkout, stage_2_kit, omit_parts, crating_fee,
+):
+    """No correction can invent the right price, so the line stops existing.
+
+    The merchant deleted a value a live cart was built on. Guessing at a price
+    is worse than not selling it, and so is a checkout that 500s forever.
+    """
+    parent, fees = configure(client, checkout, stage_2_kit, omit_parts)
+    OptionValue.objects.filter(pk=omit_parts[1][0].pk).delete()
 
     checkout_info, lines = checkout_info_for(checkout)
+    reprice(checkout_info, lines)
 
-    with pytest.raises(ValidationError) as raised:
-        reprice(checkout_info, lines)
-    assert "lines" in raised.value.error_dict
+    assert not CheckoutLine.objects.filter(pk__in=[parent.pk, fees[0].pk]).exists()
+    assert prices(graphql(client, READ_CHECKOUT, ident(checkout))) == []

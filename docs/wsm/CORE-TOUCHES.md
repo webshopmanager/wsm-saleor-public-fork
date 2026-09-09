@@ -288,6 +288,16 @@ body, so anyone on the network could read a named dealer's whole price ladder an
 add lines to a checkout at that dealer's tier. The five write and price endpoints
 now demand the key; the public catalog read (`.../option-sets`) does not.
 
+That read used to take a `?customerId=` of its own and quote that customer's
+dealer deltas, which left the same hole open on the one route with no key on it:
+a `User` global id is base64 of a sequential integer, so anyone who could reach a
+product page could walk the customer table and read the dealer price book one
+buyer at a time. Since review wave WW1 it answers RETAIL to everyone and the
+parameter is gone, along with the tier prefetch and the per-value tier lookup it
+fed. A dealer sees their own deltas from the key-gated add, which is where the
+money is taken and where the caller has already been authenticated. Guard test:
+`test_option_sets_never_quotes_a_dealer_delta_to_the_public`.
+
 Unset or empty fails SAFE: every gated endpoint answers 401. A tenant that forgot
 to set the secret sells nothing through these routes, which is loud, rather than
 selling at anyone's dealer price, which is silent.
@@ -301,6 +311,48 @@ Removal cost: delete the line, the decorator and `saleor/wsm/http.py`.
 Expected: zero. Actual: **two**, in U3 and U7. Every entry names the exact
 function it replaces and the upstream change that would delete it.
 
+## Where the stamps live: PRIVATE metadata, always (review wave WW1, 2026-09-08)
+
+All three patches decide what to do with a line by reading a `wsm.*` key off it.
+Every one of those keys lives in `private_metadata`, written only by the five
+key-gated endpoints and by MP3 itself, and none of the three ever reads the
+public copy.
+
+**The exploit, before this.** `saleor/graphql/meta/permissions.py` maps
+`CheckoutLine` PUBLIC metadata to `no_permissions`: any caller can
+`updateMetadata` a line in a checkout they hold the token for, which is their
+own cart, with no key, no login and no account. The stamps were public, so a
+shopper could write `wsm.dealer` = `{"group": "..."}` onto their own line and
+MP3's anonymous branch would price it against that group's ladder. Measured
+live: a 10.00 line came back at 1.00. Group codes are short, guessable, and
+leak through the storefront anyway. The same key inverted the other way: a real
+dealer could DELETE it and stack a voucher on top of a tier price, because MP1
+and MP2 find a dealer line by the presence of that key.
+
+**After.** The authority copy is private, and `PRIVATE_META_PERMISSION_MAP`
+gates `CheckoutLine` behind `MANAGE_CHECKOUTS`. The forgery still SUCCEEDS as a
+mutation (refusing it would mean editing a core permission map, and B8 says
+zero core table edits and a minimum core footprint), it just buys nothing: MP3
+prices from the private copy, and reprice deletes the forged public key on the
+way past so it cannot mislead a support screen or ride into the order.
+`create_order_from_checkout` copies private metadata onto the order line, so
+MP2 still finds the stamp after completion.
+
+**The public copies that remain are display.** The storefront cart and order
+screens pair fee lines to parents and render chosen options off public line
+metadata (`wsm-storefront src/lib/composeFee.ts`, `src/lib/order-grouping.ts`),
+and acceptance bar B6 is "no storefront code". So `compose.fee`,
+`compose.parent_line`, `wsm.options`, `wsm.options.sku`, `wsm.options.cid`,
+`wsm.options.acc`, `bundle_kit_group_id` and `wsm.kit` are written to BOTH, and
+the money path reads only the private one. Forging a public copy changes what
+your own cart draws and no number anywhere. `wsm.dealer` has no storefront
+reader and therefore has no public copy at all.
+
+**Verified by** `test_a_dealer_stamp_a_shopper_wrote_for_themselves_buys_nothing`
+in `saleor/wsm/tests/test_reprice.py`, which drives the forgery through the
+stock `updateMetadata` mutation unauthenticated, asserts the mutation is
+accepted, and then asserts the price does not move.
+
 ## MP1. Dealer lines are excluded from checkout line discounts
 
 Installed by `saleor/wsm/dealer/apps.py` `DealerConfig.ready()`; the whole patch
@@ -309,7 +361,7 @@ reimplemented: each wrapper calls the original with a smaller list of lines.
 
 | Replaced function | Module | What the wrapper does |
 |---|---|---|
-| `attach_voucher_to_line_info(voucher_info, lines_info)` | `saleor/discount/utils/voucher.py` | Runs the original, then clears `voucher` and `voucher_code` from any line info whose line carries the `wsm.dealer` metadata key. |
+| `attach_voucher_to_line_info(voucher_info, lines_info)` | `saleor/discount/utils/voucher.py` | Runs the original, then clears `voucher` and `voucher_code` from any line info whose line carries the private `wsm.dealer` stamp. |
 | `prepare_checkout_line_discount_objects_for_catalogue_promotions(lines_info)` | `saleor/discount/utils/checkout.py` | Calls the original with the retail lines only, and adds any catalogue discount already sitting on a dealer line to the returned removal list. |
 
 The voucher function is rebound in every module that holds it as its own
@@ -345,7 +397,15 @@ Why a patch and not a stock lever, all three checked in the 3.23.31 source first
 
 Cost when it does nothing: zero. A checkout with no dealer line takes the
 original path with no extra call and no settings query. The toggle is read only
-once a dealer line is present, and cached per process.
+once a dealer line is present, and then it is read from its own row: ONE indexed
+single-row query per guard that fires, never on a retail cart. It used to be
+cached in a process global with a `post_save` signal to clear it, which is only
+true for the one process the save happened in. Gunicorn runs several workers and
+celery prices too, so a merchant turning stacking off in the console left every
+other worker stacking a discount onto dealer prices until it cycled, and which
+price a shopper got depended on which worker took the request. A `.update()`,
+which a bulk action or a data migration uses, reached nobody at all. One query is
+cheaper than a wrong price.
 
 Upstream change that deletes this file: a documented per-line discount exclusion
 on the checkout path, for example a `CheckoutLine.discounts_excluded` flag or a
@@ -447,7 +507,7 @@ Cost when it does nothing: zero. Every wrapper's first act is a dict-key test on
 lines already in memory. With no dealer line among them the original runs on the
 original arguments, and no query, no settings read and no `Money` arithmetic is
 added. The toggle is consulted only once a dealer line is present, and it is the
-same per-process cached read MP1 uses, so a retail-only fleet pays nothing.
+same one-row read MP1 uses, so a retail-only fleet pays nothing.
 
 Upstream change that deletes this file: an exclusion honoured by the order-level
 discount base, for example a `discountable` predicate on the line consulted by
@@ -520,25 +580,132 @@ the checkout's CURRENT user:
 - every Compose fee line's `quantity` (parent quantity for a per-unit fee, 1
   otherwise) and `price_override`.
 
-**Correct and proceed** is the behaviour for drift. **Refuse**, as a
-`ValidationError` on `lines`, is reserved for the case where the price cannot be
-derived at all: an unparseable snapshot, an option value or fee that no longer
-exists, a fee line orphaned from its parent. Those are states no correction can
-invent a right answer for, and shipping the wrong number is worse than a cart
-that says so.
+**Whose group.** A checkout with a user on it knows its buyer, and that buyer's
+group is the only authority: no stamp promotes a signed-in retail shopper. A
+checkout WITHOUT one is the storefront's normal shape, because the key-gated add
+resolves the customer server side and never attaches them, so there the group the
+add stamped on the line stands. Both dealer lines and configured lines work this
+way. Configured lines did not: `_reprice_configured` read only
+`tier_group_for(checkout.user)`, so on the anonymous checkout every storefront
+actually creates, the FIRST recalculation repriced a dealer's configured line at
+retail and rewrote the snapshot to match. Measured on the Stage 2 Kit: 3394.00
+became 3494.00, silently, with nothing left on the line to say a tier had ever
+applied, and the dealer paid 100.00 more than they were quoted. The stamp is
+private metadata, so it is ours to trust; see the stamps section above.
+
+**A configured line that took a tier is a dealer line, and now says so.** MP1 and
+MP2 find one by the presence of the `wsm.dealer` key and by nothing else. The
+compose add never wrote it, so a SPECIFIC_PRODUCT voucher or a catalogue
+promotion came straight off a price that was already the dealer's: 10 percent off
+a 3394.00 dealer configuration is 3054.60, both discounts on one line, which
+"better of, never both" exists to refuse. The add writes the key when the priced
+snapshot says `tier_applied`, and `_mark_dealer` rewrites or clears it on every
+recalculation, because a tier can start or stop applying in between (a quantity
+change, a group change, the merchant deleting the row).
+
+**Kit member lines are re-derived through the kit, not through the ladder.** A
+member line is an ordinary checkout line by design, and its price is not an
+ordinary price: it is that member's prorated share of the kit's discount, or a
+dealer tier where that is cheaper. MP3 did not re-derive it. A member that took
+no tier carried whatever the add stamped on it for the life of the cart, so a
+merchant who changed the kit's discount, or a member's list price, went on
+selling the old number to every cart already holding one. Measured: a member
+added at 9.00 stayed at 9.00 after the merchant doubled the kit discount to 50
+percent, where the kit's own arithmetic says 5.00.
+
+*The overcharge.* A member that DID take a tier carries the dealer stamp, and
+MP3 read that stamp and re-ran the flat per-variant LADDER over the line,
+knowing nothing about the kit it came from. When the merchant then withdrew that
+tier, there was no ladder left to find, so the override was cleared outright and
+the line fell back to LIST: not to the kit price the shopper was still entitled
+to. Measured on the fixture kit: 25.00 on tier, 27.00 entitled, 30.00 charged.
+The shopper paid the whole kit discount back on that member without touching
+their cart, and nothing on the line said so.
+
+Members are now re-priced together, from the kit, through the same `price_kit`
+the add uses, and the lines still in the cart take their unit from that answer.
+A shopper who deletes one member keeps the others at their own prices, which is
+the kits ruling and not an accident. The kit a line came from, and the kit
+quantity it was priced at, are a PRIVATE stamp (`wsm.kit`) written at add time,
+for the reason every other pricing input is private: the public copy the
+storefront groups the cart on is writable by any unauthenticated caller, and one
+that could be forged would hang a retail line off a heavily discounted kit. Cost:
+FOUR queries per distinct kit on the checkout (the kit, its members, their
+channel prices, and one ladder read covering every member), and zero on a
+checkout carrying none.
+
+**Correct and proceed** is the behaviour for drift. **A read never raises**, and
+that is the whole of the policy for everything else. This funnel runs on every
+price recalculation, and a recalculation is what a cart READ is, so an exception
+here does not warn a shopper about one line: `checkout` resolves to `null` and
+the cart becomes impossible to render, impossible to repair and impossible to
+empty. The shopper cannot even delete the line that caused it, because the
+delete mutation returns the checkout.
+
+*The exploit.* A configured item carries its charges as ordinary sibling
+checkout lines. Any shopper could point the stock `checkoutLinesDelete` at the
+crating-fee line, which every storefront's remove button already calls, and the
+next read of that checkout raised `{'lines': ['the charges on a configured item
+in this checkout no longer match it']}` with `data.checkout = null`. Not an
+undercharge: a self-service denial of service on one's own cart, needing no
+tools, no forged input and no account, and leaving support the only exit. The
+same wedge was reachable by deleting the configured parent and leaving its fee
+behind, and by a merchant deleting an option value a live cart was built on.
+
+So a line this fork can no longer price stops being on the checkout. The row is
+deleted and one `logger.warning` names the checkout token, the line pk and the
+reason. A charge the shopper was **allowed to decline**, declined the hard way,
+is simply declined and the item stays. A **required** charge cannot be declined,
+so the configured item goes with it, because leaving the parent is what would
+turn the deletion into the undercharge: a crated item sold without the crate. A
+fee line whose parent is gone, or which never said what it belonged to, goes on
+its own. `Unrepriceable` still exists as this module's internal per-line signal
+and is never raised past `reprice()`.
+
+The request that does the dropping has already loaded those lines and resolves a
+non-nullable `unitPrice` off them, so they cannot be pulled out of its list
+mid-resolve. They are priced at zero instead: that render draws the doomed line
+one last time at nothing, which is exactly the total the next read will show, and
+the next read does not see the row at all.
 
 ### Cost
 
 A checkout holding no wsm-owned line costs **zero queries**: `_classify` decides
-from metadata already loaded onto `CheckoutLineInfo`. One that does costs, for
-the WHOLE checkout and not per line: one dealer-ladder query, one option-set
-query, one fee query, one buyer-group query, and one `bulk_update` only when a
-number actually moved. The wrapper reproduces the original's `price_expiration`
-early return, so a checkout whose prices are still fresh costs nothing at all.
+from the private metadata already loaded onto `CheckoutLineInfo`. Everything below
+is per CHECKOUT, not per line.
+
+A checkout carrying configured lines costs **four**, measured, not estimated: the
+option sets on those products, their values, the dealer deltas on those values
+(one `prefetch_related`, three queries), and the fees on the same products. It
+costs a **fifth** when the checkout carries its buyer, which is the one group
+lookup; the storefront's key-gated add resolves the customer server side and
+leaves the checkout anonymous, so the common shape is four. An earlier version of
+this section said three, which was never true of the code.
+
+A plain dealer line adds **one** ladder query. Each distinct KIT on the checkout
+adds **four**: the kit, its members, their channel prices, and one ladder read
+covering every member. A `bulk_update` runs only when a number actually moved,
+and a second one, by pk, only when a fee line's quantity moved with its parent.
+Dropping adds **one** more, and only on the recalculation that finds a line it
+cannot price, which is not a state a healthy cart reaches twice. The wrapper
+reproduces the original's `price_expiration` early return, so a checkout whose
+prices are still fresh costs nothing at all.
+
+That `bulk_update` writes `price_override`, `price_override_reason`, `metadata`
+and `private_metadata`, and **not `quantity`**. Core loads the line objects this
+wrapper is handed on the REPLICA, so their quantity is whatever that replica last
+saw; writing it back turned any price correction into a silent undo of a quantity
+the shopper had committed in another request, charging them for one when they
+asked for four. The only lines whose quantity this file owns are fee lines, since
+a per-unit fee is one line of its parent's quantity, and those go in a second
+`bulk_update` by pk that runs only when that number actually moved.
 
 ### Verified by
 
 `saleor/wsm/tests/test_reprice.py`, which drives both exploits end to end
 through the real endpoints, the real `checkoutLinesUpdate` mutation and
-`create_order_from_checkout`, and asserts on the ORDER lines. The query-count
-claim above is an assertion in that file, not prose.
+`create_order_from_checkout`, and asserts on the ORDER lines. Every query count
+above is an assertion in that file, not prose:
+`test_a_checkout_this_fork_does_not_own_costs_no_queries` for the zero and
+`test_a_configured_checkout_costs_the_queries_the_doc_says_it_does` for the four
+and the five, which asserts the TABLES, so adding a query reddens it by name.

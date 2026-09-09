@@ -264,21 +264,10 @@ def add_kit_to_checkout(
         ]
         reason = PRICE_OVERRIDE_REASON
         if line.on_tier:
-            # A member line that took a tier IS a dealer line, and the
-            # no-stacking guard finds one by the PRESENCE of this key
-            # (dealer.no_stacking.is_dealer_line). Without it a catalogue
-            # promotion or a SPECIFIC_PRODUCT voucher comes off the tier price
-            # and the dealer collects both, which "better of, never both" is
-            # there to refuse. The value carries the group for support; the
-            # break's own minimum quantity is not carried, because a kit member
-            # is bought at the KIT's quantity rather than at a rung the shopper
-            # chose.
-            metadata.append(
-                MetadataItem(
-                    DEALER_KEY,
-                    json.dumps({"group": tier_group} if tier_group else {}),
-                )
-            )
+            # A member line that took a tier IS a dealer line. The dealer stamp
+            # that says so is written to PRIVATE metadata after the add, below:
+            # it is a pricing input, and stock Saleor lets any unauthenticated
+            # caller write PUBLIC line metadata.
             reason = DEALER_REASON
         lines_data.append(
             CheckoutLineData(
@@ -330,4 +319,49 @@ def add_kit_to_checkout(
         for info in lines
         if info.line.metadata.get(META_GROUP) == group_id
     }
+
+    from ...checkout.models import CheckoutLine
+
+    stamped = []
+    for line in priced.lines:
+        row = ours.get(line.member.variant.pk)
+        if row is None:
+            continue
+        # What MP3 re-derives this line from on every later recalculation. It is
+        # PRIVATE because it is a pricing input: the public copy above is what
+        # the storefront cart groups on and is display only, and stock Saleor
+        # lets any unauthenticated caller write public line metadata. A shopper
+        # who could write this one could hang a retail line off a heavily
+        # discounted kit. The kit quantity is carried because the member line's
+        # own quantity is the kit's times the member's, and dividing it back out
+        # is a guess the moment a shopper edits it.
+        row.store_value_in_private_metadata(
+            {
+                META_KIT: json.dumps(
+                    {
+                        "collection": collection_slug,
+                        "group": group_id,
+                        "quantity": quantity,
+                    },
+                    sort_keys=True,
+                )
+            }
+        )
+        stamped.append(row)
+        if not line.on_tier:
+            continue
+        # A member line that took a tier IS a dealer line, and the no-stacking
+        # guard finds one by the PRESENCE of this key
+        # (dealer.no_stacking.is_dealer_line). Without it a catalogue promotion
+        # or a SPECIFIC_PRODUCT voucher comes off the tier price and the dealer
+        # collects both, which "better of, never both" is there to refuse. The
+        # value carries the group for support; the break's own minimum quantity
+        # is not carried, because a kit member is bought at the KIT's quantity
+        # rather than at a rung the shopper chose.
+        row.store_value_in_private_metadata(
+            {DEALER_KEY: json.dumps({"group": tier_group} if tier_group else {})}
+        )
+    if stamped:
+        CheckoutLine.objects.bulk_update(stamped, ["private_metadata"])
+
     return group_id, priced, ours

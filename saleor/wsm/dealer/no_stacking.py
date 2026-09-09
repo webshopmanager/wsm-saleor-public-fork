@@ -54,36 +54,48 @@ PRICE_OVERRIDE_REASON = "wsm.dealer"
 # rather than one per monkey patch.
 VOUCHER = "saleor.discount.utils.voucher.attach_voucher_to_line_info"
 VOUCHER_BINDING_SITES = patches.PINNED[VOUCHER]
+CATALOGUE = (
+    "saleor.discount.utils.checkout."
+    "prepare_checkout_line_discount_objects_for_catalogue_promotions"
+)
+CATALOGUE_BINDING_SITES = patches.PINNED[CATALOGUE]
 
 _installed = False
 _voucher_guard = None
-_stacking: bool | None = None
+_catalogue_guard = None
 
 
 def is_dealer_line(line) -> bool:
-    return LINE_METADATA_KEY in (line.metadata or {})
+    """PRIVATE metadata only, on a checkout line and on an order line alike.
+
+    Stock Saleor maps CheckoutLine PUBLIC metadata to `no_permissions`
+    (saleor/graphql/meta/permissions.py), so reading the public copy would let
+    a shopper mark their own retail line a dealer line and, with the guard
+    inverted, let them un-mark a real one to stack a voucher on a tier price.
+    `create_order_from_checkout` copies private metadata onto the order line, so
+    MP2 still finds the stamp after completion.
+    """
+    return LINE_METADATA_KEY in (line.private_metadata or {})
 
 
 def stacking_enabled() -> bool:
-    """The toggle, cached per process.
+    """The toggle, read from its one row, once per guard that fires.
 
-    ponytail: process-local, so a merchant flipping the toggle needs the workers
-    to cycle, or a second worker keeps stacking for its lifetime. Correct for one
-    tenant per instance (design doc section 6). When this box serves more than
-    one, move the cache to `django.core.cache` keyed by tenant and drop the
-    signal below.
+    ONE indexed single-row query, and only on a checkout that has a dealer line,
+    because every caller checks that first and returns before asking. A retail
+    cart still costs zero.
+
+    It was a process global with a `post_save` signal to clear it. A signal only
+    reaches the process it fires in: gunicorn runs several workers and a celery
+    worker prices too, so a merchant turning stacking off in the console left
+    every OTHER worker stacking a discount onto dealer prices for the rest of its
+    life, and which price a shopper got depended on which worker took the
+    request. The signal also missed `.update()` and `bulk_update()` entirely.
+    One query is cheaper than a wrong price.
     """
-    global _stacking
-    if _stacking is None:
-        from .models import DealerSettings
+    from .models import DealerSettings
 
-        _stacking = DealerSettings.stacking_enabled()
-    return _stacking
-
-
-def reset_cache(**_kwargs) -> None:
-    global _stacking
-    _stacking = None
+    return DealerSettings.stacking_enabled()
 
 
 def voucher_guard(original):
@@ -139,12 +151,14 @@ def catalogue_guard(original):
     return prepare_checkout_line_discount_objects_for_catalogue_promotions
 
 
-def _guard_catalogue_promotions():
-    from saleor.discount.utils import checkout as checkout_discounts
+def installed_catalogue_guard():
+    """The wrapper `install` put in place, for the test that pins the site set."""
+    return _catalogue_guard
 
-    checkout_discounts.prepare_checkout_line_discount_objects_for_catalogue_promotions = catalogue_guard(
-        checkout_discounts.prepare_checkout_line_discount_objects_for_catalogue_promotions
-    )
+
+def _guard_catalogue_promotions():
+    global _catalogue_guard
+    _catalogue_guard = install_guard(CATALOGUE, catalogue_guard)
 
 
 def install() -> None:
@@ -154,11 +168,5 @@ def install() -> None:
         return
     _installed = True
 
-    from django.db.models.signals import post_delete, post_save
-
-    from .models import DealerSettings
-
     _guard_vouchers()
     _guard_catalogue_promotions()
-    post_save.connect(reset_cache, sender=DealerSettings, dispatch_uid="wsm_dealer")
-    post_delete.connect(reset_cache, sender=DealerSettings, dispatch_uid="wsm_dealer")

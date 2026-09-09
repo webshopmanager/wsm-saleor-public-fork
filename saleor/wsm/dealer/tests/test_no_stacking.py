@@ -7,6 +7,7 @@ import types
 from decimal import Decimal
 
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 from prices import Money
 
 from ....checkout.base_calculations import (
@@ -27,13 +28,6 @@ from ..models import DealerSettings
 from ..no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON, catalogue_guard
 
 pytestmark = pytest.mark.django_db
-
-
-@pytest.fixture(autouse=True)
-def clear_toggle_cache():
-    no_stacking.reset_cache()
-    yield
-    no_stacking.reset_cache()
 
 
 @pytest.fixture
@@ -67,7 +61,7 @@ def checkout_with_a_dealer_line_and_a_retail_line(
         price_override=Decimal("8.00"),
         price_override_reason=PRICE_OVERRIDE_REASON,
         undiscounted_unit_price_amount=Decimal("8.00"),
-        metadata={
+        private_metadata={
             LINE_METADATA_KEY: json.dumps({"group": "dealer-1", "minQuantity": 1})
         },
     )
@@ -118,13 +112,37 @@ def test_the_same_voucher_stacks_once_the_merchant_turns_stacking_on(
     assert by_line[retail_line.pk] == Money(Decimal("9.00"), "USD")
 
 
+def test_turning_stacking_off_takes_effect_without_cycling_the_workers(
+    checkout_with_a_dealer_line_and_a_retail_line,
+):
+    """The toggle was read once per process and remembered.
+
+    A `post_save` signal cleared it, which is only ever true for the ONE process
+    the save happened in. Gunicorn runs several workers and celery prices too, so
+    a merchant turning stacking off left the others stacking a discount onto
+    dealer prices until they cycled, and which price a shopper got came down to
+    which worker answered. A `.update()`, which the console's bulk action and any
+    data migration use, fired no signal at all and so reached nobody.
+
+    That process is this one: read the toggle, change the row the way a signal
+    cannot see, and the next price must already know.
+    """
+    checkout, dealer_line, retail_line = checkout_with_a_dealer_line_and_a_retail_line
+    DealerSettings.objects.create(discount_stacking=True)
+    assert totals(checkout)[dealer_line.pk] == Money(Decimal("7.20"), "USD")
+
+    DealerSettings.objects.update(discount_stacking=False)
+
+    assert totals(checkout)[dealer_line.pk] == Money(Decimal("8.00"), "USD")
+
+
 def test_no_row_means_the_toggle_is_off(db):
     assert DealerSettings.stacking_enabled() is False
 
 
 class _Line:
-    def __init__(self, metadata, discounts=()):
-        self.metadata = metadata
+    def __init__(self, stamps, discounts=()):
+        self.private_metadata = stamps
         self._discounts = list(discounts)
 
 
@@ -159,7 +177,6 @@ def test_catalogue_promotions_are_offered_only_the_retail_lines(db):
 
     # Toggle on and the stock function gets every line back, untouched.
     DealerSettings.objects.create(discount_stacking=True)
-    no_stacking.reset_cache()
     catalogue_guard(original)([dealer, retail])
     assert seen[-1] == [dealer, retail]
 
@@ -217,7 +234,7 @@ def entire_order_checkout(
             price_override=DEALER_UNIT,
             price_override_reason=PRICE_OVERRIDE_REASON,
             undiscounted_unit_price_amount=DEALER_UNIT,
-            metadata=(
+            private_metadata=(
                 {
                     LINE_METADATA_KEY: json.dumps(
                         {"group": "dealer-1", "minQuantity": 1}
@@ -301,7 +318,6 @@ def test_the_merchant_can_turn_the_entire_order_stacking_back_on(
     entire_order_checkout,
 ):
     DealerSettings.objects.create(discount_stacking=True)
-    no_stacking.reset_cache()
 
     manager, checkout_info, lines_info, dealer_line, retail_line = entire_order_checkout(
         dealer=True
@@ -370,6 +386,34 @@ def test_the_pinned_binding_sites_are_exactly_the_discovered_ones():
     assert no_stacking.binding_sites(guard) == frozenset(
         no_stacking.VOUCHER_BINDING_SITES
     )
+
+
+def test_the_catalogue_guard_goes_in_through_the_same_pinned_machinery():
+    """It used to be rebound by hand on the defining module and nowhere else.
+
+    A hand-rebind cannot fail: it patches the one module it names and says
+    nothing about the ones it does not, so an upstream bump that imports this
+    function somewhere new leaves the guard standing in at some call sites and
+    not at others, and a catalogue promotion stacks on a dealer price at the
+    sites it missed. Going through `install_guard` makes that a boot error.
+    """
+    guard = no_stacking.installed_catalogue_guard()
+
+    assert guard is not None, "MP1's catalogue half was not installed through the pin"
+    assert no_stacking.binding_sites(guard) == frozenset(
+        no_stacking.CATALOGUE_BINDING_SITES
+    )
+
+
+def test_an_unpinned_catalogue_binding_site_refuses_to_boot(monkeypatch):
+    """What the hand-rebind could not do: notice, and stop."""
+    guard = no_stacking.installed_catalogue_guard()
+    newcomer = types.ModuleType("saleor.discount.utils.somewhere_new")
+    newcomer.prepare_checkout_line_discount_objects_for_catalogue_promotions = guard
+    monkeypatch.setitem(sys.modules, "saleor.discount.utils.somewhere_new", newcomer)
+
+    with pytest.raises(ImproperlyConfigured):
+        no_stacking._guard_catalogue_promotions()
 
 
 def test_a_new_binding_site_is_discovered(monkeypatch):

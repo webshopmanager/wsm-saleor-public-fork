@@ -27,7 +27,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from ...checkout.fetch import fetch_checkout_info, fetch_checkout_lines
-from ...checkout.models import Checkout
+from ...checkout.models import Checkout, CheckoutLine
 from ...checkout.utils import add_variants_to_checkout, invalidate_checkout
 from ...core.db.connection import allow_writer
 from ...core.utils.metadata_manager import MetadataItem
@@ -35,6 +35,7 @@ from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...plugins.manager import get_plugins_manager
 from ...product.models import Product, ProductVariant, ProductVariantChannelListing
 from ..dealer import pricing as dealer_pricing
+from ..dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from ..checkout import LineRefused, check_addable, whole_number
 from ..http import storefront_key_required
 from . import pricing
@@ -49,6 +50,13 @@ META_FEE = "compose.fee"
 META_PARENT = "compose.parent_line"
 
 PRICE_OVERRIDE_REASON = "wsm.compose"
+
+# The keys MP3 prices from. Their authority copy is written to PRIVATE metadata
+# (stock Saleor lets any unauthenticated caller write PUBLIC line metadata:
+# saleor/graphql/meta/permissions.py maps CheckoutLine to `no_permissions`), and
+# the public copies above stay because the storefront cart and order screens
+# read them for display and B6 is "no storefront code".
+PRICED_FROM = (META_OPTIONS, META_CID, META_ACCEPTED, META_FEE, META_PARENT)
 
 
 def _money(cents: int) -> str:
@@ -91,24 +99,6 @@ def _tier_group(customer_gid, db):
     )
 
 
-def _delta_string(value, tier_group):
-    """What THIS buyer pays for one value, as the storefront reads it.
-
-    A tier row above the retail delta, floored at zero, refuses the add
-    (`AboveRetailError`); on a product page it shows retail instead, because a
-    shopper is the wrong audience for a merchant's data bug and a 500 on the PDP
-    would hide every other option too. The refusal still stands where the money
-    is taken.
-    """
-    if not tier_group:
-        return f"{value.price_delta:.2f}"
-    try:
-        delta, _ = pricing.delta_for(value.to_pricing(), tier_group)
-    except pricing.AboveRetailError:
-        return f"{value.price_delta:.2f}"
-    return f"{Decimal(delta) / 100:.2f}"
-
-
 @require_GET
 def option_sets(request, product_gid):
     """Everything the PDP needs to draw the configurator, in three queries.
@@ -117,21 +107,24 @@ def option_sets(request, product_gid):
     table and a third query. The existence check on the product is paid ONLY
     when the product carries no configuration, which is the case the storefront
     never asks about: a configured product costs three queries, not four.
+
+    RETAIL deltas, for everyone. This is the fork's one endpoint that answers
+    without the storefront key, and it used to take a `?customerId=` and quote
+    that customer's dealer deltas: user ids are sequential integers inside a
+    guessable global id, so the whole dealer price book was readable one
+    customer at a time by anyone who could reach the PDP. A dealer's own deltas
+    come back from the key-gated add instead, which is where the money is taken
+    and where the caller has already been authenticated.
     """
     product_pk = _from_gid(product_gid, "Product")
     if product_pk is None or not product_pk.isdigit():
         return _not_found("product")
 
     replica = settings.DATABASE_CONNECTION_REPLICA_NAME
-    # A dealer is quoted their own deltas; every other shopper is quoted retail
-    # and pays for nothing extra: no customer id means no lookup and no tier
-    # prefetch, so the retail PDP read costs exactly what it cost before.
-    tier_group = _tier_group(request.GET.get("customerId"), replica)
-    values = ("values", "values__tier_deltas") if tier_group else ("values",)
     sets = list(
         OptionSet.objects.using(replica)
         .filter(product_id=product_pk)
-        .prefetch_related(*values)
+        .prefetch_related("values")
     )
     fees = list(Fee.objects.using(replica).filter(product_id=product_pk))
 
@@ -154,7 +147,7 @@ def option_sets(request, product_gid):
                             "id": v.pk,
                             "name": v.name,
                             "sku_fragment": v.sku_fragment,
-                            "price_delta": _delta_string(v, tier_group),
+                            "price_delta": f"{v.price_delta:.2f}",
                             "image_url": v.image_url,
                         }
                         for v in s.values.all()
@@ -292,6 +285,7 @@ def configured_line(request):
     fees_by_id = {f.pk: f for f in fees}
 
     variants = [variant]
+    stamps_by_variant = {}
     lines_data = [
         CheckoutLineData(
             variant_id=str(variant.pk),
@@ -311,6 +305,19 @@ def configured_line(request):
             ],
         )
     ]
+    stamps_by_variant[variant.pk] = {
+        item.key: item.value
+        for item in lines_data[0].metadata_list
+        if item.key in PRICED_FROM
+    }
+    if priced.snapshot.get("tier_applied"):
+        # A configured line that took a tier IS a dealer line. MP1 and MP2 find
+        # one by the presence of this key and nothing else, so without it a
+        # voucher or a catalogue promotion comes off a price that is already the
+        # dealer's. MP3 rewrites it on every recalculation (`_mark_dealer`).
+        stamps_by_variant[variant.pk][DEALER_KEY] = json.dumps(
+            {"group": priced.snapshot.get("tier_group") or ""}
+        )
 
     for fee_id, row in sorted(charged.items()):
         fee = fees_by_id[fee_id]
@@ -349,6 +356,11 @@ def configured_line(request):
                 ],
             )
         )
+        stamps_by_variant[fee_variant.pk] = {
+            item.key: item.value
+            for item in lines_data[-1].metadata_list
+            if item.key in PRICED_FROM
+        }
 
     manager = get_plugins_manager(allow_replica=False)
     checkout_info = fetch_checkout_info(checkout, [], manager)
@@ -385,6 +397,18 @@ def configured_line(request):
 
     lines, _ = fetch_checkout_lines(checkout)
     checkout_info.lines = lines
+    # `add_variants_to_checkout` only ever stores `metadata_list` publicly, so
+    # the copy MP3 actually prices from is written here, on the lines this
+    # request just wrote, and on no others: promoting whatever happens to be in
+    # a line's public metadata would honour exactly the forgery this closes.
+    stamped = []
+    for info in lines:
+        values = stamps_by_variant.get(info.line.variant_id)
+        if values:
+            info.line.store_value_in_private_metadata(values)
+            stamped.append(info.line)
+    if stamped:
+        CheckoutLine.objects.bulk_update(stamped, ["private_metadata"])
 
     invalidate_checkout(checkout_info, lines, manager, save=True)
 

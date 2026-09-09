@@ -497,19 +497,26 @@ def test_a_retail_shopper_is_unmoved_by_a_tier_row(
     )
 
 
-def test_option_sets_quotes_the_dealer_the_delta_it_will_charge(
+def test_option_sets_never_quotes_a_dealer_delta_to_the_public(
     client, stage_2_kit, omit_parts, dealer_credit
 ):
-    """Endpoint 1 with a customer id: the PDP shows what the add will take."""
+    """The one ungated read answers retail, whoever it is asked about.
+
+    `dealer_credit` is a real dealer with a real -545.00 row on the third value.
+    Passing their global id, which is a base64 of a sequential integer and needs
+    no authentication of any kind, must not turn the public product page into a
+    dealer price book.
+    """
     url = OPTION_SETS_URL.format(gid("Product", stage_2_kit.product_id))
+    retail_deltas = ["-29.99", "-30.00", "-445.00"]
 
     retail = client.get(url).json()["data"][0]["values"]
-    dealer = client.get(url, {"customerId": gid("User", dealer_credit.pk)}).json()[
+    asked = client.get(url, {"customerId": gid("User", dealer_credit.pk)}).json()[
         "data"
     ][0]["values"]
 
-    assert [v["price_delta"] for v in retail] == ["-29.99", "-30.00", "-445.00"]
-    assert [v["price_delta"] for v in dealer] == ["-29.99", "-30.00", "-545.00"]
+    assert [v["price_delta"] for v in retail] == retail_deltas
+    assert [v["price_delta"] for v in asked] == retail_deltas
 
 
 

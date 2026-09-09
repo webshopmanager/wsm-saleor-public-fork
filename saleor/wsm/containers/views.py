@@ -62,7 +62,7 @@ def _refused(message: str):
     return JsonResponse({"violations": [message]}, status=422)
 
 
-def resolve_tier_lookup(kit, checkout, user):
+def resolve_tier_lookup(kit, checkout, user, group_code=None):
     """Return the dealer tier lookup for this buyer, or None for plain retail.
 
     The seam, in one place. `pricing.price_kit` already takes the better of a
@@ -78,13 +78,19 @@ def resolve_tier_lookup(kit, checkout, user):
     a price about to be stamped on a checkout line is read from the database the
     line is written to, not from a replica that may lag behind the merchant.
     """
-    if user is None:
+    if user is None and not group_code:
         return None
 
+    # `group_code` is the recalculation's way in. The add resolves the customer
+    # server side and never attaches them to the checkout, so by the time MP3
+    # re-derives these lines there is no user to ask and the group stamped on
+    # the line at add time is the authority. Private metadata, so it is ours to
+    # trust. See reprice.py.
     breaks = dealer_pricing.ladders(
         user,
         checkout.channel,
         list(kit.members.values_list("variant_id", flat=True)),
+        group_codes=[group_code] if user is None else None,
         database_connection_name=settings.DATABASE_CONNECTION_DEFAULT_NAME,
     )
     if not breaks:

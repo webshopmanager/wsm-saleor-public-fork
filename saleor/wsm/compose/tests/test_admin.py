@@ -370,3 +370,63 @@ def test_the_dealer_price_column_costs_no_query_per_choice(
     assert len(four_choices.captured_queries) == len(one_choice.captured_queries), [
         query["sql"] for query in four_choices.captured_queries
     ]
+
+
+# --- the shopper-facing help field, which holds markup on purpose ------------
+
+MARKUP_NOTE = "Pick a <strong>Color</strong>. See the <a href=\"/sizing\">chart</a>."
+
+
+@pytest.mark.django_db
+def test_the_help_field_says_that_its_markup_is_rendered(client, merchant, product):
+    """118 of Fuel Lab's 126 questions carry HTML here, imported from 5.0.
+
+    The field showed the tags with nothing saying whether a shopper reads bold
+    text or the characters, so the screen taught the merchant that their data
+    was broken. The sentence has to SHOW a tag, so it is stored as entities and
+    the admin renders help text unescaped.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(
+        product=product, name="Color", label="Colour", note=MARKUP_NOTE
+    )
+
+    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+
+    assert "HTML is allowed here and is shown to the shopper as formatted text" in body
+    assert "&lt;strong&gt;Color&lt;/strong&gt; reads as a bold Color" in body
+
+
+@pytest.mark.django_db
+def test_the_help_field_keeps_the_markup_the_merchant_wrote(client, merchant, product):
+    """No sanitising, no rewriting. The storefront renders it and means to."""
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(
+        product=product, name="Color", label="Colour", note=MARKUP_NOTE
+    )
+
+    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+    option_set.refresh_from_db()
+
+    assert option_set.note == MARKUP_NOTE
+    # The textarea shows the source, escaped by the template, not stripped.
+    assert "Pick a &lt;strong&gt;Color&lt;/strong&gt;" in body
+
+
+@pytest.mark.django_db
+def test_the_question_list_never_prints_the_stored_markup(client, merchant, product):
+    """The guard on the other half of the defect.
+
+    Measured on Fuel Lab: markup lives in `note` alone, no name or label carries
+    a tag, and no column on this list shows `note`, so there is nothing to strip
+    today. This fails the day a column starts printing it raw.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    OptionSet.objects.create(
+        product=product, name="Color", label="Colour", note=MARKUP_NOTE
+    )
+
+    body = client.get("/admin/wsm_compose/optionset/").content.decode()
+
+    assert "<strong>Color</strong>" not in body
+    assert "/sizing" not in body

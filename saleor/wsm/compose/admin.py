@@ -247,6 +247,18 @@ class WsmAdminMixin:
         return any(self.get_model_perms(request).values())
 
 
+# The 5.0 import brings the shopper-facing help across as it was written, and
+# 118 of Fuel Lab's 126 questions carry markup in it. The storefront renders it
+# as HTML, so the stored text is right and the SCREEN was the defect: a merchant
+# opening the field saw `<strong>Color</strong>` with nothing saying whether the
+# shopper would see bold text or those characters. Written with entities because
+# Django renders `help_text` unescaped, and this sentence has to SHOW the tags.
+NOTE_IS_HTML = (
+    "HTML is allowed here and is shown to the shopper as formatted text: "
+    "&lt;strong&gt;Color&lt;/strong&gt; reads as a bold Color on the storefront."
+)
+
+
 def _dealer_delta_prefetch():
     """Every dealer tier row for the whole page, in ONE query, already named.
 
@@ -400,6 +412,21 @@ class OptionSetAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
     def get_queryset(self, request):
         # One annotated query, not one COUNT per row.
         return super().get_queryset(request).annotate(_values=Count("values"))
+
+    def get_form(self, request, obj=None, **kwargs):
+        """Say what the markup in the help field DOES, without touching the data.
+
+        The stored text is not rewritten and not sanitised: a merchant who wrote
+        HTML in 5.0 means it, and stripping it here would silently change what
+        their shoppers read. `get_form` builds a fresh form class per request,
+        so writing to `base_fields` is local to this page, the same reasoning
+        `label_money_field` runs on.
+        """
+        form = super().get_form(request, obj, **kwargs)
+        field = form.base_fields.get("note")
+        if field is not None:
+            field.help_text = f"{field.help_text} {NOTE_IS_HTML}".strip()
+        return form
 
     @admin.display(description="Product", ordering="product__name")
     def product_name(self, obj):

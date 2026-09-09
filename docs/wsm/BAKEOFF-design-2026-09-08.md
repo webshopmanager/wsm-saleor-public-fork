@@ -246,6 +246,54 @@ product rather than once per catalog, which is the shape the 5.0 import
 produces (97 products carry 126 questions, four of them the same QSST pump
 question repeated).
 
+### The second merchant walk (2026-09-09): six frictions, admin layer only
+
+A non-superuser walk of the same screens, this time on Fuel Lab's real data,
+found six places where the screen was operable but not usable. Every fix is in
+`admin.py` and one template: no model changed, no migration, no stored data
+rewritten.
+
+- **A dealer group now says what it prices.** The form was two text fields, and
+  "Dealer 1" owns 304 tier prices it said nothing about. It reports the count,
+  the lowest and the highest, and links to those rows pre-filtered. A read-only
+  summary, not a 304 row inline: two queries on the change page, none on the
+  list.
+- **A question shows what its choices cost dealers.** The choices inline carries
+  a read-only column reading "Dealer 1 -50.00 USD, Dealer 2 -75.00 USD", by
+  group NAME, each row linking to the choice that owns those prices. One
+  prefetch and one correlated currency column for the page, plus a
+  `select_related` that also pays off the two queries a row the inline was
+  already spending on each choice's string. Pinned: rendering one choice and
+  four costs the same number of queries.
+- **The shopper-facing help field says what its markup does.** 118 of Fuel
+  Lab's 126 questions carry HTML there. It is not rewritten and not sanitised:
+  the storefront renders it and the merchant meant it. One sentence of help
+  says so. On the list side there is nothing to strip: markup lives in the note
+  alone and no column shows it, and a test now fails the day one does.
+- **A series picks its questions from the store's own attributes.** `axes` was
+  a free-text box of slugs, so building a series meant leaving for the Saleor
+  dashboard to find out what to type. It is a checkbox list of the store's
+  product attributes, by name with the slug alongside, writing back the same
+  JSON list; the partitioning axis picks from the same list. A slug that
+  outlives its attribute is offered anyway, marked `(missing)`, so it is never
+  silently dropped. The screen also reports how many products the collection
+  holds and how many are published, because publishing is refused under two
+  published members and that count was only findable elsewhere. ponytail: the
+  ask order is the list order, alphabetical, with no way to reorder; the
+  upgrade path is an ordered widget on that one field.
+- **The pickers offer what the merchant typed first.** Typing the part number
+  `71801` returned the product carrying it fifth, behind covers whose SKUs
+  merely contain those digits. Three tiers in one CASE (the whole term as a
+  SKU, the whole term as a word in a SKU or a name, then the previous order),
+  as correlated subqueries rather than joins, because joining a reverse
+  relation returns a product once per variant. Nothing is filtered, only
+  ordered. Same mixin on the variant picker.
+- **An empty list says what the thing is.** Fees and Kits showed a heading, a
+  search box, a filter sidebar and "0 fees". They now show two sentences in
+  merchant words and one Add link, and hide what there is nothing to narrow. A
+  search that matched nothing is a different state with a sentence Django
+  already writes, and it is left alone.
+
 ## 8. Fee products are catalog plumbing (added 2026-09-08 after the SEO walk)
 
 A fee reaches the order as its own checkout line, with its own SKU and label,

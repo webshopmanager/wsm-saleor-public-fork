@@ -228,6 +228,33 @@ def test_the_user_picker_answers_the_autocomplete(merchant, customer_user):
     assert any(customer_user.email in text for text in texts), texts
 
 
+def test_the_variant_picker_puts_the_exact_sku_first(merchant, variant):
+    """Same defect, same fix, on the picker that finds a SKU to price.
+
+    The decoys sort ahead of the exact match on SKU, which is the only order
+    this picker had, so a merchant pricing a tier for 71801 was offered two
+    Truxedo covers before the part they typed.
+    """
+    from ....product.models import ProductVariant
+
+    for sku in ("1471801", "1571801", "71801"):
+        ProductVariant.objects.create(product=variant.product, sku=sku, name="Base")
+
+    response = merchant.get(
+        AUTOCOMPLETE,
+        {
+            "app_label": "wsm_dealer",
+            "model_name": "tierprice",
+            "field_name": "variant",
+            "term": "71801",
+        },
+    )
+
+    texts = [result["text"] for result in response.json()["results"]]
+    assert texts[0].endswith("[71801]"), texts
+    assert len(texts) == 3, texts
+
+
 def test_the_variant_picker_names_the_product_and_the_sku(merchant, variant):
     response = merchant.get(
         AUTOCOMPLETE,

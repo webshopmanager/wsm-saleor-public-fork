@@ -14,12 +14,12 @@ from decimal import Decimal
 import pytest
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
-
-from saleor.permission.models import Permission
-from saleor.wsm.compose import pricing
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
+from saleor.permission.models import Permission
+from saleor.product.models import Product, ProductVariant
+from saleor.wsm.compose import pricing
 from saleor.wsm.compose.models import (
     DealerTierOptionPrice,
     Fee,
@@ -430,3 +430,79 @@ def test_the_question_list_never_prints_the_stored_markup(client, merchant, prod
 
     assert "<strong>Color</strong>" not in body
     assert "/sizing" not in body
+
+
+# --- the picker ranks what the merchant typed --------------------------------
+
+AUTOCOMPLETE = "/admin/autocomplete/"
+PRODUCT_LOOKUP = {
+    "app_label": "wsm_compose",
+    "model_name": "optionset",
+    "field_name": "product",
+}
+
+
+def _catalog_row(twin_of, name, slug, sku):
+    """Another product in the same catalog, carrying one SKU."""
+    product = Product.objects.create(
+        name=name,
+        slug=slug,
+        product_type=twin_of.product_type,
+        category=twin_of.category,
+    )
+    ProductVariant.objects.create(product=product, sku=sku, name="Base")
+    return product
+
+
+@pytest.mark.django_db
+def test_the_product_picker_puts_the_typed_part_number_first(
+    client, merchant, product
+):
+    """Measured on Fuel Lab: typing 71801 put the product carrying it fifth.
+
+    Four Truxedo covers whose SKUs merely CONTAIN those digits came first,
+    because the product name was the only order the picker had. A merchant
+    reads the first row of an autocomplete, so the picker was quietly putting
+    the wrong product on the question.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    _catalog_row(product, "Truxedo Lo Pro", "truxedo-lo-pro", "trp:1471801")
+    _catalog_row(product, "Truxedo Sentry CT", "truxedo-sentry-ct", "trp:1571801")
+    _catalog_row(product, "Zzz Fuel Pump", "zzz-fuel-pump", "71801")
+
+    response = client.get(AUTOCOMPLETE, {**PRODUCT_LOOKUP, "term": "71801"})
+
+    texts = [result["text"] for result in response.json()["results"]]
+    assert texts[0] == "Zzz Fuel Pump", texts
+    # The others are still offered: ranking is not filtering.
+    assert set(texts) == {"Zzz Fuel Pump", "Truxedo Lo Pro", "Truxedo Sentry CT"}
+
+
+@pytest.mark.django_db
+def test_a_part_number_inside_the_products_name_outranks_a_substring(
+    client, merchant, product
+):
+    """The exact SKU is one tier. A whole word in a name is the next one."""
+    client.force_login(merchant, backend=BACKEND)
+    _catalog_row(product, "Aaa Cover trp:1471801", "aaa-cover", "trp:1471801")
+    _catalog_row(product, "Zzz Fuel Pump 71801", "zzz-fuel-pump", "fmbg-71801")
+
+    response = client.get(AUTOCOMPLETE, {**PRODUCT_LOOKUP, "term": "71801"})
+
+    texts = [result["text"] for result in response.json()["results"]]
+    assert texts[0] == "Zzz Fuel Pump 71801", texts
+
+
+@pytest.mark.django_db
+def test_the_picker_still_orders_by_name_with_nothing_to_rank(
+    client, merchant, product
+):
+    """No exact match means the old order, unchanged."""
+    client.force_login(merchant, backend=BACKEND)
+    _catalog_row(product, "Zzz Truxedo Sentry", "zzz-truxedo", "trp:1571801")
+    _catalog_row(product, "Aaa Truxedo Lo Pro", "aaa-truxedo", "trp:1471801")
+
+    response = client.get(AUTOCOMPLETE, {**PRODUCT_LOOKUP, "term": "truxedo"})
+
+    texts = [result["text"] for result in response.json()["results"]]
+    assert texts == ["Aaa Truxedo Lo Pro", "Zzz Truxedo Sentry"]

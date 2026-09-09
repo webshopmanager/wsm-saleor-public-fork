@@ -31,6 +31,7 @@ from django.contrib.admin.views.autocomplete import AutocompleteJsonView
 
 from ..account.models import User
 from ..product.models import Collection, ProductVariant
+from .compose.admin import SkuRankedSearchMixin
 from .compose.admin import site as merchant_site
 
 # Who may look a core object up. A picker is opened from the screen that points
@@ -168,10 +169,14 @@ class UserPickerAdmin(PickerAdmin):
 
 
 @admin.register(ProductVariant, site=merchant_site)
-class ProductVariantPickerAdmin(PickerAdmin):
+class ProductVariantPickerAdmin(SkuRankedSearchMixin, PickerAdmin):
     """Find a SKU. The product's name carries the meaning; the variant name is "Base"."""
 
     lookup_permissions = VARIANT_LOOKUP_PERMISSIONS
+    # This model IS the variant, so the SKU is on the row itself, and the name
+    # a merchant reads is the product's.
+    sku_owner_field = "pk"
+    name_field = "product__name"
     list_display = ("product_name", "sku", "name")
     search_fields = ("sku", "product__name", "name")
     list_select_related = ("product",)

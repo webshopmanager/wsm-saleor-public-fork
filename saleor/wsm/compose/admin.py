@@ -13,16 +13,28 @@ showing a merchant. A private site takes only what we register and is immune to
 whatever a future app drops on the default one.
 """
 
+import re
 from functools import wraps
 
 from django.contrib import admin
-from django.db.models import Count, IntegerField, OuterRef, Prefetch, Subquery
+from django.db.models import (
+    Case,
+    Count,
+    Exists,
+    IntegerField,
+    OuterRef,
+    Prefetch,
+    Q,
+    Subquery,
+    Value,
+    When,
+)
 from django.urls import URLResolver, reverse
 from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 
 from ...core.db.connection import allow_writer
-from ...product.models import Product, ProductChannelListing
+from ...product.models import Product, ProductChannelListing, ProductVariant
 from .forms import (
     DealerTierOptionPriceForm,
     DealerTierOptionPriceFormSet,
@@ -124,6 +136,64 @@ def _with_currency(queryset, product_path):
             ).values("currency")[:1]
         )
     )
+
+
+def whole_token(term):
+    """A pattern that matches `term` only where it is not part of a longer run.
+
+    Postgres flavour, for `iregex`. The catalog is full of SKUs that CONTAIN a
+    part number without being it: `trp:1471801` contains `71801`.
+    """
+    return r"(^|[^0-9A-Za-z])" + re.escape(term) + r"([^0-9A-Za-z]|$)"
+
+
+class SkuRankedSearchMixin:
+    """The row a merchant typed comes first, not the one that sorts first.
+
+    Measured on the live Fuel Lab catalog: typing `71801`, a manufacturer part
+    number, put the product that carries it FIFTH, behind four Truxedo covers
+    whose SKUs (`trp:1471801`, `trp:1571801`) merely contain those digits,
+    because product name was the only order the picker had. A merchant reads
+    the first row of an autocomplete and a picker that buries the exact match
+    is a picker that gets the wrong product onto a question.
+
+    Three tiers, one CASE, no extra round trip: the whole term as a SKU, the
+    whole term as a word inside a SKU or a name, then everything else in the
+    order it already had. The subqueries are correlated columns on the query
+    the search already runs, and not joins, because a join on a reverse
+    relation would return the same product once per variant.
+    """
+
+    # How a row of THIS model reaches the variant that carries a SKU.
+    sku_owner_field = "product"
+    # Where this model's own merchant-readable name lives.
+    name_field = "name"
+
+    def get_search_results(self, request, queryset, search_term):
+        queryset, may_have_duplicates = super().get_search_results(
+            request, queryset, search_term
+        )
+        term = (search_term or "").strip()
+        if not term:
+            return queryset, may_have_duplicates
+
+        owner = {self.sku_owner_field: OuterRef("pk")}
+        pattern = whole_token(term)
+        exact = ProductVariant.objects.filter(**owner, sku__iexact=term)
+        token = ProductVariant.objects.filter(**owner, sku__iregex=pattern)
+        ranked = queryset.annotate(
+            wsm_match_rank=Case(
+                When(Exists(exact), then=Value(0)),
+                When(
+                    Q(Exists(token)) | Q(**{f"{self.name_field}__iregex": pattern}),
+                    then=Value(1),
+                ),
+                default=Value(2),
+                output_field=IntegerField(),
+            )
+        )
+        ordering = self.get_ordering(request) or ()
+        return ranked.order_by("wsm_match_rank", *ordering), may_have_duplicates
 
 
 class ProductFilteredMixin:
@@ -566,7 +636,9 @@ FEE_CARRIER_PRODUCT_TYPE_SLUG = "wsm-fee"
 
 
 @admin.register(Product, site=site)
-class ComposeProductPickerAdmin(WsmAdminMixin, admin.ModelAdmin):
+class ComposeProductPickerAdmin(
+    SkuRankedSearchMixin, WsmAdminMixin, admin.ModelAdmin
+):
     """Read-only product list, so the option-set lookup popup resolves.
 
     Registered because `autocomplete_fields` needs a changelist to search,

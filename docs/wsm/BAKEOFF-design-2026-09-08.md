@@ -319,3 +319,73 @@ missing `published` to hidden, so no reader needs a change.
 
 Queries added: one metadata write per collection on a delete, on an admin path
 that no shopper reaches.
+
+## 10. Price floor stamp (Dana, 2026-09-09)
+
+Dana ruled that a configurable product may keep a **$0 base price** for the bake-off. That takes the base price out of service as
+a number anyone can be quoted, and three consumers need one: Google Merchant Center **suspends a feed on a zero price**, a PLP tile
+with no number is not a tile anyone clicks, and the search engine has nothing to sort or facet on. So the product carries the
+lowest price a shopper can actually pay, stamped at write time.
+
+**The key.** `wsm.price_floor`, PUBLIC metadata on the Product, one JSON object keyed by channel slug:
+
+```json
+{"default-channel": {"amount": "493.24", "currency": "USD"}, "c-pln": {"amount": "1920.00", "currency": "PLN"}}
+```
+
+The value is stored as a JSON **string**, not a nested object, because GraphQL types `MetadataItem.value` as `String`: a dict
+reaches a consumer as a Python repr with single quotes, which no JSON parser reads. `wsm.series` on a Collection is stamped the
+same way for the same reason. Amounts are two-decimal strings computed in integer cents, never floats, because 493.24 as a float
+is 493.2399999999998 and every consumer here is quoting money.
+
+Per channel because a base price is per channel: a product listed in four channels has four floors, and a "from" price quoted in
+the wrong currency is worse than no price. Retail only; dealer tier deltas are private to the dealer path and are never in a
+public stamp.
+
+**The formula.** The channel's base price (the cheapest `ProductVariantChannelListing.price_amount` on the product in that
+channel), plus for every REQUIRED option set the cheapest legal answer, which a negative adder makes a subtraction, plus every
+REQUIRED fee. Optional sets and declinable fees add nothing, for the same reason: the shopper can say no, so they are not part of
+the lowest price anyone pays. A percentage fee computes on the cheapest configured subtotal, not on the base, through the same
+`_apply_fees` that checkout charges through. One function, `pricing.minimum_line_cents`, wrapping the existing
+`minimum_configured_cents`; there is no second formula anywhere, so the quoted floor and the charged line cannot round apart.
+Quantity one, where a per-unit fee and a per-line fee are the same money.
+
+A floor that computes below zero stamps `"0.00"` and logs at WARNING with the product id. The admin refuses to save rows that do
+this and `pricing.delta_for` refuses to charge them, so reaching it means rows written around both; a negative "from" price is a
+feed rejection and a broken tile, so it is clamped and said out loud rather than published.
+
+A product with no configuration at all, or whose only Compose row is a DECLINABLE charge, gets **no key**. Its floor is its base
+price and the listing already carries that, so a stamp would be a second copy of a number to go stale. Removal takes the key off
+rather than blanking it: absent is what a reader reads as "no floor", where an empty object is a floor that answers nothing.
+
+**Who writes it.** `sync_product_stamps` in `saleor/wsm/compose/models.py`, which is the `compose.configurable` maintainer
+extended to keep both marks. One function and one metadata write for both, because every door that can move one can move the
+other. It fires from `post_save` and `post_delete` on `OptionSet`, `Fee` and `OptionValue`. `OptionValue` is new to this hook and
+is there for the floor alone: a value cannot change whether a product is configurable, but the cheapest answer to a required
+question IS the floor. `DealerTierOptionPrice` is deliberately not hooked, because the stamp is retail only. The 5.0 importer
+stamps through the same function in its own final pass, so an imported catalog and a hand-built one can never carry a different
+answer.
+
+**Cost.** Six queries per affected product per merchant save: the sets, their values, the fees, the product row, the per-channel
+base prices (one grouped query, not one per channel), and one `UPDATE` of `metadata`. Nothing at all when the answer has not
+changed, which is what makes a re-run free. **Zero queries on any shopper path**, which is the whole point: index-time
+denormalization, never a read cache. A `Fee` row has a single product FK, so a fee touches exactly one product and there is no
+fan-out to batch.
+
+**Known gap: the base price.** Nothing stamps on a base-price change. That price lives on `ProductVariantChannelListing`, a core
+table Saleor writes through `bulk_update` on the discounted-price path, which fires no signal at all; catching it would mean
+either a broad signal on a hot core write or editing core, and neither is worth it for a number a merchant changes by hand a few
+times a year. The answer is `manage.py wsm_stamp_price_floor [--product-ids ...]`, which restamps and is idempotent (a second run
+issues no write, proved by query capture). Run it after a price change, a price import, or a channel being added. The importer
+already calls the same function, so a 5.0 import needs nothing extra.
+
+**Who reads it (follow-ups, each in its own lane, none in this unit).** The storefront PLP renders it as the "from" price on a
+configurable tile; the Google Merchant Center feed sends it as `price` in place of a $0 base; the PartsLogic search engine indexes
+it as the sortable and facetable price. All three read a stamp and compute nothing.
+
+**Exploit paragraph.** The stamp is public and read-only from outside: metadata is exposed on the Product, and the only writers
+are our own save paths and the management command, all of which derive it from the rows. Nothing accepts it as input. A forged or
+tampered stamp costs nothing, because **checkout never reads it**: `price_configured` prices from the catalog rows every time and
+refuses at or below zero, so the worst a wrong stamp can do is advertise a price the shopper is not charged, which is a
+merchandising defect and not a money one. The clamp at zero exists for the same reason in reverse: a bad row should mislead a feed
+as little as possible while it is being found.

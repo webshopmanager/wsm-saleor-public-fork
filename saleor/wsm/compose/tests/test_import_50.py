@@ -8,6 +8,7 @@ dealer prices are DUPLICATE value rows carrying the group name in `desc`, and
 the QSST axes whose selections have to add to 2943.00.
 """
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -26,7 +27,12 @@ from saleor.wsm.compose.management.commands.import_option_sets_50 import (
     CONFIGURABLE_METAFIELD,
     apply,
 )
-from saleor.wsm.compose.models import DealerTierOptionPrice, OptionSet, OptionValue
+from saleor.wsm.compose.models import (
+    PRICE_FLOOR_METAFIELD,
+    DealerTierOptionPrice,
+    OptionSet,
+    OptionValue,
+)
 from saleor.wsm.compose.pricing import Selection, price_configured
 from saleor.wsm.dealer.models import DealerGroup, TierPrice
 
@@ -186,6 +192,65 @@ def test_counts_and_shapes(payload, catalog):
     for product in catalog.values():
         product.refresh_from_db()
         assert product.metadata[CONFIGURABLE_METAFIELD] == "true"
+
+
+def test_the_importer_stamps_the_price_floor(payload, catalog):
+    """An imported catalog leaves the same stamp a hand-built one does.
+
+    The `catalog` fixture prices nothing, so the listing is added here: a floor
+    needs a base price, and a product with none is stamped with nothing rather
+    than with a zero. The charge is required, so it is part of the lowest price
+    anyone pays and the floor is 100.00 + 149.00, not the base.
+    """
+    channel = Channel.objects.get(slug=CHANNEL)
+    product = catalog[COLOR_SKU]
+    ProductVariantChannelListing.objects.create(
+        variant=product.variants.get(sku=COLOR_SKU),
+        channel=channel,
+        currency="USD",
+        price_amount=Decimal("100.00"),
+        discounted_price_amount=Decimal("100.00"),
+    )
+    payload["fees"] = [
+        {
+            "sku": COLOR_SKU,
+            "fee_label": "Crating",
+            "fee_sku": "CRATE",
+            "fee": "149.00",
+            "return_first": 0,
+            "return_first_label": "",
+        }
+    ]
+
+    report = apply(payload, channel_slug=CHANNEL)
+
+    assert report["fees_created"] == 1
+    product.refresh_from_db()
+    assert json.loads(product.metadata[PRICE_FLOOR_METAFIELD]) == {
+        CHANNEL: {"amount": "249.00", "currency": "USD"}
+    }
+    # The other product is priced in no channel, so it carries the marker and
+    # no floor: a half-built catalog gets no number rather than a wrong one.
+    other = catalog[QSST_SKU]
+    other.refresh_from_db()
+    assert other.metadata[CONFIGURABLE_METAFIELD] == "true"
+    assert PRICE_FLOOR_METAFIELD not in other.metadata
+
+    # A base price moved with no Compose row touched: no save signal fires, so
+    # the import's own stamping pass is the only thing that makes the stamp
+    # current. That is the case the pass exists for, and the counter proves it
+    # ran rather than the signals having got there first.
+    ProductVariantChannelListing.objects.filter(variant__product=product).update(
+        price_amount=Decimal("300.00")
+    )
+    again = apply(payload, channel_slug=CHANNEL)
+
+    assert again["price_floor_written"] == 1
+    assert again.get("fees_created", 0) == 0
+    product.refresh_from_db()
+    assert json.loads(product.metadata[PRICE_FLOOR_METAFIELD]) == {
+        CHANNEL: {"amount": "449.00", "currency": "USD"}
+    }
 
 
 def test_tier_price_lands_on_the_base_variant_not_the_shadow(payload, catalog):

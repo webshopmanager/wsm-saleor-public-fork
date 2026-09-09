@@ -79,8 +79,34 @@ class SeriesConfigForm(forms.ModelForm):
         return slugs
 
 
+SERIES_DERIVED_NOTE = (
+    "This screen is the only place a series is edited. Saving writes the "
+    "collection's wsm.series metadata for the storefront and the search engine, "
+    "and deleting a series here clears it, so the collection stops being a "
+    "series everywhere. That metadata is written from this screen and is never "
+    "edited by hand: anything typed into it directly is replaced the next time "
+    "this form is saved."
+)
+
+
 class SeriesConfigAdmin(PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin):
     form = SeriesConfigForm
+    fieldsets = [
+        (
+            None,
+            {
+                "description": SERIES_DERIVED_NOTE,
+                "fields": (
+                    "collection",
+                    "brand",
+                    "axes",
+                    "partitioning_axis",
+                    "miss_message",
+                    "published",
+                ),
+            },
+        )
+    ]
     list_display = ("collection_name", "brand", "axes_display", "partitioning_axis", "published")
     list_filter = ("published",)
     list_select_related = ("collection",)

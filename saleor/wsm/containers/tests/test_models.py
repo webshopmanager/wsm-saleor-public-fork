@@ -148,6 +148,62 @@ def test_stamping_leaves_other_metadata_alone(collection, product_list):
     assert SERIES_METADATA_KEY in collection.metadata
 
 
+# --- deleting the editor's row clears what it published ----------------------
+
+
+def test_deleting_a_series_clears_the_blob(collection, product_list):
+    """The row is the editor and the blob is its output, so the blob cannot outlive it.
+
+    A row deleted with the blob left behind is the second authority the review
+    called out: the collection page and the indexer would keep rendering a
+    series that no longer exists anywhere a merchant can see.
+    """
+    collection.products.add(*product_list[:2])
+    series = series_for(collection)
+    series.save()
+    collection.refresh_from_db()
+    assert SERIES_METADATA_KEY in collection.metadata
+
+    series.delete()
+
+    collection.refresh_from_db()
+    # Absent, not empty: "no series" to a reader is a missing key. An empty blob
+    # would be a series that exists and answers nothing.
+    assert SERIES_METADATA_KEY not in collection.metadata
+
+
+def test_queryset_delete_clears_the_blob_of_every_row(
+    collection, collection_list, product_list
+):
+    """`delete()` on a queryset skips the model's, which is also the admin's bulk path."""
+    collections = [collection, collection_list[0]]
+    for each in collections:
+        each.products.add(*product_list[:2])
+        series_for(each).save()
+        each.refresh_from_db()
+        assert SERIES_METADATA_KEY in each.metadata
+
+    SeriesConfig.objects.filter(collection__in=collections).delete()
+
+    for each in collections:
+        each.refresh_from_db()
+        assert SERIES_METADATA_KEY not in each.metadata
+
+
+def test_deleting_a_series_leaves_other_metadata_alone(collection, product_list):
+    """We clear our key, never the collection's metadata."""
+    collection.store_value_in_metadata({"someone.elses": "key"})
+    collection.save(update_fields=["metadata"])
+    collection.products.add(*product_list[:2])
+    series = series_for(collection)
+    series.save()
+
+    series.delete()
+
+    collection.refresh_from_db()
+    assert collection.metadata == {"someone.elses": "key"}
+
+
 def test_the_merchant_screens_register(db):
     """The screens are on the ONE AdminSite the compose unit mounts at /admin/.
 

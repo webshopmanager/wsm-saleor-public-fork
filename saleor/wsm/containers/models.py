@@ -11,13 +11,19 @@ Series facts reach the storefront and the search engine through the Collection's
 own metadata under `wsm.series`, written by `SeriesConfig.save`. That is the
 stock metadata API on a stock object, so nothing new has to be added to the
 GraphQL schema for a collection page to render a series.
+
+`SeriesConfig` is the ONE series editor (Dana, 2026-09-09). The `wsm.series`
+blob is DERIVED OUTPUT of the row and nothing else: every write door restamps
+it, every delete door clears it, and it is never edited by hand. A blob written
+by any other hand is overwritten by the next save of the row, by design; that is
+what makes the row and the blob one authority instead of two.
 """
 
 import json
 
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import models, transaction
 
 from . import pricing
 
@@ -80,14 +86,49 @@ class SeriesConfigQuerySet(models.QuerySet):
             config.stamp_collection()
         return created
 
+    def delete(self, *args, **kwargs):
+        """A deleted series leaves no blob behind, including the admin's bulk action.
+
+        `delete_selected`, the only way a merchant removes more than one row,
+        calls `ModelAdmin.delete_queryset` which calls this. The collections are
+        read BEFORE the rows go, because afterwards there is nothing left to
+        join to, and the clear rides in the same transaction as the delete so a
+        failed delete cannot leave a live series with no row behind it.
+        """
+        collections = [config.collection for config in self.select_related("collection")]
+        with transaction.atomic():
+            deleted = super().delete(*args, **kwargs)
+            for collection in collections:
+                unstamp_collection(collection)
+        return deleted
+
     def stamp(self):
         """One query for the rows with their collections, one write per collection."""
         for config in self.select_related("collection"):
             config.stamp_collection()
 
 
+def unstamp_collection(collection):
+    """Take the series off a Collection: the KEY GOES, it is not blanked.
+
+    Absent means no series to every reader we do not own; an empty or falsy blob
+    would be a series that exists and answers nothing. One write.
+    """
+    if SERIES_METADATA_KEY not in collection.metadata:
+        return
+    collection.delete_value_from_metadata(SERIES_METADATA_KEY)
+    collection.save(update_fields=["metadata"])
+
+
 class SeriesConfig(models.Model):
-    """What a Collection needs to behave as a series: one brand, and the axes."""
+    """The ONE series editor. The Collection's `wsm.series` blob is its output.
+
+    Ruled by Dana on 2026-09-09: this row is where a series is created, changed
+    and deleted; the blob is derived and never hand-edited. So the stamp on save
+    is unconditional (a stale blob can never win, whoever wrote it), and
+    deleting the row clears the key rather than blanking it, because absent is
+    what the storefront and the indexer read as "no series".
+    """
 
     collection = models.OneToOneField(
         "product.Collection",
@@ -212,12 +253,24 @@ class SeriesConfig(models.Model):
         super().save(*args, **kwargs)
         self.stamp_collection()
 
+    def delete(self, *args, **kwargs):
+        """Deleting the editor's row deletes what it published. Same transaction."""
+        collection = self.collection
+        with transaction.atomic():
+            deleted = super().delete(*args, **kwargs)
+            unstamp_collection(collection)
+        return deleted
+
     def stamp_collection(self):
         """Publish the series facts on the Collection, for readers we do not own.
 
         The storefront's collection page and the search indexer both read this;
         neither gets a new GraphQL field, because Saleor already returns a
         Collection's metadata.
+
+        Unconditional on purpose: the row is the authority, so this overwrites
+        whatever the key held, and the blob is never merged with, diffed
+        against, or read back.
         """
         self.collection.store_value_in_metadata(
             {

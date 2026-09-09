@@ -31,6 +31,7 @@ from django.db.models import (
 )
 from django.urls import URLResolver, reverse
 from django.utils.html import format_html, format_html_join
+from django.utils.text import capfirst
 from django.utils.safestring import mark_safe
 
 from ...core.db.connection import allow_writer
@@ -298,6 +299,41 @@ class ComposeAdminSite(admin.AdminSite):
 site = ComposeAdminSite(name="wsm")
 
 
+class EmptyStateMixin:
+    """A list with nothing in it says what the thing IS and how to make one.
+
+    The merchant walk of 2026-09-08 opened Fees and Kits on a store that has
+    none of either and got a heading, a search box, a filter sidebar and the
+    words "0 fees". Nothing on the screen said what a fee is, so a merchant who
+    does not already know cannot tell an empty feature from a missing one.
+
+    Django has no hook for this: `empty_value_display` is about an empty CELL.
+    The decision of whether the table is REALLY empty is made here, in Python,
+    where the search term and the filters can be read, and the template stays a
+    template. A search that matched nothing is not this state and Django
+    already words it.
+    """
+
+    change_list_template = "wsm/admin/change_list_empty_state.html"
+    # (what is missing, what the thing is, the label on the one link)
+    empty_state: tuple[str, ...] = ()
+
+    def changelist_view(self, request, extra_context=None):
+        response = super().changelist_view(request, extra_context)
+        changelist = getattr(response, "context_data", {}).get("cl")
+        if (
+            self.empty_state
+            and changelist is not None
+            and changelist.result_count == 0
+            and not changelist.query
+            and not changelist.get_filters_params()
+        ):
+            response.context_data["wsm_empty_state"] = self.empty_state
+            # Django's "Select kit to change" contradicts "No kits yet."
+            response.context_data["title"] = capfirst(self.opts.verbose_name_plural)
+        return response
+
+
 class WsmAdminMixin:
     """Saleor's User has no `has_module_perms`, so the admin cannot ask for one.
 
@@ -550,7 +586,9 @@ class OptionValueAdmin(WsmAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(Fee, site=site)
-class FeeAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
+class FeeAdmin(
+    EmptyStateMixin, ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin
+):
     """A charge, in a merchant's words. See FeeForm for the labels.
 
     The hidden variant is created by the first configured add, never by hand, so
@@ -559,6 +597,12 @@ class FeeAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
     """
 
     form = FeeForm
+    empty_state = (
+        "No fees yet.",
+        "A fee is a charge added to a product at checkout, such as crating or "
+        "a core charge.",
+        "Add the first one",
+    )
     list_display = (
         "product_name",
         "label",

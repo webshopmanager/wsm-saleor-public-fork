@@ -25,7 +25,7 @@ from ...attribute import AttributeType
 from ...attribute.models import Attribute
 from ...product.models import Product
 from ..admin_pickers import PickerLabelMixin
-from ..compose.admin import WsmAdminMixin
+from ..compose.admin import EmptyStateMixin, WsmAdminMixin
 from ..compose.admin import site as merchant_site
 from . import pricing
 from .models import KitConfig, KitMember, SeriesConfig
@@ -184,7 +184,15 @@ class KitMemberInline(PickerLabelMixin, WsmAdminMixin, admin.TabularInline):
     autocomplete_fields = ("variant",)
 
 
-class KitConfigAdmin(PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin):
+class KitConfigAdmin(
+    EmptyStateMixin, PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin
+):
+    empty_state = (
+        "No kits yet.",
+        "A kit is a collection of products sold as one, priced at the sum of "
+        "its parts or at a saving you set.",
+        "Add the first one",
+    )
     list_display = ("collection_name", "saving", "active")
     list_filter = ("active", "discount_kind")
     list_select_related = ("collection",)

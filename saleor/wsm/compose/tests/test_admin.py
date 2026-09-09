@@ -506,3 +506,70 @@ def test_the_picker_still_orders_by_name_with_nothing_to_rank(
 
     texts = [result["text"] for result in response.json()["results"]]
     assert texts == ["Aaa Truxedo Lo Pro", "Zzz Truxedo Sentry"]
+
+
+# --- a list with nothing in it -----------------------------------------------
+
+FEES = "/admin/wsm_compose/fee/"
+
+
+@pytest.mark.django_db
+def test_an_empty_fee_list_says_what_a_fee_is(client, merchant):
+    """"0 fees" over a search box and a filter sidebar teaches a merchant
+    nothing about whether the feature is empty or missing.
+    """
+    client.force_login(merchant, backend=BACKEND)
+
+    body = client.get(FEES).content.decode()
+
+    assert "No fees yet." in body
+    assert "such as crating or a core charge" in body
+    assert 'href="/admin/wsm_compose/fee/add/"' in body
+
+
+@pytest.mark.django_db
+def test_the_empty_fee_list_hides_what_there_is_nothing_to_narrow(client, merchant):
+    client.force_login(merchant, backend=BACKEND)
+
+    body = client.get(FEES).content.decode()
+
+    assert 'id="searchbar"' not in body
+
+
+@pytest.mark.django_db
+def test_the_empty_fee_list_is_not_headed_select_fee_to_change(client, merchant):
+    """Django's stock heading asks the merchant to select one of nothing."""
+    client.force_login(merchant, backend=BACKEND)
+
+    body = client.get(FEES).content.decode()
+
+    assert "Select fee to change" not in body
+    assert "<h1>Fees</h1>" in body
+
+
+@pytest.mark.django_db
+def test_a_fee_list_with_a_fee_in_it_is_the_ordinary_list(
+    client, merchant, product
+):
+    client.force_login(merchant, backend=BACKEND)
+    Fee.objects.create(product=product, label="Freight crating", amount=Decimal("149"))
+
+    body = client.get(FEES).content.decode()
+
+    assert "No fees yet." not in body
+    assert "Freight crating" in body
+    assert 'id="searchbar"' in body
+
+
+@pytest.mark.django_db
+def test_a_search_that_found_nothing_is_not_an_empty_list(
+    client, merchant, product
+):
+    """Django already words this one, and it is a different sentence."""
+    client.force_login(merchant, backend=BACKEND)
+    Fee.objects.create(product=product, label="Freight crating", amount=Decimal("149"))
+
+    body = client.get(FEES, {"q": "nothing matches this"}).content.decode()
+
+    assert "No fees yet." not in body
+    assert 'id="searchbar"' in body

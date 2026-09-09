@@ -365,3 +365,23 @@ def test_the_axes_help_no_longer_sends_the_merchant_to_another_application(
 
     assert "Configuration, Attributes" not in help_text
     assert "slug" not in help_text.lower()
+
+
+def test_an_empty_kit_list_says_what_a_kit_is(merchant):
+    """The walk's screenshot of this list read "0 kits" and nothing else."""
+    body = merchant.get("/admin/wsm_containers/kitconfig/").content.decode()
+
+    assert "No kits yet." in body
+    assert "sold as one" in body
+    assert 'href="/admin/wsm_containers/kitconfig/add/"' in body
+
+
+def test_a_kit_list_with_a_kit_in_it_is_the_ordinary_list(merchant, collection):
+    from ..models import KitConfig
+
+    KitConfig.objects.create(collection=collection)
+
+    body = merchant.get("/admin/wsm_containers/kitconfig/").content.decode()
+
+    assert "No kits yet." not in body
+    assert collection.name in body

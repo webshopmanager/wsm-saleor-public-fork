@@ -483,3 +483,31 @@ def minimum_configured_cents(base_unit_cents: int, option_sets) -> int:
         else:
             floor += min(min(deltas), 0)
     return floor
+
+
+def minimum_line_cents(base_unit_cents: int, option_sets, fees=()) -> int:
+    """The lowest total one of these can actually be bought for: the FLOOR.
+
+    `minimum_configured_cents` above is the cheapest configured UNIT. This adds
+    the charges that come with it whether the shopper wants them or not, which
+    is what makes the answer a price a shopper can be quoted rather than a price
+    they can never reach: a product whose crating charge is always on has no
+    listing at its base price.
+
+    Declinable fees add nothing, for the same reason an optional option set adds
+    nothing: the shopper can say no, so the lowest price anyone pays excludes
+    them. A percent fee computes on the cheapest subtotal through the SAME
+    `_apply_fees` that checkout charges through, never a second formula, so the
+    quoted floor and the charged line can never round apart.
+
+    Quantity one, because a floor is a "from" price on one item, and at
+    quantity one a per-unit fee and a per-line fee are the same money.
+
+    Unlike `price_configured` this never refuses: a catalog that prices to
+    nothing is a merchant defect the admin already blocks, and the stamp's job
+    is to report what the rows say, not to gate on them. The caller decides what
+    to do with a floor at or below zero.
+    """
+    unit = minimum_configured_cents(base_unit_cents, option_sets)
+    _, fee_total = _apply_fees(fees, (), unit, 1)
+    return unit + fee_total

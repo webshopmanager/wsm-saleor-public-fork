@@ -57,7 +57,14 @@ from django.utils.text import slugify
 from .....product.models import Product, ProductVariant
 from ....dealer.models import DealerGroup, TierPrice
 from ... import pricing
-from ...models import DealerTierOptionPrice, Fee, OptionSet, OptionValue
+from ...models import (
+    PRICE_FLOOR_METAFIELD,
+    DealerTierOptionPrice,
+    Fee,
+    OptionSet,
+    OptionValue,
+    sync_product_stamps,
+)
 
 # The product metafield the PDP configurator gates on. The storefront asks a
 # product nothing without it, so an imported product that carries a set and not
@@ -366,20 +373,31 @@ def apply(payload, *, channel_slug, include_hidden=False, image_base="", dry_run
                 report,
             )
 
-        _import_fees(payload["fees"], by_sku, report)
+        # A product whose only Compose row is a charge is configurable too, and
+        # its floor is the base plus that charge, so it belongs in the stamping
+        # pass below even when it carries no question.
+        configurable |= _import_fees(payload["fees"], by_sku, report)
         _import_tier_prices(
             payload["tier_prices"], by_sku, groups, price_groups, report
         )
 
         # Product is a core Saleor model and its rules are Saleor's, not ours:
         # full_clean() here would judge a catalog this import did not write.
+        #
+        # Both public stamps in one pass, through the same function the admin
+        # save paths use, so an imported catalog and a hand-built one can never
+        # carry a different answer. It runs even for a product this import
+        # changed nothing on, because the FLOOR also moves when the product's
+        # base price moves, and this is the moment we already have the row.
         for product in Product.objects.filter(pk__in=configurable):
-            if product.metadata.get(CONFIGURABLE_METAFIELD) == CONFIGURABLE_VALUE:
-                report.bump("metafield_unchanged")
-                continue
-            product.metadata[CONFIGURABLE_METAFIELD] = CONFIGURABLE_VALUE
-            product.save(update_fields=["metadata"])
-            report.bump("metafield_written")
+            changed = sync_product_stamps(product.pk, product=product)
+            report.bump(
+                "metafield_written"
+                if CONFIGURABLE_METAFIELD in changed
+                else "metafield_unchanged"
+            )
+            if PRICE_FLOOR_METAFIELD in changed:
+                report.bump("price_floor_written")
 
         if dry_run:
             transaction.set_rollback(True)
@@ -474,11 +492,14 @@ def _import_values(option_set, rows, price_groups, image_base, report):
 
 
 def _import_fees(rows, by_sku, report):
+    """Write the charges, and return the products that now carry one."""
+    touched = set()
     for row in rows:
         product_id = by_sku.get(row["sku"])
         if product_id is None:
             report.bump("fees_unmatched")
             continue
+        touched.add(product_id)
         fields = {
             "sku": row.get("fee_sku") or "",
             "basis": pricing.FIXED,
@@ -504,6 +525,7 @@ def _import_fees(rows, by_sku, report):
                 report.bump("fees_updated")
         else:
             report.bump("fees_unchanged")
+    return touched
 
 
 def _import_tier_prices(rows, by_sku, groups, price_groups, report):

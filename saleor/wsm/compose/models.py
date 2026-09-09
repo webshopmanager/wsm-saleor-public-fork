@@ -6,14 +6,19 @@ app label, which is where the `wsm_compose_` name prefix comes from: Django's
 default table naming already carries it, so no model spells out a db_table.
 """
 
+import json
+import logging
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Min
 from django.db.models.signals import post_delete, post_save
 
 from .. import money
 from . import pricing
+
+logger = logging.getLogger(__name__)
 
 # What a merchant reads for each stored value. The value itself is the
 # storefront's contract and never moves; only the wording does. Kept derived
@@ -486,54 +491,199 @@ class OptionValue(models.Model):
 
 # The product metafield the PDP configurator gates on: the storefront asks a
 # product nothing without it (design doc, section 2). The 5.0 importer has its
-# own copy of these two strings and is not ours to edit in this wave;
-# `test_the_importer_and_the_signal_agree_on_the_marker` is what keeps the two
-# from drifting apart.
+# own copy of these two strings; `test_the_importer_and_the_admin_write_the_same_marker`
+# is what keeps the two from drifting apart.
 CONFIGURABLE_METAFIELD = "compose.configurable"
 CONFIGURABLE_VALUE = "true"
 
+# The lowest price a shopper can actually pay for this product, per channel.
+# Public, derived, and never read on a shopper path: see the design doc,
+# "Price floor stamp".
+PRICE_FLOOR_METAFIELD = "wsm.price_floor"
 
-def sync_configurable_marker(product_id) -> None:
-    """Make the marker equal to "this product has configuration on it".
 
-    Only `import_option_sets_50` ever wrote it, so a merchant who built a
-    question or a charge in /admin/ got a working set, a working price and a PDP
-    that asked nothing: the one screen the whole feature is for. Deleting the
-    last set had the mirror defect, leaving a configurator that asks nothing on
-    a product the storefront still treats as configurable.
+def _channel_bases(product_id):
+    """Every channel this product is priced in, with its cheapest listed price.
 
-    Fees count as configuration on their own. A product whose only Compose row
-    is a declinable crating charge still has something the PDP has to put in
-    front of the shopper.
+    One query, grouped in the database. Per channel because a base price is per
+    channel: a product listed in four channels has four floors, and a "from"
+    price quoted in the wrong currency is worse than no price at all. Cheapest
+    across the product's variants for the same reason `cheapest_listed_cents`
+    takes the lowest: a floor is the worst case, and a configurable product has
+    one variant anyway (Dana, 2026-09-05, an option value is never a variant).
 
-    Two to four queries, on a path a merchant drives by hand. Nothing on any
-    read, pricing or checkout path calls this.
+    A channel the product is not priced in is simply absent, so a half-built
+    catalog stamps nothing for it rather than stamping a zero.
+    """
+    from ...product.models import ProductVariantChannelListing
+
+    rows = (
+        ProductVariantChannelListing.objects.filter(
+            variant__product_id=product_id, price_amount__isnull=False
+        )
+        .values("channel__slug", "channel__currency_code")
+        .annotate(base=Min("price_amount"))
+    )
+    return {
+        row["channel__slug"]: (to_cents(row["base"]), row["channel__currency_code"])
+        for row in rows
+    }
+
+
+def _floor_option_sets(product_id):
+    """This product's questions as the pricing engine reads them, at RETAIL.
+
+    Two queries. Deliberately not `OptionSet.to_pricing()`, which reads each
+    value's tier rows: a retail floor never looks at one, and reading them would
+    buy a query per value for numbers this answer throws away. Dealer tiers are
+    private to the dealer path and are never in a public stamp.
+    """
+    return [
+        pricing.OptionSet(
+            id=option_set.pk,
+            prompt_type=option_set.prompt_type,
+            required=option_set.required,
+            values=tuple(_floor_value(v) for v in option_set.values.all()),
+        )
+        for option_set in OptionSet.objects.filter(
+            product_id=product_id
+        ).prefetch_related("values")
+    ]
+
+
+def price_floor_by_channel(product_id, *, option_sets=None, fees=None) -> dict:
+    """The lowest price a shopper can actually pay, per channel slug.
+
+    Empty when there is nothing worth stamping: no priced listing anywhere, or
+    no configuration at all. A product carrying only DECLINABLE charges is in
+    that second case on purpose, because its floor is its base price and the
+    base price is already on the listing: a stamp that repeats it is a second
+    copy of a number to go stale.
+
+    Amounts are two-decimal strings in the channel's own currency, computed in
+    integer cents through `pricing.minimum_line_cents` so they round exactly the
+    way checkout rounds. Never a float: 493.24 as a float is 493.2399999999998,
+    and a feed reading this is quoting money.
+    """
+    if option_sets is None:
+        option_sets = _floor_option_sets(product_id)
+    if fees is None:
+        fees = [f.to_pricing() for f in Fee.objects.filter(product_id=product_id)]
+    if not option_sets and not any(f.required for f in fees):
+        return {}
+
+    floor = {}
+    for slug, (base_cents, currency) in _channel_bases(product_id).items():
+        cents = pricing.minimum_line_cents(base_cents, option_sets, fees)
+        if cents < 0:
+            # The admin refuses a save that does this and `pricing.delta_for`
+            # refuses to charge it, so reaching here means rows written around
+            # both. Stamped at zero rather than negative, because a negative
+            # "from" price is a feed rejection and a broken PLP, and said out
+            # loud so the product can be found.
+            logger.warning(
+                "wsm.price_floor: product %s in channel %s floors at %s cents, "
+                "which is below zero; stamping 0.00. Its required credits are "
+                "deeper than its base price.",
+                product_id,
+                slug,
+                cents,
+            )
+            cents = 0
+        floor[slug] = {
+            "amount": str(Decimal(cents).scaleb(-2)),
+            "currency": currency,
+        }
+    return floor
+
+
+def sync_product_stamps(product_id, product=None) -> set:
+    """Make both of this product's public stamps equal to what its rows say.
+
+    `compose.configurable` gates the PDP configurator: the storefront asks a
+    product nothing without it, so a merchant who built a question or a charge
+    in /admin/ used to get a working set, a working price and a PDP that asked
+    nothing. `wsm.price_floor` is the lowest price a shopper can actually pay,
+    which a $0 base configurable product has no other way to report: Google
+    Merchant Center suspends a feed on a zero price, and a PLP tile with no
+    number is not a tile anyone clicks.
+
+    ONE function and ONE write for both, because every door that can move one
+    can move the other, and two hooks on the same save paths would be two reads
+    and two UPDATEs of one column.
+
+    Index-time denormalization, Dana's standing rule: the floor is computed here
+    on a merchant save and stamped, never computed on a shopper read. Nothing on
+    any read, pricing or checkout path calls this.
+
+    Returns the metadata keys that changed, which is what the importer reports
+    and what makes a no-op run provably free of writes.
     """
     if not product_id:
-        return
+        return set()
     from ...product.models import Product
 
-    product = Product.objects.filter(pk=product_id).only("id", "metadata").first()
+    if product is None:
+        product = Product.objects.filter(pk=product_id).only("id", "metadata").first()
     if product is None:
         # A cascading product delete takes its sets with it, and the row is
         # already gone by the time this runs.
-        return
-    configurable = (
-        OptionSet.objects.filter(product_id=product_id).exists()
-        or Fee.objects.filter(product_id=product_id).exists()
+        return set()
+
+    option_sets = _floor_option_sets(product_id)
+    fees = [f.to_pricing() for f in Fee.objects.filter(product_id=product_id)]
+    changed = set()
+
+    # Fees count as configuration on their own. A product whose only Compose row
+    # is a declinable crating charge still has something the PDP has to put in
+    # front of the shopper.
+    configurable = bool(option_sets or fees)
+    if configurable != (
+        product.metadata.get(CONFIGURABLE_METAFIELD) == CONFIGURABLE_VALUE
+    ):
+        if configurable:
+            product.metadata[CONFIGURABLE_METAFIELD] = CONFIGURABLE_VALUE
+        else:
+            product.metadata.pop(CONFIGURABLE_METAFIELD, None)
+        changed.add(CONFIGURABLE_METAFIELD)
+
+    # A JSON STRING, not a dict, because that is what a metadata value is:
+    # GraphQL types `MetadataItem.value` as String, so a dict reaches every
+    # consumer as a Python repr with single quotes, which no JSON parser reads.
+    # `wsm.series` on a Collection is stamped the same way for the same reason.
+    floor = price_floor_by_channel(product_id, option_sets=option_sets, fees=fees)
+    blob = json.dumps(floor, sort_keys=True) if floor else None
+    if blob != product.metadata.get(PRICE_FLOOR_METAFIELD):
+        if blob is None:
+            # Absent, never empty: a reader takes a missing key as "no floor",
+            # where an empty object is a floor that answers nothing.
+            product.metadata.pop(PRICE_FLOOR_METAFIELD, None)
+        else:
+            product.metadata[PRICE_FLOOR_METAFIELD] = blob
+        changed.add(PRICE_FLOOR_METAFIELD)
+
+    if changed:
+        product.save(update_fields=["metadata"])
+    return changed
+
+
+def _sync_stamps_from(sender, instance, **kwargs):
+    sync_product_stamps(instance.product_id)
+
+
+def _sync_stamps_from_value(sender, instance, **kwargs):
+    """An option value moves the floor without touching the marker.
+
+    Its product is one join away, and on a cascading delete of the question the
+    row it points at may already be gone, so this asks for the id and takes
+    nothing when the answer is nothing.
+    """
+    product_id = (
+        OptionSet.objects.filter(pk=instance.option_set_id)
+        .values_list("product_id", flat=True)
+        .first()
     )
-    current = product.metadata.get(CONFIGURABLE_METAFIELD)
-    if configurable == (current == CONFIGURABLE_VALUE):
-        return
-    if configurable:
-        product.metadata[CONFIGURABLE_METAFIELD] = CONFIGURABLE_VALUE
-    else:
-        product.metadata.pop(CONFIGURABLE_METAFIELD, None)
-    product.save(update_fields=["metadata"])
-
-
-def _sync_marker_from(sender, instance, **kwargs):
-    sync_configurable_marker(instance.product_id)
+    sync_product_stamps(product_id)
 
 
 class DealerTierOptionPrice(models.Model):
@@ -887,14 +1037,27 @@ def _ensure_fee_variant(fee, channel):
 
 # Every door that adds or removes configuration, not just `save()`: the admin
 # deletes through a queryset, which skips `Model.delete` and fires this.
-for _sender in (OptionSet, Fee):
+#
+# OptionValue is here for the floor alone. It cannot change whether a product is
+# configurable, but the cheapest answer to a required question IS the floor, so
+# a merchant who edits one price and nothing else has to leave a current stamp
+# behind. The admin's value inline saves each row through `save()`, so this is
+# the one hook that covers the screen a merchant actually uses.
+#
+# DealerTierOptionPrice is deliberately NOT here: the stamp is retail only, and
+# a tier row moves no retail number.
+for _sender, _receiver in (
+    (OptionSet, _sync_stamps_from),
+    (Fee, _sync_stamps_from),
+    (OptionValue, _sync_stamps_from_value),
+):
     post_save.connect(
-        _sync_marker_from,
+        _receiver,
         sender=_sender,
-        dispatch_uid=f"wsm_compose.configurable_marker.save.{_sender.__name__}",
+        dispatch_uid=f"wsm_compose.product_stamps.save.{_sender.__name__}",
     )
     post_delete.connect(
-        _sync_marker_from,
+        _receiver,
         sender=_sender,
-        dispatch_uid=f"wsm_compose.configurable_marker.delete.{_sender.__name__}",
+        dispatch_uid=f"wsm_compose.product_stamps.delete.{_sender.__name__}",
     )

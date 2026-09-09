@@ -585,8 +585,11 @@ class ProductCompliance(models.Model):
     )
 
     class Meta:
-        verbose_name = "product compliance"
-        verbose_name_plural = "product compliance rows"
+        # Singular and plural read the way Django uses them: the plural is the
+        # console's nav item and page heading, the singular is the "Add" button
+        # and the row count under the list.
+        verbose_name = "product compliance row"
+        verbose_name_plural = "product compliance"
 
     def __str__(self):
         return f"{self.product.name}: compliance"

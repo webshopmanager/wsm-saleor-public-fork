@@ -127,7 +127,8 @@ def test_dealer_line_sets_price_override_and_metadata(
     line = CheckoutLine.objects.get(checkout_id=checkout.pk)
     assert line.price_override == Decimal("8.00")
     assert line.price_override_reason == PRICE_OVERRIDE_REASON
-    assert json.loads(line.metadata[LINE_METADATA_KEY]) == {
+    assert LINE_METADATA_KEY not in line.metadata, "a pricing input is never public"
+    assert json.loads(line.private_metadata[LINE_METADATA_KEY]) == {
         "group": "dealer-1",
         "minQuantity": 5,
     }
@@ -180,7 +181,7 @@ def test_a_shopper_who_is_not_a_dealer_gets_a_retail_line(
     assert response.json()["dealerPrice"] is None
     line = CheckoutLine.objects.get(checkout_id=checkout.pk)
     assert line.price_override is None
-    assert LINE_METADATA_KEY not in line.metadata
+    assert LINE_METADATA_KEY not in line.private_metadata
 
 
 def test_reprice_clears_the_override_when_the_quantity_falls_to_retail(
@@ -209,7 +210,7 @@ def test_reprice_clears_the_override_when_the_quantity_falls_to_retail(
     line.refresh_from_db()
     assert line.price_override is None
     assert line.price_override_reason is None
-    assert LINE_METADATA_KEY not in line.metadata
+    assert LINE_METADATA_KEY not in line.private_metadata
 
     # Idempotent: the answer is a function of the line and the catalog.
     assert post(client, REPRICE_URL, body).json() == first.json()
@@ -234,7 +235,7 @@ def test_reprice_puts_the_override_back_when_the_quantity_reaches_a_break(
     assert response.json()["dealerPrice"] == "7.00"
     line.refresh_from_db()
     assert line.price_override == Decimal("7.00")
-    assert json.loads(line.metadata[LINE_METADATA_KEY])["minQuantity"] == 10
+    assert json.loads(line.private_metadata[LINE_METADATA_KEY])["minQuantity"] == 10
 
 
 def test_a_dealer_add_expires_the_checkout_prices(

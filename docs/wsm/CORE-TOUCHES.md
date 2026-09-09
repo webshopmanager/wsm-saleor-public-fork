@@ -301,6 +301,48 @@ Removal cost: delete the line, the decorator and `saleor/wsm/http.py`.
 Expected: zero. Actual: **two**, in U3 and U7. Every entry names the exact
 function it replaces and the upstream change that would delete it.
 
+## Where the stamps live: PRIVATE metadata, always (review wave WW1, 2026-09-08)
+
+All three patches decide what to do with a line by reading a `wsm.*` key off it.
+Every one of those keys lives in `private_metadata`, written only by the five
+key-gated endpoints and by MP3 itself, and none of the three ever reads the
+public copy.
+
+**The exploit, before this.** `saleor/graphql/meta/permissions.py` maps
+`CheckoutLine` PUBLIC metadata to `no_permissions`: any caller can
+`updateMetadata` a line in a checkout they hold the token for, which is their
+own cart, with no key, no login and no account. The stamps were public, so a
+shopper could write `wsm.dealer` = `{"group": "..."}` onto their own line and
+MP3's anonymous branch would price it against that group's ladder. Measured
+live: a 10.00 line came back at 1.00. Group codes are short, guessable, and
+leak through the storefront anyway. The same key inverted the other way: a real
+dealer could DELETE it and stack a voucher on top of a tier price, because MP1
+and MP2 find a dealer line by the presence of that key.
+
+**After.** The authority copy is private, and `PRIVATE_META_PERMISSION_MAP`
+gates `CheckoutLine` behind `MANAGE_CHECKOUTS`. The forgery still SUCCEEDS as a
+mutation (refusing it would mean editing a core permission map, and B8 says
+zero core table edits and a minimum core footprint), it just buys nothing: MP3
+prices from the private copy, and reprice deletes the forged public key on the
+way past so it cannot mislead a support screen or ride into the order.
+`create_order_from_checkout` copies private metadata onto the order line, so
+MP2 still finds the stamp after completion.
+
+**The public copies that remain are display.** The storefront cart and order
+screens pair fee lines to parents and render chosen options off public line
+metadata (`wsm-storefront src/lib/composeFee.ts`, `src/lib/order-grouping.ts`),
+and acceptance bar B6 is "no storefront code". So `compose.fee`,
+`compose.parent_line`, `wsm.options`, `wsm.options.sku`, `wsm.options.cid`,
+`wsm.options.acc`, `bundle_kit_group_id` and `wsm.kit` are written to BOTH, and
+the money path reads only the private one. Forging a public copy changes what
+your own cart draws and no number anywhere. `wsm.dealer` has no storefront
+reader and therefore has no public copy at all.
+
+**Verified by** `test_a_dealer_stamp_a_shopper_wrote_for_themselves_buys_nothing`
+in `saleor/wsm/tests/test_reprice.py`, which drives the forgery through the
+stock `updateMetadata` mutation unauthenticated, asserts the mutation is
+accepted, and then asserts the price does not move.
+
 ## MP1. Dealer lines are excluded from checkout line discounts
 
 Installed by `saleor/wsm/dealer/apps.py` `DealerConfig.ready()`; the whole patch
@@ -309,7 +351,7 @@ reimplemented: each wrapper calls the original with a smaller list of lines.
 
 | Replaced function | Module | What the wrapper does |
 |---|---|---|
-| `attach_voucher_to_line_info(voucher_info, lines_info)` | `saleor/discount/utils/voucher.py` | Runs the original, then clears `voucher` and `voucher_code` from any line info whose line carries the `wsm.dealer` metadata key. |
+| `attach_voucher_to_line_info(voucher_info, lines_info)` | `saleor/discount/utils/voucher.py` | Runs the original, then clears `voucher` and `voucher_code` from any line info whose line carries the private `wsm.dealer` stamp. |
 | `prepare_checkout_line_discount_objects_for_catalogue_promotions(lines_info)` | `saleor/discount/utils/checkout.py` | Calls the original with the retail lines only, and adds any catalogue discount already sitting on a dealer line to the returned removal list. |
 
 The voucher function is rebound in every module that holds it as its own
@@ -530,7 +572,7 @@ that says so.
 ### Cost
 
 A checkout holding no wsm-owned line costs **zero queries**: `_classify` decides
-from metadata already loaded onto `CheckoutLineInfo`. One that does costs, for
+from the private metadata already loaded onto `CheckoutLineInfo`. One that does costs, for
 the WHOLE checkout and not per line: one dealer-ladder query, one option-set
 query, one fee query, one buyer-group query, and one `bulk_update` only when a
 number actually moved. The wrapper reproduces the original's `price_expiration`

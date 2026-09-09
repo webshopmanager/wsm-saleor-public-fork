@@ -27,7 +27,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from ...checkout.fetch import fetch_checkout_info, fetch_checkout_lines
-from ...checkout.models import Checkout
+from ...checkout.models import Checkout, CheckoutLine
 from ...checkout.utils import add_variants_to_checkout, invalidate_checkout
 from ...core.db.connection import allow_writer
 from ...core.utils.metadata_manager import MetadataItem
@@ -49,6 +49,13 @@ META_FEE = "compose.fee"
 META_PARENT = "compose.parent_line"
 
 PRICE_OVERRIDE_REASON = "wsm.compose"
+
+# The keys MP3 prices from. Their authority copy is written to PRIVATE metadata
+# (stock Saleor lets any unauthenticated caller write PUBLIC line metadata:
+# saleor/graphql/meta/permissions.py maps CheckoutLine to `no_permissions`), and
+# the public copies above stay because the storefront cart and order screens
+# read them for display and B6 is "no storefront code".
+PRICED_FROM = (META_OPTIONS, META_CID, META_ACCEPTED, META_FEE, META_PARENT)
 
 
 def _money(cents: int) -> str:
@@ -292,6 +299,7 @@ def configured_line(request):
     fees_by_id = {f.pk: f for f in fees}
 
     variants = [variant]
+    stamps_by_variant = {}
     lines_data = [
         CheckoutLineData(
             variant_id=str(variant.pk),
@@ -311,6 +319,11 @@ def configured_line(request):
             ],
         )
     ]
+    stamps_by_variant[variant.pk] = {
+        item.key: item.value
+        for item in lines_data[0].metadata_list
+        if item.key in PRICED_FROM
+    }
 
     for fee_id, row in sorted(charged.items()):
         fee = fees_by_id[fee_id]
@@ -349,6 +362,11 @@ def configured_line(request):
                 ],
             )
         )
+        stamps_by_variant[fee_variant.pk] = {
+            item.key: item.value
+            for item in lines_data[-1].metadata_list
+            if item.key in PRICED_FROM
+        }
 
     manager = get_plugins_manager(allow_replica=False)
     checkout_info = fetch_checkout_info(checkout, [], manager)
@@ -385,6 +403,18 @@ def configured_line(request):
 
     lines, _ = fetch_checkout_lines(checkout)
     checkout_info.lines = lines
+    # `add_variants_to_checkout` only ever stores `metadata_list` publicly, so
+    # the copy MP3 actually prices from is written here, on the lines this
+    # request just wrote, and on no others: promoting whatever happens to be in
+    # a line's public metadata would honour exactly the forgery this closes.
+    stamped = []
+    for info in lines:
+        values = stamps_by_variant.get(info.line.variant_id)
+        if values:
+            info.line.store_value_in_private_metadata(values)
+            stamped.append(info.line)
+    if stamped:
+        CheckoutLine.objects.bulk_update(stamped, ["private_metadata"])
 
     invalidate_checkout(checkout_info, lines, manager, save=True)
 

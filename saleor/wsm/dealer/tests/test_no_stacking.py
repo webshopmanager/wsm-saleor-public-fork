@@ -67,7 +67,7 @@ def checkout_with_a_dealer_line_and_a_retail_line(
         price_override=Decimal("8.00"),
         price_override_reason=PRICE_OVERRIDE_REASON,
         undiscounted_unit_price_amount=Decimal("8.00"),
-        metadata={
+        private_metadata={
             LINE_METADATA_KEY: json.dumps({"group": "dealer-1", "minQuantity": 1})
         },
     )
@@ -123,8 +123,8 @@ def test_no_row_means_the_toggle_is_off(db):
 
 
 class _Line:
-    def __init__(self, metadata, discounts=()):
-        self.metadata = metadata
+    def __init__(self, stamps, discounts=()):
+        self.private_metadata = stamps
         self._discounts = list(discounts)
 
 
@@ -217,7 +217,7 @@ def entire_order_checkout(
             price_override=DEALER_UNIT,
             price_override_reason=PRICE_OVERRIDE_REASON,
             undiscounted_unit_price_amount=DEALER_UNIT,
-            metadata=(
+            private_metadata=(
                 {
                     LINE_METADATA_KEY: json.dumps(
                         {"group": "dealer-1", "minQuantity": 1}

@@ -13,6 +13,7 @@ so there is exactly one definition of the Stage 2 Kit and one of the dealer
 ladder, and a drift in either reddens both suites at once.
 """
 
+import datetime
 import json
 from decimal import Decimal
 
@@ -20,6 +21,7 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
 
 from saleor.checkout.complete_checkout import create_order_from_checkout
 from saleor.checkout.fetch import fetch_checkout_info, fetch_checkout_lines
@@ -219,6 +221,95 @@ def test_a_per_unit_fee_line_follows_its_parent_upwards_too(
 
     fee_line.refresh_from_db()
     assert fee_line.quantity == 3
+
+
+# --- exploit 3: the dealer group a shopper writes for themselves ------------
+
+
+LINES_ADD = """
+    mutation($id: ID!, $variant: ID!, $quantity: Int!) {
+      checkoutLinesAdd(id: $id, lines: [{variantId: $variant, quantity: $quantity}]) {
+        errors { field message code }
+      }
+    }"""
+
+UPDATE_METADATA = """
+    mutation($id: ID!, $input: [MetadataInput!]!) {
+      updateMetadata(id: $id, input: $input) {
+        errors { field message code }
+        item { metadata { key value } }
+      }
+    }"""
+
+READ_CHECKOUT = """
+    query($id: ID!) {
+      checkout(id: $id) { lines { unitPrice { gross { amount } } } }
+    }"""
+
+
+def graphql(client, query, variables):
+    response = client.post(
+        "/graphql/",
+        data=json.dumps({"query": query, "variables": variables}),
+        content_type="application/json",
+    )
+    assert response.status_code == 200, response.content
+    return response.json()["data"]
+
+
+def test_a_dealer_stamp_a_shopper_wrote_for_themselves_buys_nothing(
+    client, checkout, variant, tiers, channel_USD, stock,
+):
+    """Anonymous shopper stamps their own line with a dealer group code.
+
+    Stock Saleor maps CheckoutLine PUBLIC metadata to `no_permissions`
+    (saleor/graphql/meta/permissions.py), so `updateMetadata` on a line in your
+    own checkout takes no key, no login and no dealer account. Group codes are
+    short and guessable. Before the stamps moved to private metadata, MP3's
+    anonymous branch read this key and priced the line at that group's ladder:
+    10 units at 10.00 came back at 7.00.
+
+    The forgery is asserted to SUCCEED. Closing this by refusing the write would
+    mean patching a core permission map; it is closed instead by MP3 pricing
+    from the private copy only, which no unauthenticated caller can write.
+    """
+    assert checkout.user is None
+    errors = graphql(
+        client,
+        LINES_ADD,
+        {
+            "id": gid("Checkout", checkout.token),
+            "variant": gid("ProductVariant", variant.pk),
+            "quantity": 10,
+        },
+    )["checkoutLinesAdd"]["errors"]
+    assert errors == [], errors
+    line = CheckoutLine.objects.get(checkout_id=checkout.pk)
+
+    forged = graphql(
+        client,
+        UPDATE_METADATA,
+        {
+            "id": gid("CheckoutLine", line.pk),
+            "input": [
+                {"key": "wsm.dealer", "value": json.dumps({"group": tiers.code})}
+            ],
+        },
+    )["updateMetadata"]
+    assert forged["errors"] == [], "the public write is open, and that is the point"
+
+    # The next price recalculation, which is every cart read once the checkout
+    # goes stale. Nothing else about the line changed.
+    checkout.price_expiration = timezone.now() - datetime.timedelta(hours=1)
+    checkout.save(update_fields=["price_expiration"])
+    read = graphql(client, READ_CHECKOUT, {"id": gid("Checkout", checkout.token)})
+
+    assert read["checkout"]["lines"][0]["unitPrice"]["gross"]["amount"] == float(RETAIL)
+    line.refresh_from_db()
+    assert line.price_override is None
+    assert line.price_override_reason is None
+    assert "wsm.dealer" not in line.metadata, "the forged key is cleared, not kept"
+    assert "wsm.dealer" not in line.private_metadata
 
 
 # --- the cost, and the one case that refuses -------------------------------

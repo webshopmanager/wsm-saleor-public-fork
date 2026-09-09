@@ -82,7 +82,29 @@ TARGET = "saleor.checkout.calculations._fetch_checkout_prices_if_expired"
 
 # The line fields this file is allowed to move. Named once so the bulk_update
 # and the reader agree on the blast radius.
-WRITTEN_FIELDS = ("price_override", "price_override_reason", "quantity", "metadata")
+WRITTEN_FIELDS = (
+    "price_override",
+    "price_override_reason",
+    "quantity",
+    "metadata",
+    "private_metadata",
+)
+
+# Every stamp this fork prices from lives in PRIVATE metadata, and this file
+# reads nothing else. Stock Saleor maps CheckoutLine PUBLIC metadata to
+# `no_permissions` (saleor/graphql/meta/permissions.py), so any unauthenticated
+# caller can `updateMetadata` their own line: a stamp we price from in public
+# metadata is a price the shopper picks. Measured before this moved: an
+# anonymous cart stamped `wsm.dealer` with a guessed group code was priced at
+# that group's tier, a 10.00 line at 1.00, with no key and no login.
+#
+# The compose and containers keys keep a public copy too, written by the same
+# views, because the storefront cart and order screens pair fee lines and render
+# chosen options off them (wsm-storefront src/lib/composeFee.ts and
+# src/lib/order-grouping.ts) and B6 is "no storefront code". Those copies are
+# DISPLAY only: forging one changes what a shopper's own cart draws and no
+# number anywhere. `wsm.dealer` has no storefront reader, so it has no public
+# copy, and one found in public metadata is a forgery and is deleted on sight.
 
 # `CheckoutLineInfo` memoises the prices it derives from the line. Correcting the
 # line without dropping these would leave the calculation running on the numbers
@@ -155,10 +177,6 @@ def reprice(checkout_info, lines) -> list:
     # be stamped onto a line this function then writes. Every read below backs
     # a write, so every read is a writer read.
     database_connection_name = settings.DATABASE_CONNECTION_DEFAULT_NAME
-    configured, fee_lines, dealer_lines = _classify(lines)
-    if not configured and not fee_lines and not dealer_lines:
-        return []
-
     moved: list = []
 
     def mark(line_info):
@@ -166,6 +184,11 @@ def reprice(checkout_info, lines) -> list:
             line_info.__dict__.pop(name, None)
         if line_info not in moved:
             moved.append(line_info)
+
+    configured, fee_lines, dealer_lines = _classify(lines)
+    _disown_forged_stamps(lines, mark)
+    if not configured and not fee_lines and not dealer_lines and not moved:
+        return []
 
     # One writer block for the whole pass. Core restricts the writer on a cart
     # request, and every read below is a read that backs a write, so opting in
@@ -202,24 +225,40 @@ def reprice(checkout_info, lines) -> list:
 def _classify(lines):
     """Split the checkout's lines into the three kinds we own. No queries.
 
-    A line the fork never priced carries none of these keys and is not ours to
-    move: a retail line stays retail here even for a dealer, because deciding
-    that a plain line should BECOME a dealer line is the storefront's add, not
-    this function's enforcement.
+    Read from PRIVATE metadata only. A line the fork never priced carries none
+    of these keys and is not ours to move: a retail line stays retail here even
+    for a dealer, because deciding that a plain line should BECOME a dealer line
+    is the storefront's add, not this function's enforcement. A line carrying a
+    forged PUBLIC copy of one of these keys is, for the same reason, not ours.
     """
     configured, fee_lines, dealer_lines = [], [], []
     for line_info in lines:
-        metadata = line_info.line.metadata or {}
-        if META_FEE in metadata:
+        stamps = line_info.line.private_metadata or {}
+        if META_FEE in stamps:
             fee_lines.append(line_info)
-        elif META_OPTIONS in metadata:
+        elif META_OPTIONS in stamps:
             configured.append(line_info)
         elif (
-            DEALER_META in metadata
+            DEALER_META in stamps
             or line_info.line.price_override_reason == DEALER_REASON
         ):
             dealer_lines.append(line_info)
     return configured, fee_lines, dealer_lines
+
+
+def _disown_forged_stamps(lines, mark):
+    """Delete `wsm.dealer` from PUBLIC metadata, which anyone can write.
+
+    Enforcement is above: the authority copy is private and nothing here reads
+    the public one. This is the hygiene that goes with it, so a forged key does
+    not sit on the row telling a support screen the line is a dealer line while
+    the money says it is not, and does not ride into the order. Costs nothing on
+    a checkout carrying none, which is every honest checkout.
+    """
+    for line_info in lines:
+        if DEALER_META in (line_info.line.metadata or {}):
+            line_info.line.delete_value_from_metadata(DEALER_META)
+            mark(line_info)
 
 
 def _reprice_dealer(checkout_info, dealer_lines, database_connection_name, mark):
@@ -238,7 +277,7 @@ def _reprice_dealer(checkout_info, dealer_lines, database_connection_name, mark)
     """
     stamped = {}
     for line_info in dealer_lines:
-        raw = (line_info.line.metadata or {}).get(DEALER_META)
+        raw = (line_info.line.private_metadata or {}).get(DEALER_META)
         code = None
         if raw:
             try:
@@ -284,7 +323,7 @@ def _reprice_dealer(checkout_info, dealer_lines, database_connection_name, mark)
         if winner:
             line.price_override = winner.amount
             line.price_override_reason = DEALER_REASON
-            line.store_value_in_metadata(
+            line.store_value_in_private_metadata(
                 {
                     DEALER_META: json.dumps(
                         {"group": winner.group_code, "minQuantity": winner.min_quantity}
@@ -294,7 +333,7 @@ def _reprice_dealer(checkout_info, dealer_lines, database_connection_name, mark)
         else:
             line.price_override = None
             line.price_override_reason = None
-            line.delete_value_from_metadata(DEALER_META)
+            line.delete_value_from_private_metadata(DEALER_META)
         if before != _snapshot_of(line):
             mark(line_info)
 
@@ -334,7 +373,7 @@ def _reprice_configured(
 
     fee_lines_by_parent = defaultdict(dict)
     for line_info in fee_lines:
-        parent = (line_info.line.metadata or {}).get(META_PARENT)
+        parent = (line_info.line.private_metadata or {}).get(META_PARENT)
         if not parent:
             raise Unrepriceable(
                 "a fee line on this checkout does not say which item it belongs to"
@@ -372,16 +411,16 @@ def _reprice_one_configured(
     mark,
 ):
     line = line_info.line
-    metadata = line.metadata or {}
-    cid = metadata.get(META_CID)
+    stamps = line.private_metadata or {}
+    cid = stamps.get(META_CID)
     if not cid:
         raise Unrepriceable("a configured line on this checkout has no identifier")
     if line_info.channel_listing is None or line_info.channel_listing.price_amount is None:
         raise Unrepriceable("a configured item on this checkout is no longer for sale")
 
     try:
-        snapshot = json.loads(metadata[META_OPTIONS])
-        accepted = json.loads(metadata.get(META_ACCEPTED) or "[]")
+        snapshot = json.loads(stamps[META_OPTIONS])
+        accepted = json.loads(stamps.get(META_ACCEPTED) or "[]")
     except ValueError as error:
         raise Unrepriceable(
             "the options recorded on a configured line cannot be read"
@@ -416,6 +455,8 @@ def _reprice_one_configured(
     before = _snapshot_of(line)
     line.price_override = Decimal(priced.unit_cents) / 100
     line.price_override_reason = COMPOSE_REASON
+    line.store_value_in_private_metadata({META_OPTIONS: fresh})
+    # The public copy the storefront cart reads. Display, never an input.
     line.store_value_in_metadata({META_OPTIONS: fresh, META_SKU: priced.composite_sku})
     if before != _snapshot_of(line):
         mark(line_info)
@@ -459,9 +500,10 @@ def _reprice_fee_lines(cid, quantity, priced, fees_by_id, fee_lines_by_parent, m
         line.quantity = quantity if row["apply_to"] == compose_pricing.PER_UNIT else 1
         line.price_override = Decimal(row["amount"]) / 100
         line.price_override_reason = COMPOSE_REASON
-        line.store_value_in_metadata(
-            {META_FEE: json.dumps({"label": row["label"], "apply_to": row["apply_to"]})}
-        )
+        stamp = json.dumps({"label": row["label"], "apply_to": row["apply_to"]})
+        line.store_value_in_private_metadata({META_FEE: stamp})
+        # The public copy the storefront cart reads. Display, never an input.
+        line.store_value_in_metadata({META_FEE: stamp})
         if before != _snapshot_of(line):
             mark(line_info)
 
@@ -498,4 +540,5 @@ def _snapshot_of(line):
         line.price_override_reason,
         line.quantity,
         dict(line.metadata or {}),
+        dict(line.private_metadata or {}),
     )

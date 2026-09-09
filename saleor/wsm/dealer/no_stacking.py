@@ -61,7 +61,16 @@ _stacking: bool | None = None
 
 
 def is_dealer_line(line) -> bool:
-    return LINE_METADATA_KEY in (line.metadata or {})
+    """PRIVATE metadata only, on a checkout line and on an order line alike.
+
+    Stock Saleor maps CheckoutLine PUBLIC metadata to `no_permissions`
+    (saleor/graphql/meta/permissions.py), so reading the public copy would let
+    a shopper mark their own retail line a dealer line and, with the guard
+    inverted, let them un-mark a real one to stack a voucher on a tier price.
+    `create_order_from_checkout` copies private metadata onto the order line, so
+    MP2 still finds the stamp after completion.
+    """
+    return LINE_METADATA_KEY in (line.private_metadata or {})
 
 
 def stacking_enabled() -> bool:

@@ -22,7 +22,6 @@ case would put error handling in front of the majority of visitors.
 from __future__ import annotations
 
 import json
-from typing import NamedTuple
 
 import graphene
 from django.conf import settings
@@ -55,13 +54,6 @@ from .no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
 # about to write, so they declare the writer once, at the view.
 REPLICA = settings.DATABASE_CONNECTION_REPLICA_NAME
 WRITER = settings.DATABASE_CONNECTION_DEFAULT_NAME
-
-
-class _Metadata(NamedTuple):
-    """The shape `add_variants_to_checkout` reads out of `metadata_list`."""
-
-    key: str
-    value: str
 
 
 def _body(request) -> dict:
@@ -224,16 +216,21 @@ def _add_line(checkout, channel, variant, quantity, winner):
     small query and beats guessing with `.last()` on a checkout that may already
     hold the same variant at retail.
     """
-    metadata = []
-    if winner:
-        metadata.append(
-            _Metadata(
-                LINE_METADATA_KEY,
-                json.dumps(
-                    {"group": winner.group_code, "minQuantity": winner.min_quantity}
-                ),
+    # PRIVATE metadata, because this stamp is a pricing input: MP3 reads the
+    # group off it to re-derive an anonymous checkout's ladder, and stock Saleor
+    # lets any unauthenticated caller write PUBLIC line metadata
+    # (saleor/graphql/meta/permissions.py maps CheckoutLine to `no_permissions`).
+    # It is written after the add rather than through `metadata_list`, which
+    # `add_variants_to_checkout` only ever stores publicly.
+    stamp = (
+        {
+            LINE_METADATA_KEY: json.dumps(
+                {"group": winner.group_code, "minQuantity": winner.min_quantity}
             )
-        )
+        }
+        if winner
+        else {}
+    )
 
     line_data = CheckoutLineData(
         variant_id=str(variant.pk),
@@ -243,7 +240,6 @@ def _add_line(checkout, channel, variant, quantity, winner):
         custom_price_to_update=bool(winner),
         custom_price_reason=PRICE_OVERRIDE_REASON if winner else None,
         custom_price_reason_to_update=bool(winner),
-        metadata_list=metadata,
     )
     # The checks `checkoutLinesAdd` runs before the identical write. Raises
     # `LineRefused`, which the view turns into a 422.
@@ -273,6 +269,9 @@ def _add_line(checkout, channel, variant, quantity, winner):
             .exclude(pk__in=before)
             .first()
         )
+        if line is not None and stamp:
+            line.store_value_in_private_metadata(stamp)
+            line.save(update_fields=["private_metadata"])
         _invalidate(checkout)
         return line
 
@@ -325,11 +324,18 @@ def dealer_line_reprice(request):
         database_connection_name=WRITER,
     )
 
-    was = (line.price_override, line.price_override_reason, dict(line.metadata or {}))
+    def state():
+        return (
+            line.price_override,
+            line.price_override_reason,
+            dict(line.private_metadata or {}),
+        )
+
+    was = state()
     if winner:
         line.price_override = winner.amount
         line.price_override_reason = PRICE_OVERRIDE_REASON
-        line.store_value_in_metadata(
+        line.store_value_in_private_metadata(
             {
                 LINE_METADATA_KEY: json.dumps(
                     {"group": winner.group_code, "minQuantity": winner.min_quantity}
@@ -339,9 +345,15 @@ def dealer_line_reprice(request):
     else:
         line.price_override = None
         line.price_override_reason = None
-        line.delete_value_from_metadata(LINE_METADATA_KEY)
-    if was != (line.price_override, line.price_override_reason, dict(line.metadata or {})):
-        line.save(update_fields=["price_override", "price_override_reason", "metadata"])
+        line.delete_value_from_private_metadata(LINE_METADATA_KEY)
+    if was != state():
+        line.save(
+            update_fields=[
+                "price_override",
+                "price_override_reason",
+                "private_metadata",
+            ]
+        )
         # Only when the line actually moved: a reprice that changed nothing is
         # a read, and expiring the prices on every poll would put the whole
         # checkout through a recalculation the storefront never asked for.

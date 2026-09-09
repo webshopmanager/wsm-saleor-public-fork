@@ -237,7 +237,7 @@ def test_a_voucher_does_not_stack_on_a_tiered_kit_member(
 
     line = checkout.lines.get(variant_id=dear.pk)
     assert line.price_override == Decimal("25.00")
-    assert "wsm.dealer" in line.metadata
+    assert "wsm.dealer" in line.private_metadata
 
     response = client.post(
         "/graphql/",
@@ -278,7 +278,7 @@ def test_a_voucher_does_not_stack_on_a_tiered_kit_member(
 def test_a_tiered_kit_member_is_written_as_a_dealer_line(
     client, checkout, kit, customer_user
 ):
-    """The metadata and the reason MP1 and a support screen both read."""
+    """The private stamp and the reason MP1 and a support screen both read."""
     from saleor.wsm.dealer.models import DealerCustomer, DealerGroup, TierPrice
     from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
 
@@ -293,12 +293,13 @@ def test_a_tiered_kit_member_is_written_as_a_dealer_line(
     assert added.status_code == 200
 
     tiered = checkout.lines.get(variant_id=dear.pk)
-    assert json.loads(tiered.metadata[LINE_METADATA_KEY]) == {"group": "tier-1"}
+    assert json.loads(tiered.private_metadata[LINE_METADATA_KEY]) == {"group": "tier-1"}
+    assert LINE_METADATA_KEY not in tiered.metadata, "a pricing input is never public"
     assert tiered.price_override_reason == PRICE_OVERRIDE_REASON
     # The members that stayed at the kit-discounted retail unit are not dealer
     # lines and a voucher may still reach them.
     retail = checkout.lines.exclude(variant_id=dear.pk)
-    assert not any(LINE_METADATA_KEY in line.metadata for line in retail)
+    assert not any(LINE_METADATA_KEY in line.private_metadata for line in retail)
     assert {line.price_override_reason for line in retail} == {
         pricing.PRICE_OVERRIDE_REASON
     }

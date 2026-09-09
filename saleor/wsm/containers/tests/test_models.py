@@ -102,7 +102,39 @@ def test_save_stamps_the_series_facts_on_the_collection(collection, product_list
         "axes": ["color"],
         "partitioning_axis": "color",
         "miss_message": "Nothing in this series fits that truck yet.",
+        "published": True,
     }
+
+
+def test_a_draft_stamps_published_false(collection, product_list):
+    """The stamp fires on every save, so the blob must carry the publish state.
+
+    Readers key visibility off the blob (the search engine hides a series whose
+    blob does not say published) and a save happens long before a series
+    qualifies, so a draft that stamped nothing would be indistinguishable from
+    a live one.
+    """
+    collection.products.add(*product_list[:2])
+
+    series_for(collection, published=False).save()
+
+    collection.refresh_from_db()
+    assert json.loads(collection.metadata[SERIES_METADATA_KEY])["published"] is False
+
+
+def test_unpublishing_restamps_the_blob_false(collection, product_list):
+    """The flip that takes a live series dark is the one that MUST reach readers."""
+    collection.products.add(*product_list[:2])
+    series = series_for(collection)
+    series.save()
+    collection.refresh_from_db()
+    assert json.loads(collection.metadata[SERIES_METADATA_KEY])["published"] is True
+
+    series.published = False
+    series.save()
+
+    collection.refresh_from_db()
+    assert json.loads(collection.metadata[SERIES_METADATA_KEY])["published"] is False
 
 
 def test_stamping_leaves_other_metadata_alone(collection, product_list):

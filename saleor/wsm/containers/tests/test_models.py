@@ -163,3 +163,92 @@ def test_the_merchant_screens_register(db):
     assert kit_admin.raw_id_fields == ("collection",)
     assert kit_admin.inlines[0].model is KitMember
     assert kit_admin.inlines[0].raw_id_fields == ("variant",)
+
+
+def test_queryset_update_restamps_the_collection(collection, product_list):
+    """`update()` never calls `save()`, so the stamp has to live one layer lower.
+
+    A merchant publishing from an admin list action, or an import flipping a
+    batch, writes through the queryset. Readers key visibility off the blob, so
+    a row that says published over a blob that says hidden is a series live in
+    the database and dark on the site, with nothing to see in either place.
+    """
+    collection.products.add(*product_list[:2])
+    series = series_for(collection, published=False)
+    series.save()
+
+    SeriesConfig.objects.filter(pk=series.pk).update(published=True)
+
+    collection.refresh_from_db()
+    assert json.loads(collection.metadata[SERIES_METADATA_KEY])["published"] is True
+
+
+def test_queryset_update_restamps_rows_the_filter_no_longer_matches(
+    collection, product_list
+):
+    """The pks are read BEFORE the write, because the write moves rows out of the filter.
+
+    `filter(published=False).update(published=True)` is the natural way to
+    publish a batch, and re-running that filter afterwards returns nothing: a
+    fix that re-read the queryset would stamp zero rows and still pass the test
+    above.
+    """
+    collection.products.add(*product_list[:2])
+    series_for(collection, published=False).save()
+
+    SeriesConfig.objects.filter(published=False).update(published=True)
+
+    collection.refresh_from_db()
+    assert json.loads(collection.metadata[SERIES_METADATA_KEY])["published"] is True
+
+
+def test_queryset_update_carries_every_stamped_field(collection, product_list):
+    collection.products.add(*product_list[:2])
+    series = series_for(collection)
+    series.save()
+
+    SeriesConfig.objects.filter(pk=series.pk).update(
+        brand="Husky", miss_message="Nothing yet."
+    )
+
+    collection.refresh_from_db()
+    blob = json.loads(collection.metadata[SERIES_METADATA_KEY])
+    assert blob["brand"] == "Husky"
+    assert blob["miss_message"] == "Nothing yet."
+
+
+def test_bulk_update_restamps_the_collection(collection, product_list):
+    collection.products.add(*product_list[:2])
+    series = series_for(collection, published=False)
+    series.save()
+
+    series.published = True
+    SeriesConfig.objects.bulk_update([series], ["published"])
+
+    collection.refresh_from_db()
+    assert json.loads(collection.metadata[SERIES_METADATA_KEY])["published"] is True
+
+
+def test_bulk_create_stamps_the_collection(collection, product_list):
+    collection.products.add(*product_list[:2])
+
+    SeriesConfig.objects.bulk_create([series_for(collection)])
+
+    collection.refresh_from_db()
+    assert json.loads(collection.metadata[SERIES_METADATA_KEY])["published"] is True
+
+
+def test_an_update_that_touches_no_stamped_field_reads_no_rows(
+    collection, product_list, django_assert_num_queries
+):
+    """The re-stamp is bought only when it is needed: an unrelated write pays nothing.
+
+    One query is the UPDATE itself. A second would mean every write through the
+    queryset drags a SELECT and a metadata write behind it.
+    """
+    collection.products.add(*product_list[:2])
+    series = series_for(collection)
+    series.save()
+
+    with django_assert_num_queries(1):
+        SeriesConfig.objects.filter(pk=series.pk).update(collection=collection)

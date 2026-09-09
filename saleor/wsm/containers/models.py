@@ -25,6 +25,57 @@ DISCOUNT_KIND_CHOICES = [(k, k) for k in pricing.DISCOUNT_KINDS]
 SERIES_METADATA_KEY = "wsm.series"
 
 
+# The fields the `wsm.series` blob carries. An `update()` that touches none of
+# them changes nothing a reader can see, and so buys no re-stamp.
+STAMPED_FIELDS = frozenset(
+    {"brand", "axes", "partitioning_axis", "miss_message", "published"}
+)
+
+
+class SeriesConfigQuerySet(models.QuerySet):
+    """Every write door leaves the Collection stamp current, not just `save()`.
+
+    `update()`, `bulk_update()` and `bulk_create()` all skip `save()` by design,
+    which is exactly why the stamp cannot live only there: a merchant publishing
+    a batch from an admin list action, or an import flipping a column, writes
+    through this queryset, and the readers we do not own (the storefront
+    collection page, the search indexer) see only the blob. A row that says
+    published under a blob that says hidden is a series that exists in the
+    database and nowhere else.
+    """
+
+    def update(self, **fields):
+        if not STAMPED_FIELDS.intersection(fields):
+            return super().update(**fields)
+        # The pks are read BEFORE the write, because the write moves rows out of
+        # the filter: `filter(published=False).update(published=True)` is the
+        # natural way to publish a batch, and afterwards this queryset matches
+        # nothing at all.
+        pks = list(self.values_list("pk", flat=True))
+        rows = super().update(**fields)
+        self.model._default_manager.filter(pk__in=pks).stamp()
+        return rows
+
+    def bulk_update(self, objs, fields, *args, **kwargs):
+        objs = list(objs)
+        rows = super().bulk_update(objs, fields, *args, **kwargs)
+        if STAMPED_FIELDS.intersection(fields):
+            for config in objs:
+                config.stamp_collection()
+        return rows
+
+    def bulk_create(self, objs, *args, **kwargs):
+        created = super().bulk_create(objs, *args, **kwargs)
+        for config in created:
+            config.stamp_collection()
+        return created
+
+    def stamp(self):
+        """One query for the rows with their collections, one write per collection."""
+        for config in self.select_related("collection"):
+            config.stamp_collection()
+
+
 class SeriesConfig(models.Model):
     """What a Collection needs to behave as a series: one brand, and the axes."""
 
@@ -38,6 +89,8 @@ class SeriesConfig(models.Model):
     partitioning_axis = models.CharField(max_length=250)
     miss_message = models.TextField(blank=True)
     published = models.BooleanField(default=False)
+
+    objects = models.Manager.from_queryset(SeriesConfigQuerySet)()
 
     class Meta:
         ordering = ("pk",)

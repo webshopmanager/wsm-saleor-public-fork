@@ -535,6 +535,7 @@ class ProductCompliance(models.Model):
         help_text="The product this warning and these restrictions belong to.",
     )
     prop65 = models.BooleanField(
+        "Prop 65 warning",
         default=False,
         help_text=(
             "Show the California Proposition 65 warning on this product. The "
@@ -543,6 +544,7 @@ class ProductCompliance(models.Model):
         ),
     )
     prop65_text = models.TextField(
+        "Prop 65 wording",
         blank=True,
         default="",
         help_text=(
@@ -551,6 +553,7 @@ class ProductCompliance(models.Model):
         ),
     )
     restricted_states = models.CharField(
+        "Cannot ship to",
         max_length=255,
         blank=True,
         default="",
@@ -561,6 +564,7 @@ class ProductCompliance(models.Model):
     )
     include_shipping_zones = models.ManyToManyField(
         "shipping.ShippingZone",
+        verbose_name="Ships only to these zones",
         blank=True,
         related_name="wsm_compliance_rows",
         help_text=(
@@ -570,6 +574,7 @@ class ProductCompliance(models.Model):
         ),
     )
     restriction_message = models.CharField(
+        "What the shopper is told",
         max_length=255,
         blank=True,
         default="",
@@ -581,7 +586,7 @@ class ProductCompliance(models.Model):
 
     class Meta:
         verbose_name = "product compliance"
-        verbose_name_plural = "product compliance"
+        verbose_name_plural = "product compliance rows"
 
     def __str__(self):
         return f"{self.product.name}: compliance"

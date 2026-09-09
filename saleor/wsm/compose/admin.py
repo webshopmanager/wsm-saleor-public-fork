@@ -193,10 +193,15 @@ class OptionSetAdmin(WsmAdminMixin, admin.ModelAdmin):
     # Merchants look a question up by the product it is on, and support looks it
     # up by the SKU on a ticket.
     search_fields = ("name", "label", "product__name", "product__variants__sku")
+    # The autocomplete widget pages its results, so the list it pages needs an
+    # order. Without one Postgres is free to return a row twice across pages.
+    ordering = ("product__name", "sort_order", "name")
     # A dropdown of every product is unusable past a few hundred SKUs, and the
-    # fleet's smallest catalog is larger than that. The lookup popup below is
-    # what makes this screen survive a real catalog.
-    raw_id_fields = ("product",)
+    # fleet's smallest catalog is larger than that. `autocomplete_fields` is not
+    # a dropdown: it is the AJAX search box that `ComposeProductPickerAdmin`
+    # below already answers, so the merchant sees "Bushwacker Pocket Flare"
+    # where `raw_id_fields` showed them the number 800001.
+    autocomplete_fields = ("product",)
     inlines = [OptionValueInline]
 
     def get_queryset(self, request):
@@ -235,7 +240,7 @@ class OptionValueAdmin(WsmAdminMixin, admin.ModelAdmin):
     )
     list_select_related = ("option_set", "option_set__product")
     search_fields = ("name", "sku_fragment", "option_set__product__name")
-    raw_id_fields = ("option_set",)
+    autocomplete_fields = ("option_set",)
     inlines = [DealerTierOptionPriceInline]
 
     def get_queryset(self, request):
@@ -274,7 +279,7 @@ class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
     list_select_related = ("product",)
     list_filter = ("basis", "apply_to", "required")
     search_fields = ("label", "sku", "product__name")
-    raw_id_fields = ("product",)
+    autocomplete_fields = ("product",)
     readonly_fields = ("variant",)
     fieldsets = (
         (
@@ -325,7 +330,7 @@ class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
 class ComposeProductPickerAdmin(WsmAdminMixin, admin.ModelAdmin):
     """Read-only product list, so the option-set lookup popup resolves.
 
-    Registered because `raw_id_fields` needs a changelist to point at, not
+    Registered because `autocomplete_fields` needs a changelist to search,
     because products are edited here: Saleor's own Dashboard owns the catalog.
     Every write is refused regardless of what the user was granted.
     """

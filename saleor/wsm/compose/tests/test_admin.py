@@ -113,3 +113,23 @@ def test_the_option_value_list_signs_the_price_change(client, merchant, product)
     assert "-29.99 USD" in body
 
 
+@pytest.mark.django_db
+def test_no_lookup_shows_a_bare_row_id(client, merchant):
+    """`raw_id_fields` is a number box: the merchant sees 800001, not a product.
+
+    Asserted over the registry rather than the three known offenders, because
+    the next ModelAdmin registered here is the one that would bring it back.
+    """
+    from saleor.wsm.compose.admin import site as merchant_site
+
+    offenders = {}
+    for model, model_admin in merchant_site._registry.items():
+        holders = [model_admin] + [inline(model, merchant_site) for inline in model_admin.inlines]
+        for holder in holders:
+            if getattr(holder, "raw_id_fields", ()):
+                offenders[type(holder).__name__] = holder.raw_id_fields
+
+    assert offenders == {}
+    assert merchant_site._registry[OptionSet].autocomplete_fields == ("product",)
+
+

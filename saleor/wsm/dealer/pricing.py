@@ -31,7 +31,7 @@ from typing import NamedTuple
 
 import graphene
 from django.conf import settings
-from django.db.models import OuterRef, Subquery
+from django.db.models import OuterRef, Q, Subquery
 
 from ...product.models import ProductVariantChannelListing
 from .models import DealerCustomer, TierPrice
@@ -87,7 +87,7 @@ class DealerPrice(NamedTuple):
 
 
 def ladders(
-    user, channel, variant_ids, *, database_connection_name=None
+    user, channel, variant_ids, *, group_codes=None, database_connection_name=None
 ) -> dict[int, list[DealerPrice]]:
     """Every break these variants offer this buyer, by variant pk, in ONE query.
 
@@ -101,8 +101,20 @@ def ladders(
     endpoints that go on to write a line pass the writer instead, because a
     price they are about to stamp on a checkout line has to be read from the
     same database the line is written to.
+
+    `group_codes` asks the same question about a GROUP rather than a buyer, for
+    the one caller that has no buyer to ask about: re-pricing an anonymous
+    checkout whose lines were priced against a group the storefront named at add
+    time (`saleor/wsm/reprice.py`). It is the same query with a different join,
+    which is why it lives here and not there.
     """
-    if not variant_ids or user is None or not getattr(user, "is_authenticated", False):
+    if not variant_ids:
+        return {}
+    if group_codes is not None:
+        who = Q(group__code__in=group_codes)
+    elif user is not None and getattr(user, "is_authenticated", False):
+        who = Q(group__customers__user=user)
+    else:
         return {}
 
     db = database_connection_name or settings.DATABASE_CONNECTION_REPLICA_NAME
@@ -113,7 +125,7 @@ def ladders(
 
     rows = (
         TierPrice.objects.using(db)
-        .filter(variant_id__in=variant_ids, group__customers__user=user)
+        .filter(who, variant_id__in=variant_ids)
         .annotate(retail_amount=Subquery(retail))
         .order_by("variant_id", "min_quantity")
         .values_list(

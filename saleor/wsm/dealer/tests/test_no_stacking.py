@@ -7,6 +7,7 @@ import types
 from decimal import Decimal
 
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 from prices import Money
 
 from ....checkout.base_calculations import (
@@ -370,6 +371,34 @@ def test_the_pinned_binding_sites_are_exactly_the_discovered_ones():
     assert no_stacking.binding_sites(guard) == frozenset(
         no_stacking.VOUCHER_BINDING_SITES
     )
+
+
+def test_the_catalogue_guard_goes_in_through_the_same_pinned_machinery():
+    """It used to be rebound by hand on the defining module and nowhere else.
+
+    A hand-rebind cannot fail: it patches the one module it names and says
+    nothing about the ones it does not, so an upstream bump that imports this
+    function somewhere new leaves the guard standing in at some call sites and
+    not at others, and a catalogue promotion stacks on a dealer price at the
+    sites it missed. Going through `install_guard` makes that a boot error.
+    """
+    guard = no_stacking.installed_catalogue_guard()
+
+    assert guard is not None, "MP1's catalogue half was not installed through the pin"
+    assert no_stacking.binding_sites(guard) == frozenset(
+        no_stacking.CATALOGUE_BINDING_SITES
+    )
+
+
+def test_an_unpinned_catalogue_binding_site_refuses_to_boot(monkeypatch):
+    """What the hand-rebind could not do: notice, and stop."""
+    guard = no_stacking.installed_catalogue_guard()
+    newcomer = types.ModuleType("saleor.discount.utils.somewhere_new")
+    newcomer.prepare_checkout_line_discount_objects_for_catalogue_promotions = guard
+    monkeypatch.setitem(sys.modules, "saleor.discount.utils.somewhere_new", newcomer)
+
+    with pytest.raises(ImproperlyConfigured):
+        no_stacking._guard_catalogue_promotions()
 
 
 def test_a_new_binding_site_is_discovered(monkeypatch):

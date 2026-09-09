@@ -54,9 +54,15 @@ PRICE_OVERRIDE_REASON = "wsm.dealer"
 # rather than one per monkey patch.
 VOUCHER = "saleor.discount.utils.voucher.attach_voucher_to_line_info"
 VOUCHER_BINDING_SITES = patches.PINNED[VOUCHER]
+CATALOGUE = (
+    "saleor.discount.utils.checkout."
+    "prepare_checkout_line_discount_objects_for_catalogue_promotions"
+)
+CATALOGUE_BINDING_SITES = patches.PINNED[CATALOGUE]
 
 _installed = False
 _voucher_guard = None
+_catalogue_guard = None
 _stacking: bool | None = None
 
 
@@ -148,12 +154,14 @@ def catalogue_guard(original):
     return prepare_checkout_line_discount_objects_for_catalogue_promotions
 
 
-def _guard_catalogue_promotions():
-    from saleor.discount.utils import checkout as checkout_discounts
+def installed_catalogue_guard():
+    """The wrapper `install` put in place, for the test that pins the site set."""
+    return _catalogue_guard
 
-    checkout_discounts.prepare_checkout_line_discount_objects_for_catalogue_promotions = catalogue_guard(
-        checkout_discounts.prepare_checkout_line_discount_objects_for_catalogue_promotions
-    )
+
+def _guard_catalogue_promotions():
+    global _catalogue_guard
+    _catalogue_guard = install_guard(CATALOGUE, catalogue_guard)
 
 
 def install() -> None:

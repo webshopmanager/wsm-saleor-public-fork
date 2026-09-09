@@ -43,7 +43,7 @@ so the app-only permission check on client-supplied prices is never involved (cl
 
 Package layout (all under saleor/wsm/, our tables only, FKs to core allowed, core tables untouched):
 - wsm.compose: OptionSet, OptionValue (signed price_delta, sku_fragment, image_url, required, prompt_type), Fee (basis, amount, apply_to, required, decline_label), ProductOptionSet (product FK, order); pricing = port of internal/compose/pricing/pricing.go semantics (int cents, base + sum of deltas, zero refusal, above-retail guard on positive deltas only, tier rows on credits verbatim); REST views for endpoints 1 and 2; Django admin.
-- wsm.dealer: DealerCustomer (user FK, tier group), TierPrice (variant FK, group, min_qty, amount), TierOptionPrice (option value FK, group, amount), Settings row (discount_stacking bool default False); REST views for endpoints 3, 4, 5; Django admin.
+- wsm.dealer: DealerCustomer (user FK, tier group, tax_exempt bool wired to the native Checkout.tax_exemption, see the tax-exemption subsection below), TierPrice (variant FK, group, min_qty, amount), TierOptionPrice (option value FK, group, amount), Settings row (discount_stacking bool default False); REST views for endpoints 3, 4, 5; Django admin.
 - wsm.containers: SeriesConfig (collection OneToOne, axes JSON, member rules), KitConfig (collection OneToOne, discount, proration = list price, bundle_kit_group_id on lines); better-of rule from 2.3 of the requirements doc.
 Core touches expected (counted, each one line): INSTALLED_APPS += 3 apps and django.contrib.admin; urls.py mounts /wsm/ and /admin/. Monkey patches expected: zero. Any that appears is logged in CORE-TOUCHES.md with the upstream issue it would take to remove it.
 
@@ -177,6 +177,52 @@ Where one submit changes several rows at once, the value inline formset
 carry `floor_checked_by_formset` so the model skips its single-row version
 there. A row checked against its STORED siblings would refuse the very submit
 that fixes them.
+
+### Dealer tax exemption (Dana, 2026-09-09)
+
+`DealerCustomer.tax_exempt` is WIRED, not hidden: it writes Saleor's own
+`Checkout.tax_exemption`, the flag `saleor/checkout/calculations.py` reads to
+skip tax and `complete_checkout.py` copies onto the order. 5.0 spelled the rule
+as one checkbox on the dealer account and this fork spells it the same way, so
+a dealer flagged exempt pays no tax at checkout and nothing else changes. We
+add no table, no migration and no tax arithmetic of our own: one boolean is
+copied from the account onto the cart by `saleor/wsm/dealer/tax.py` and stock
+Saleor does the rest, which is what puts an exempt order on the same audit
+surface as one a staff member exempted by hand. The flag is written on all
+three key-gated routes that price a buyer, the dealer line (4), the dealer
+reprice (5), the configured line (2) and the kit line, because the exemption is
+a fact about the BUYER and not about the shape of what they put in the cart: a
+Fuel Lab order is configurations end to end and would otherwise be taxed in
+full. Writing it expires the checkout's prices exactly as `taxExemptionManage`
+does, since `tax_exemption` is a pricing input and a cart that changed it
+without expiring keeps quoting tax it no longer owes. No new route was needed.
+
+The exploit, and why it does not work. `customerId` arrives in a REQUEST BODY,
+so tax-free shopping would be one forged body away if the routes that read it
+were open. They are not: every one of them is behind the tenant's storefront
+key (`saleor/wsm/http.py`), which the storefront SERVER holds and a browser
+never sees, and which fails safe when unset. The second-guess forgery is the
+line stamp: `saleor/wsm/reprice.py` re-derives an anonymous checkout's dealer
+PRICE from the group name stamped in a line's private metadata, so a forger
+might expect the exemption to follow the same stamp. It does not, and it never
+reads one: the flag has exactly two writers, staff holding MANAGE_TAXES through
+`taxExemptionManage`, and the key-gated routes reading our own
+`DealerCustomer` row. An anonymous cart carrying a dealer stamp gets the dealer
+price and pays tax, which
+`test_an_anonymous_cart_carrying_a_dealer_stamp_is_still_charged_tax` proves in
+the same run that proves the stamp was honoured for the price. No checkout
+mutation takes `taxExemption` as an input, so a shopper cannot hand it to
+themselves either, and that too is asserted rather than assumed
+(`test_a_shopper_cannot_hand_themselves_the_exemption_through_the_api`), so a
+rebase that loosened the permission reddens this suite.
+
+One deliberate asymmetry: a shopper with NO dealer account is left exactly as
+they were rather than written False. Staff exempt a one-off buyer through
+`taxExemptionManage` and that buyer carries on shopping, so writing False for
+everyone we do not recognise would undo a merchant's decision silently, for
+money, on the next add to cart. A DEALER's flag is written every call, True or
+False, so an exemption a merchant revokes is off the cart on the next call
+rather than at the next cart the shopper happens to start.
 
 ### The 422 a shopper reads
 

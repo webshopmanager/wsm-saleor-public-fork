@@ -562,3 +562,34 @@ def test_a_variant_not_available_for_purchase_is_refused(
 
     assert response.status_code == 422
     assert checkout.lines.count() == 0
+
+
+def test_a_tax_exempt_dealers_configured_line_lands_in_a_cart_that_owes_no_tax(
+    client, checkout, stage_2_kit, omit_parts, dealer_credit
+):
+    """A cart of nothing but configured products is still a dealer's cart.
+
+    The exemption is a fact about the BUYER, not about the shape of what they
+    put in the cart, so it lands on the route that priced it. Waiting for the
+    shopper to also add a plain SKU through the dealer endpoint would tax a
+    whole Fuel Lab order, where every line is a configuration.
+
+    `Checkout.tax_exemption` is Saleor's own field and stock Saleor does the
+    rest of the work: `saleor/wsm/dealer/tax.py` explains what may write it.
+    """
+    from saleor.wsm.dealer.models import DealerCustomer
+
+    option_set, values = omit_parts
+    DealerCustomer.objects.filter(user=dealer_credit).update(tax_exempt=True)
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+        customer=dealer_credit,
+    )
+
+    assert response.status_code == 200, response.content
+    checkout.refresh_from_db()
+    assert checkout.tax_exemption is True

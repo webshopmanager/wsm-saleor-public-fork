@@ -45,6 +45,7 @@ from ..checkout import LineRefused, check_addable, whole_number
 from ..http import storefront_key_required
 from . import pricing
 from .no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
+from .tax import bind_tax_exemption
 
 
 # Saleor routes every read it can to the replica and guards the writer, so a
@@ -187,7 +188,7 @@ def dealer_line(request):
         return _error("belowBreak", 422)
 
     try:
-        line = _add_line(checkout, channel, variant, quantity, winner)
+        line = _add_line(checkout, channel, variant, quantity, winner, user)
     except LineRefused as refusal:
         return JsonResponse(
             {"error": "lineRefused", "violations": refusal.violations}, status=422
@@ -207,7 +208,7 @@ def dealer_line(request):
     )
 
 
-def _add_line(checkout, channel, variant, quantity, winner):
+def _add_line(checkout, channel, variant, quantity, winner, user):
     """Create the line through the stock add-lines path, then hand it back.
 
     `add_variants_to_checkout` returns the checkout rather than the line, and it
@@ -272,6 +273,13 @@ def _add_line(checkout, channel, variant, quantity, winner):
         if line is not None and stamp:
             line.store_value_in_private_metadata(stamp)
             line.save(update_fields=["private_metadata"])
+        # The buyer's account facts land in the same transaction as the line
+        # they were read for, so an add that is rolled back leaves neither
+        # behind. `bind_tax_exemption` expires the prices itself when the flag
+        # moves; the unconditional `_invalidate` below is for the line.
+        bind_tax_exemption(
+            checkout, getattr(user, "pk", None), database_connection_name=WRITER
+        )
         _invalidate(checkout)
         return line
 
@@ -346,18 +354,27 @@ def dealer_line_reprice(request):
         line.price_override = None
         line.price_override_reason = None
         line.delete_value_from_private_metadata(LINE_METADATA_KEY)
-    if was != state():
-        line.save(
-            update_fields=[
-                "price_override",
-                "price_override_reason",
-                "private_metadata",
-            ]
+    with transaction.atomic():
+        if was != state():
+            line.save(
+                update_fields=[
+                    "price_override",
+                    "price_override_reason",
+                    "private_metadata",
+                ]
+            )
+            # Only when the line actually moved: a reprice that changed nothing
+            # is a read, and expiring the prices on every poll would put the
+            # whole checkout through a recalculation the storefront never asked
+            # for.
+            _invalidate(checkout)
+        # Asked on every call, moved line or not: an exemption can be revoked
+        # while a cart sits untouched, and this is the route the storefront
+        # calls when it comes back. It expires the prices itself when it moves,
+        # so a reprice that changed nothing still costs nothing.
+        bind_tax_exemption(
+            checkout, getattr(user, "pk", None), database_connection_name=WRITER
         )
-        # Only when the line actually moved: a reprice that changed nothing is
-        # a read, and expiring the prices on every poll would put the whole
-        # checkout through a recalculation the storefront never asked for.
-        _invalidate(checkout)
 
     base = _retail_amount(line.variant_id, channel, WRITER)
     return JsonResponse(

@@ -98,24 +98,6 @@ def _tier_group(customer_gid, db):
     )
 
 
-def _delta_string(value, tier_group):
-    """What THIS buyer pays for one value, as the storefront reads it.
-
-    A tier row above the retail delta, floored at zero, refuses the add
-    (`AboveRetailError`); on a product page it shows retail instead, because a
-    shopper is the wrong audience for a merchant's data bug and a 500 on the PDP
-    would hide every other option too. The refusal still stands where the money
-    is taken.
-    """
-    if not tier_group:
-        return f"{value.price_delta:.2f}"
-    try:
-        delta, _ = pricing.delta_for(value.to_pricing(), tier_group)
-    except pricing.AboveRetailError:
-        return f"{value.price_delta:.2f}"
-    return f"{Decimal(delta) / 100:.2f}"
-
-
 @require_GET
 def option_sets(request, product_gid):
     """Everything the PDP needs to draw the configurator, in three queries.
@@ -124,21 +106,24 @@ def option_sets(request, product_gid):
     table and a third query. The existence check on the product is paid ONLY
     when the product carries no configuration, which is the case the storefront
     never asks about: a configured product costs three queries, not four.
+
+    RETAIL deltas, for everyone. This is the fork's one endpoint that answers
+    without the storefront key, and it used to take a `?customerId=` and quote
+    that customer's dealer deltas: user ids are sequential integers inside a
+    guessable global id, so the whole dealer price book was readable one
+    customer at a time by anyone who could reach the PDP. A dealer's own deltas
+    come back from the key-gated add instead, which is where the money is taken
+    and where the caller has already been authenticated.
     """
     product_pk = _from_gid(product_gid, "Product")
     if product_pk is None or not product_pk.isdigit():
         return _not_found("product")
 
     replica = settings.DATABASE_CONNECTION_REPLICA_NAME
-    # A dealer is quoted their own deltas; every other shopper is quoted retail
-    # and pays for nothing extra: no customer id means no lookup and no tier
-    # prefetch, so the retail PDP read costs exactly what it cost before.
-    tier_group = _tier_group(request.GET.get("customerId"), replica)
-    values = ("values", "values__tier_deltas") if tier_group else ("values",)
     sets = list(
         OptionSet.objects.using(replica)
         .filter(product_id=product_pk)
-        .prefetch_related(*values)
+        .prefetch_related("values")
     )
     fees = list(Fee.objects.using(replica).filter(product_id=product_pk))
 
@@ -161,7 +146,7 @@ def option_sets(request, product_gid):
                             "id": v.pk,
                             "name": v.name,
                             "sku_fragment": v.sku_fragment,
-                            "price_delta": _delta_string(v, tier_group),
+                            "price_delta": f"{v.price_delta:.2f}",
                             "image_url": v.image_url,
                         }
                         for v in s.values.all()

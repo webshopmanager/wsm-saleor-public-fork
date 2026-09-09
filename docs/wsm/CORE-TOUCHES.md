@@ -288,6 +288,16 @@ body, so anyone on the network could read a named dealer's whole price ladder an
 add lines to a checkout at that dealer's tier. The five write and price endpoints
 now demand the key; the public catalog read (`.../option-sets`) does not.
 
+That read used to take a `?customerId=` of its own and quote that customer's
+dealer deltas, which left the same hole open on the one route with no key on it:
+a `User` global id is base64 of a sequential integer, so anyone who could reach a
+product page could walk the customer table and read the dealer price book one
+buyer at a time. Since review wave WW1 it answers RETAIL to everyone and the
+parameter is gone, along with the tier prefetch and the per-value tier lookup it
+fed. A dealer sees their own deltas from the key-gated add, which is where the
+money is taken and where the caller has already been authenticated. Guard test:
+`test_option_sets_never_quotes_a_dealer_delta_to_the_public`.
+
 Unset or empty fails SAFE: every gated endpoint answers 401. A tenant that forgot
 to set the secret sells nothing through these routes, which is loud, rather than
 selling at anyone's dealer price, which is silent.

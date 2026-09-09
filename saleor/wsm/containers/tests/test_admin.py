@@ -173,6 +173,50 @@ def test_the_collection_picker_answers_the_autocomplete(merchant, collection):
     assert texts == [f"{collection.name} ({collection.slug})"]
 
 
+def test_the_series_form_says_the_blob_is_derived(merchant):
+    """A merchant reading the screen learns the metadata is output, not an input."""
+    body = merchant.get(SERIES_ADD).content.decode()
+
+    assert "only place a series is edited" in body
+    assert "never edited by hand" in body
+
+
+def test_the_admin_delete_action_clears_the_blob(
+    merchant, staff_user, collection, product_list, color_attribute
+):
+    """The merchant's bulk delete is the third door onto the same rule.
+
+    `delete_selected` goes through `ModelAdmin.delete_queryset`, so the model's
+    own `delete()` is never called and the clear has to live on the queryset.
+    """
+    from ..models import SERIES_METADATA_KEY
+
+    grant(staff_user, "wsm_containers.delete_seriesconfig")
+    collection.products.add(*product_list[:2])
+    series = SeriesConfig.objects.create(
+        collection=collection,
+        brand="WeatherTech",
+        axes=["color"],
+        partitioning_axis="color",
+    )
+    collection.refresh_from_db()
+    assert SERIES_METADATA_KEY in collection.metadata
+
+    response = merchant.post(
+        "/admin/wsm_containers/seriesconfig/",
+        {
+            "action": "delete_selected",
+            "_selected_action": [str(series.pk)],
+            "post": "yes",
+        },
+    )
+
+    assert response.status_code == 302, response.status_code
+    assert not SeriesConfig.objects.filter(pk=series.pk).exists()
+    collection.refresh_from_db()
+    assert SERIES_METADATA_KEY not in collection.metadata
+
+
 def test_the_series_list_names_the_collection_and_the_axes(
     merchant, collection, color_attribute
 ):

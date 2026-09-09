@@ -185,3 +185,38 @@ Not fixed here, and reported as a follow-up: one logical axis appears once per
 product rather than once per catalog, which is the shape the 5.0 import
 produces (97 products carry 126 questions, four of them the same QSST pump
 question repeated).
+---
+
+## 8. Series: one editor, one derived blob (Dana, 2026-09-09)
+
+The review (verdict item 10) read `SeriesConfig` plus its `/admin/` screen and
+the Collection's `wsm.series` metadata as two authorities over the same fact.
+Dana ruled the opposite way round from deleting the side table: **the
+`SeriesConfig` screen stays as the one series editor, and the blob is strictly
+derived output.**
+
+GPT's finding 7 is correct that an ordinary side-table save overwrites a newer
+hand edit of the blob, and that is now the design rather than a defect: the row
+is the authority, so the stamp is unconditional and never merges with, diffs
+against, or reads back what the key held. Nothing hand-edits the blob, so
+nothing it could clobber has any standing.
+
+The third door was the gap. Saving restamped and `update`, `bulk_update` and
+`bulk_create` restamped, but deleting a `SeriesConfig` left the published blob
+on the Collection, so a series a merchant had removed kept rendering on the
+storefront and kept being indexed. All three delete doors now clear it in the
+same transaction as the delete: `SeriesConfig.delete()`, a queryset `delete()`,
+and the admin's `delete_selected` bulk action, which goes through
+`ModelAdmin.delete_queryset` and so never calls the model's own method. Deleting
+the Collection needs nothing: the row cascades and the metadata goes with the
+row's own collection.
+
+**Reader contract, unchanged and sufficient:** absent key means no series, and
+that is what the clear produces. `delete_value_from_metadata` removes the key
+rather than blanking it, and the tests assert `SERIES_METADATA_KEY not in
+collection.metadata`, not that the blob is empty or falsy, because an empty blob
+would be a series that exists and answers nothing. Readers already default a
+missing `published` to hidden, so no reader needs a change.
+
+Queries added: one metadata write per collection on a delete, on an admin path
+that no shopper reaches.

@@ -78,7 +78,7 @@ def series_data(collection, **overrides):
     data = {
         "collection": collection.pk,
         "brand": "WeatherTech",
-        "axes": "color",
+        "axes": ["color"],
         "partitioning_axis": "color",
         "miss_message": "",
     }
@@ -86,43 +86,88 @@ def series_data(collection, **overrides):
     return data
 
 
-# --- axes as a list of slugs, not JSON ---------------------------------------
+# --- axes picked from the store's own attributes ------------------------------
+
+
+def test_the_axes_field_offers_the_stores_attributes_by_name(
+    collection, color_attribute
+):
+    """The walk's finding: a free-text box sent a merchant to another app first.
+
+    The screen now offers what the store has, named the way the store names it,
+    with the slug alongside because the slug is what the storefront reads.
+    """
+    choices = dict(form_class()().fields["axes"].choices)
+
+    assert choices["color"] == f"{color_attribute.name} (color)"
 
 
 def test_the_axes_field_refuses_a_slug_that_names_no_attribute(
     collection, color_attribute
 ):
     """A typo'd axis is a configurator question that can never be answered."""
-    form = form_class()(data=series_data(collection, axes="color, cab-style"))
+    form = form_class()(data=series_data(collection, axes=["color", "cab-style"]))
 
     assert not form.is_valid()
     assert "cab-style" in str(form.errors["axes"])
-    assert "color" not in str(form.errors["axes"])
 
 
-def test_the_axes_field_takes_a_comma_separated_list(collection, color_attribute):
-    form = form_class()(data=series_data(collection, axes=" color , color "))
-
-    assert form.is_valid(), form.errors
-    assert form.cleaned_data["axes"] == ["color"]
-    assert form.save().axes == ["color"]
-
-
-def test_the_axes_field_shows_the_saved_list_back_as_text(collection, color_attribute):
-    series = SeriesConfig.objects.create(
-        collection=collection, brand="WeatherTech", axes=["color"], partitioning_axis="color"
+def test_the_axes_field_saves_the_ticked_questions_as_a_json_list(
+    collection, color_attribute, size_attribute
+):
+    """The storefront and the indexer read a JSON list. That does not change."""
+    form = form_class()(
+        data=series_data(collection, axes=["size", "color"], partitioning_axis="color")
     )
 
-    assert form_class()(instance=series).initial["axes"] == "color"
+    assert form.is_valid(), form.errors
+    # The order the merchant was SHOWN, so what the screen said is what saved.
+    assert form.cleaned_data["axes"] == ["color", "size"]
+    assert form.save().axes == ["color", "size"]
+
+
+def test_a_saved_series_shows_its_questions_already_ticked(
+    collection, color_attribute
+):
+    series = SeriesConfig.objects.create(
+        collection=collection,
+        brand="WeatherTech",
+        axes=["color"],
+        partitioning_axis="color",
+    )
+
+    assert form_class()(instance=series).initial["axes"] == ["color"]
+
+
+def test_a_question_whose_attribute_is_gone_is_offered_and_marked(collection):
+    """Never silently drop a question the merchant did not ask to lose.
+
+    A slug can outlive its attribute: the attribute is deleted or renamed in the
+    Saleor dashboard and this row still holds it. A form that offered only what
+    exists would delete the question on the next save and say nothing.
+    """
+    series = SeriesConfig.objects.create(
+        collection=collection,
+        brand="WeatherTech",
+        axes=["cab-style"],
+        partitioning_axis="cab-style",
+    )
+
+    form = form_class()(instance=series)
+    choices = dict(form.fields["axes"].choices)
+
+    assert choices["cab-style"] == "cab-style (missing)"
+    assert form.initial["axes"] == ["cab-style"]
+    assert "cab-style" in dict(form.fields["partitioning_axis"].choices)
 
 
 def test_the_published_gate_still_reaches_the_form(
-    collection, product_list, color_attribute
+    collection, product_list, color_attribute, size_attribute
 ):
     """The refusal the walk liked stays a field error, not a silent no-op."""
     collection.products.add(*product_list)
     form = form_class()(
-        data=series_data(collection, partitioning_axis="finish", published="on")
+        data=series_data(collection, partitioning_axis="size", published="on")
     )
 
     assert not form.is_valid()
@@ -136,17 +181,50 @@ def test_an_unpublished_series_is_never_gated(collection, color_attribute):
     assert form.is_valid(), form.errors
 
 
+# --- how many products a series actually has ---------------------------------
+
+
+def test_the_series_screen_counts_the_products_in_the_collection(
+    merchant, collection, product_list, color_attribute
+):
+    """Publishing is refused under 2 published members and the screen said
+    nothing about how many there were, so the merchant had to leave to find out.
+    """
+    collection.products.add(*product_list)
+    series = SeriesConfig.objects.create(
+        collection=collection,
+        brand="WeatherTech",
+        axes=["color"],
+        partitioning_axis="color",
+    )
+
+    body = merchant.get(
+        f"/admin/wsm_containers/seriesconfig/{series.pk}/change/"
+    ).content.decode()
+
+    assert f"{len(product_list)} in the collection, {len(product_list)} published" in body
+
+
+def test_the_count_tells_an_unsaved_series_where_products_come_from(merchant):
+    body = merchant.get(SERIES_ADD).content.decode()
+
+    assert "Pick a collection and save" in body
+
+
 # --- the screens --------------------------------------------------------------
 
 
-def test_the_series_add_form_is_a_text_field_with_help(merchant):
+def test_the_series_add_form_ticks_attributes_instead_of_typing_slugs(
+    merchant, color_attribute
+):
     response = merchant.get(SERIES_ADD)
 
     assert response.status_code == 200
     body = response.content.decode()
-    assert 'name="axes"' in body
     assert '<textarea name="axes"' not in body
-    assert "separated by commas" in body
+    assert 'type="checkbox" name="axes" value="color"' in body
+    assert f"{color_attribute.name} (color)" in body
+    assert "Tick every question this series asks" in body
     assert "one of the axes above" in body
 
 
@@ -274,9 +352,16 @@ def test_a_kit_row_says_what_it_takes_off(merchant, collection):
     assert ">fixed<" not in body
 
 
-def test_the_axes_help_says_what_a_slug_is_and_where_to_find_one(merchant):
-    """"Axes" with no help text is a field a merchant cannot fill in at all."""
-    body = merchant.get(SERIES_ADD).content.decode()
+def test_the_axes_help_no_longer_sends_the_merchant_to_another_application(
+    merchant, color_attribute
+):
+    """The old help was a set of directions to the Saleor dashboard.
 
-    assert "product attribute SLUG" in body
-    assert "Configuration, Attributes" in body
+    It read well and it still cost the merchant a trip to a second application
+    to find out what to type. The choices are on this screen now, so the field
+    has nothing left to send anyone anywhere for.
+    """
+    help_text = str(form_class()().fields["axes"].help_text)
+
+    assert "Configuration, Attributes" not in help_text
+    assert "slug" not in help_text.lower()

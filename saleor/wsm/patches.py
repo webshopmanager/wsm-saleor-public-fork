@@ -20,7 +20,10 @@ import site is a startup error rather than a checkout that silently stacks a
 discount onto a dealer price.
 """
 
+import importlib
 import sys
+
+from django.core.exceptions import ImproperlyConfigured
 
 PINNED = {
     # MP1, saleor/wsm/dealer/no_stacking.py: no voucher and no catalogue
@@ -61,6 +64,13 @@ PINNED = {
         "saleor.discount.utils.checkout",
         "saleor.discount.utils.order",
     ),
+    # MP3, saleor/wsm/reprice.py: every price this fork owns is re-derived
+    # from our own tables and the CURRENT line quantities on every price
+    # recalculation, so no stored override can outlive the facts it was
+    # computed from.
+    "saleor.checkout.calculations._fetch_checkout_prices_if_expired": (
+        "saleor.checkout.calculations",
+    ),
 }
 
 
@@ -84,3 +94,63 @@ def installed() -> frozenset[str]:
             if "/saleor/wsm/" in code.co_filename.replace("\\", "/"):
                 found.add(f"{original.__module__}.{original.__qualname__}")
     return frozenset(found)
+
+
+def binding_sites(function) -> frozenset[str]:
+    """Every loaded `saleor.` module holding this exact function as an attribute.
+
+    By identity over every attribute, not by name, so `import ... as` is found
+    too. One pass over `sys.modules` per patched function, at `ready()` only.
+    The fork's own modules are skipped: they hold the WRAPPER, which is what this
+    function is asked about, and a site here is by definition a core one.
+    """
+    return frozenset(
+        name
+        for name, module in list(sys.modules.items())
+        if name.startswith("saleor.")
+        and not name.startswith("saleor.wsm")
+        and any(
+            value is function
+            for value in list(getattr(module, "__dict__", {}).values())
+        )
+    )
+
+
+def install_guard(name, guard):
+    """Wrap the core function `name` and rebind it at every site that holds it.
+
+    `name` is its key in `PINNED` above: the defining module and
+    qualname. The sites are pinned there and DISCOVERED here, and a discovered
+    set that differs from the pinned one is a boot error rather than a checkout
+    that silently prices a line the way the storefront last asked for.
+    """
+    pinned = PINNED.get(name)
+    if pinned is None:
+        raise ImproperlyConfigured(
+            f"{name} is patched but not named in "
+            "saleor/wsm/patches.py PINNED. Add it there and to "
+            "docs/wsm/CORE-TOUCHES.md."
+        )
+    # Discovery can only see what is loaded, and at app-ready time most of these
+    # have not been imported yet.
+    for site in pinned:
+        importlib.import_module(site)
+
+    definer, _, attribute = name.rpartition(".")
+    original = getattr(sys.modules[definer], attribute)
+    discovered = binding_sites(original)
+    if discovered != frozenset(pinned):
+        raise ImproperlyConfigured(
+            f"{name} is bound in {sorted(discovered)}, "
+            f"but this patch pins {sorted(pinned)}. Rebind the new sites and "
+            "update docs/wsm/CORE-TOUCHES.md, or the wrapper stands in for "
+            "the function at some call sites and not at others."
+        )
+
+    guarded = guard(original)
+    for site in discovered:
+        module = sys.modules[site]
+        for attr, value in list(vars(module).items()):
+            if value is original:
+                setattr(module, attr, guarded)
+    return guarded

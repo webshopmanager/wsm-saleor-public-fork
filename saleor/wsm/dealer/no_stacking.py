@@ -33,13 +33,13 @@ checkout line-discount path, e.g. a `CheckoutLine.discounts_excluded` flag (or a
 
 from __future__ import annotations
 
-import importlib
-import sys
 from functools import wraps
 
-from django.core.exceptions import ImproperlyConfigured
-
 from .. import patches
+
+# The generic patch machinery lives with the pin it enforces. Re-exported here
+# because this module was its first caller and its tests still name it.
+from ..patches import binding_sites, install_guard  # noqa: F401
 
 
 # Presence of this key on a checkout or order line means the line is priced at a
@@ -100,66 +100,6 @@ def voucher_guard(original):
             line_info.voucher_code = None
 
     return attach_voucher_to_line_info
-
-
-def binding_sites(function) -> frozenset[str]:
-    """Every loaded `saleor.` module holding this exact function as an attribute.
-
-    By identity over every attribute, not by name, so `import ... as` is found
-    too. One pass over `sys.modules` per patched function, at `ready()` only.
-    The fork's own modules are skipped: they hold the WRAPPER, which is what this
-    function is asked about, and a site here is by definition a core one.
-    """
-    return frozenset(
-        name
-        for name, module in list(sys.modules.items())
-        if name.startswith("saleor.")
-        and not name.startswith("saleor.wsm")
-        and any(
-            value is function
-            for value in list(getattr(module, "__dict__", {}).values())
-        )
-    )
-
-
-def install_guard(name, guard):
-    """Wrap the core function `name` and rebind it at every site that holds it.
-
-    `name` is its key in `saleor/wsm/patches.py`: the defining module and
-    qualname. The sites are pinned there and DISCOVERED here, and a discovered
-    set that differs from the pinned one is a boot error rather than a checkout
-    that silently stacks a discount onto a dealer price.
-    """
-    pinned = patches.PINNED.get(name)
-    if pinned is None:
-        raise ImproperlyConfigured(
-            f"wsm.dealer no-stacking: {name} is patched but not named in "
-            "saleor/wsm/patches.py PINNED. Add it there and to "
-            "docs/wsm/CORE-TOUCHES.md."
-        )
-    # Discovery can only see what is loaded, and at app-ready time most of these
-    # have not been imported yet.
-    for site in pinned:
-        importlib.import_module(site)
-
-    definer, _, attribute = name.rpartition(".")
-    original = getattr(sys.modules[definer], attribute)
-    discovered = binding_sites(original)
-    if discovered != frozenset(pinned):
-        raise ImproperlyConfigured(
-            f"wsm.dealer no-stacking: {name} is bound in {sorted(discovered)}, "
-            f"but this patch pins {sorted(pinned)}. Rebind the new sites and "
-            "update docs/wsm/CORE-TOUCHES.md, or a discount will stack on a "
-            "dealer price."
-        )
-
-    guarded = guard(original)
-    for site in discovered:
-        module = sys.modules[site]
-        for attr, value in list(vars(module).items()):
-            if value is original:
-                setattr(module, attr, guarded)
-    return guarded
 
 
 def installed_voucher_guard():

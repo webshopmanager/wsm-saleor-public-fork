@@ -13,8 +13,9 @@ nothing else:
 git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py, urls.py, section 7's list, saleor/wsm/**
 ```
 
-Monkey patches: **two** (MP1, added by U3, and MP2, added by U7; the design doc
-budgeted zero, see those entries for why the stock levers do not exist), plus
+Monkey patches: **three** (MP1, added by U3; MP2, added by U7; MP3, added by
+H1; the design doc budgeted zero, see those entries for why the stock levers do
+not exist), plus
 one resolver swap Bill's secondary-categories patch performs from
 `saleor/wsm/apps.py` (section 7). Core table edits: **zero.** Our tables carry
 FKs into core tables; core migrations are untouched, and the one migration
@@ -452,3 +453,92 @@ Upstream change that deletes this file: an exclusion honoured by the order-level
 discount base, for example a `discountable` predicate on the line consulted by
 `base_checkout_subtotal` and by both propagate functions, the way `is_gift` is
 already consulted on the voucher side. That one predicate would delete MP1 as well.
+
+---
+
+## MP3. Every price this fork wrote is re-derived before it becomes an order
+
+**Wrapped:** `saleor.checkout.calculations._fetch_checkout_prices_if_expired`
+**Binding sites:** one, `saleor.checkout.calculations` (the function is private
+to its own module; nothing else imports it by value).
+**Installed by:** `saleor/wsm/reprice.py::install`, from `WsmConfig.ready`.
+**Added by:** hardening H1, 2026-09-08.
+
+### The hole
+
+Compose and Dealer Pricing both write money onto a `CheckoutLine` as
+`price_override`, and Compose additionally writes a separate fee line whose
+`quantity` mirrors its parent's. Both numbers are a function of the line
+QUANTITY, and both were computed once, at add time, by our own HTTP endpoint.
+Core's own line mutations (`checkoutLinesUpdate`, `checkoutLinesDelete`) change
+that quantity without ever calling us back. So:
+
+- a dealer adds 10 at the 10-break price, drops the line to 1 with the stock
+  mutation, and completes at the 10-break price;
+- a shopper configures 2 of a kit with a per-unit fee, drops the parent to 1,
+  and the fee line stays at quantity 2.
+
+Neither is exotic: `checkoutLinesUpdate` is what every quantity stepper in a
+cart calls. The storefront was expected to call our reprice endpoint after every
+such change, which makes the correctness of a price a property of the CLIENT.
+That is not a seam, it is a convention, and a convention is not a control.
+
+### Why this seam and not another
+
+Ranked by the standing preference, reuse a pinned patch point, then a
+plugin-manager hook, then a new pinned patch:
+
+- **MP1 and MP2** are discount exclusions on dealer lines. Neither is reached on
+  a Compose-only checkout and neither sees quantity changes on a checkout with
+  no discount. Not reusable.
+- **`manager.preprocess_order_creation`** is the only plugin-manager hook that
+  fires at completion. On the payment path it is called from
+  `_prepare_order_data` AFTER the totals are computed, so a plugin there can
+  REFUSE the order but cannot correct it. Refusing is the wrong default: the
+  buyer did nothing wrong by using a quantity stepper.
+- **The price plugin hooks** (`calculate_checkout_line_unit_price` and friends)
+  only run under the `TAX_APP` strategy. On a flat-rate tenant they never fire.
+- **`add_variants_to_checkout`** sees quantity changes but not sign-ins, not
+  catalog edits, and not completion of a checkout nobody touched today.
+
+`_fetch_checkout_prices_if_expired` is the single funnel every price
+recalculation in core goes through, on the cart read, on the shipping step, and
+on completion. Every checkout line mutation calls `invalidate_checkout`, which
+sets `price_expiration` to now, so every one of those paths arrives here with
+prices expired. Correcting BEFORE the original runs means our corrections flow
+through core's own discount and tax passes exactly as an add-time price does.
+
+### What it does
+
+`reprice()` re-derives, from our own tables and the CURRENT line quantities and
+the checkout's CURRENT user:
+
+- every dealer `price_override` (against `best_break` for the line's quantity
+  now, clearing the override entirely when no break is reached any more);
+- every configured `price_override` (re-running `price_configured` over the
+  `wsm.options` snapshot on the line);
+- every Compose fee line's `quantity` (parent quantity for a per-unit fee, 1
+  otherwise) and `price_override`.
+
+**Correct and proceed** is the behaviour for drift. **Refuse**, as a
+`ValidationError` on `lines`, is reserved for the case where the price cannot be
+derived at all: an unparseable snapshot, an option value or fee that no longer
+exists, a fee line orphaned from its parent. Those are states no correction can
+invent a right answer for, and shipping the wrong number is worse than a cart
+that says so.
+
+### Cost
+
+A checkout holding no wsm-owned line costs **zero queries**: `_classify` decides
+from metadata already loaded onto `CheckoutLineInfo`. One that does costs, for
+the WHOLE checkout and not per line: one dealer-ladder query, one option-set
+query, one fee query, one buyer-group query, and one `bulk_update` only when a
+number actually moved. The wrapper reproduces the original's `price_expiration`
+early return, so a checkout whose prices are still fresh costs nothing at all.
+
+### Verified by
+
+`saleor/wsm/tests/test_reprice.py`, which drives both exploits end to end
+through the real endpoints, the real `checkoutLinesUpdate` mutation and
+`create_order_from_checkout`, and asserts on the ORDER lines. The query-count
+claim above is an assertion in that file, not prose.

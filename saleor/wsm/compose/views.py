@@ -36,6 +36,7 @@ from ...plugins.manager import get_plugins_manager
 from ...product.models import Product, ProductVariant, ProductVariantChannelListing
 from ..dealer import pricing as dealer_pricing
 from ..dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
+from ..dealer.tax import bind_tax_exemption
 from ..checkout import LineRefused, check_addable, whole_number
 from ..http import storefront_key_required
 from . import pricing
@@ -250,6 +251,7 @@ def configured_line(request):
     fees = list(Fee.objects.filter(product_id=product_pk))
     # Read from the WRITER: a group that decides the price about to be stamped
     # on a checkout line is read from the database the line is written to.
+    customer_pk = _from_gid(body.get("customerId") or "", "User")
     tier_group = _tier_group(
         body.get("customerId"), settings.DATABASE_CONNECTION_DEFAULT_NAME
     )
@@ -411,6 +413,16 @@ def configured_line(request):
         CheckoutLine.objects.bulk_update(stamped, ["private_metadata"])
 
     invalidate_checkout(checkout_info, lines, manager, save=True)
+
+    # A configured line that took a tier IS a dealer line, so the rest of the
+    # buyer's account follows it here too: a tax-exempt dealer whose whole cart
+    # is configured products is exempt on the route that priced them, and not
+    # only when they also happen to add a plain SKU.
+    bind_tax_exemption(
+        checkout,
+        customer_pk,
+        database_connection_name=settings.DATABASE_CONNECTION_DEFAULT_NAME,
+    )
 
     return JsonResponse(
         {

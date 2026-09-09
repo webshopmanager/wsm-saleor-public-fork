@@ -471,3 +471,23 @@ def test_a_kit_member_not_available_for_purchase_is_refused(client, checkout, ki
 
     assert response.status_code == 422
     assert checkout.lines.count() == 0
+
+
+def test_a_tax_exempt_dealers_kit_lands_in_a_cart_that_owes_no_tax(
+    client, checkout, kit, customer_user
+):
+    """Same rule as the configured line, on the other route that prices a buyer.
+
+    A kit is what this shopper is buying, so it is where their exemption has to
+    land; see `saleor/wsm/dealer/tax.py` for what is allowed to write the flag.
+    """
+    from saleor.wsm.dealer.models import DealerCustomer, DealerGroup
+
+    group = DealerGroup.objects.create(code="tier-1", name="Tier 1")
+    DealerCustomer.objects.create(user=customer_user, group=group, tax_exempt=True)
+
+    response = post_kit(client, checkout, kit.collection_id, customer=customer_user)
+
+    assert response.status_code == 200, response.content
+    checkout.refresh_from_db()
+    assert checkout.tax_exemption is True

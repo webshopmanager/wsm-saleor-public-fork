@@ -22,6 +22,7 @@ from ...checkout.models import Checkout
 from ...core.db.connection import allow_writer
 from ..checkout import LineRefused, whole_number
 from ..dealer import pricing as dealer_pricing
+from ..dealer.tax import bind_tax_exemption
 from ..http import storefront_key_required
 from . import pricing
 from .models import KitConfig
@@ -182,6 +183,14 @@ def kit_line(request):
         return _refused(str(refusal))
     except LineRefused as refusal:
         return JsonResponse({"violations": refusal.violations}, status=422)
+
+    # Same reason as the configured line: a kit is what this buyer is buying,
+    # so it is where their exemption has to land.
+    bind_tax_exemption(
+        checkout,
+        user.pk if user is not None else None,
+        database_connection_name=settings.DATABASE_CONNECTION_DEFAULT_NAME,
+    )
 
     return JsonResponse(
         {

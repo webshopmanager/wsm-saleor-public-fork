@@ -1,0 +1,262 @@
+# WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
+"""Can a merchant FIND the row and read the screen?
+
+Every assertion here is a finding from the merchant walk of 2026-09-08, which
+rated these screens BLOCKED: 626 tier prices all reading "Base" with no search
+box, dealer customers listed as UUIDs, foreign keys with no lookup behind them,
+and a dealer settings list that was empty and said nothing about the default.
+
+The client is a STAFF NON-SUPERUSER holding only the model permissions, because
+a superuser passes every check these screens make and would prove nothing.
+"""
+
+from decimal import Decimal
+
+import pytest
+from django.core.exceptions import ValidationError
+
+from ....permission.models import Permission
+from ..models import DealerCustomer, DealerGroup, DealerSettings, TierPrice
+
+pytestmark = pytest.mark.django_db
+
+AUTH_BACKEND = "saleor.wsm.compose.auth.AdminPasswordBackend"
+TIER_PRICES = "/admin/wsm_dealer/tierprice/"
+DEALER_CUSTOMERS = "/admin/wsm_dealer/dealercustomer/"
+DEALER_SETTINGS = "/admin/wsm_dealer/dealersettings/"
+AUTOCOMPLETE = "/admin/autocomplete/"
+
+
+def grant(user, *dotted_permissions):
+    """Give the user exactly these permissions, loudly if one does not exist."""
+    for dotted in dotted_permissions:
+        app_label, codename = dotted.split(".")
+        user.user_permissions.add(
+            Permission.objects.get(
+                content_type__app_label=app_label, codename=codename
+            )
+        )
+
+
+@pytest.fixture(autouse=True)
+def deployed_middleware(settings):
+    """Run the admin the way the box runs it.
+
+    `saleor/tests/settings.py` inserts `restrict_writer_middleware` AHEAD of the
+    session middleware, so under the test settings every admin request 500s on
+    its own session read: the Django admin reads the session, the user and its
+    permissions from the default connection by design, before any view runs.
+    The deployed setting is `ENABLE_RESTRICT_WRITER_MIDDLEWARE` off, which is
+    what these tests therefore run under. Making /admin/ survive that middleware
+    would take an `allow_writer` around the whole mount in wsm.compose's
+    AdminSite; it is a finding on that file, not something these screens can fix.
+    """
+    settings.MIDDLEWARE = [
+        middleware
+        for middleware in settings.MIDDLEWARE
+        if "restrict_writer" not in middleware
+    ]
+
+@pytest.fixture
+def merchant(client, staff_user):
+    assert staff_user.is_staff and not staff_user.is_superuser
+    grant(
+        staff_user,
+        "wsm_dealer.view_dealergroup",
+        "wsm_dealer.view_dealercustomer",
+        "wsm_dealer.add_dealercustomer",
+        "wsm_dealer.change_dealercustomer",
+        "wsm_dealer.view_tierprice",
+        "wsm_dealer.add_tierprice",
+        "wsm_dealer.change_tierprice",
+        "wsm_dealer.view_dealersettings",
+        "wsm_dealer.add_dealersettings",
+        "wsm_dealer.change_dealersettings",
+    )
+    client.force_login(staff_user, backend=AUTH_BACKEND)
+    return client
+
+
+@pytest.fixture
+def group(db):
+    return DealerGroup.objects.create(code="dealer-1", name="Dealer 1")
+
+
+@pytest.fixture
+def two_skus(variant, product_type, category):
+    """Two SKUs on two products, named so that one search term reaches one row.
+
+    `product_list` will not do: its SKUs are random hex, so a search for
+    "Test product 1" matches a decoy whose SKU happens to contain a 1.
+    """
+    from ....product.models import Product, ProductVariant
+
+    other = Product.objects.create(
+        name="Bushwacker Pocket Flare",
+        slug="bushwacker-pocket-flare",
+        product_type=product_type,
+        category=category,
+    )
+    return variant, ProductVariant.objects.create(product=other, sku="BW-40919-02")
+
+
+def price(variant, group, amount="9.000"):
+    return TierPrice.objects.create(
+        variant=variant, group=group, min_quantity=1, amount=Decimal(amount)
+    )
+
+
+# --- the tier price list ------------------------------------------------------
+
+
+def test_tier_price_list_names_the_product_and_the_sku(merchant, variant, group):
+    """"Base" is the variant name on every single-variant product in the fleet."""
+    price(variant, group)
+
+    response = merchant.get(TIER_PRICES)
+
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert variant.product.name in body
+    assert variant.sku in body
+
+
+def test_tier_price_search_by_sku_returns_only_that_row(merchant, two_skus, group):
+    decoy, wanted = two_skus
+    price(wanted, group)
+    price(decoy, group)
+
+    body = merchant.get(TIER_PRICES, {"q": wanted.sku}).content.decode()
+
+    assert wanted.sku in body
+    assert decoy.sku not in body
+
+
+def test_tier_price_search_by_product_name_returns_only_that_row(
+    merchant, two_skus, group
+):
+    decoy, wanted = two_skus
+    price(wanted, group)
+    price(decoy, group)
+
+    body = merchant.get(TIER_PRICES, {"q": "Bushwacker"}).content.decode()
+
+    assert wanted.sku in body
+    assert decoy.sku not in body
+
+
+# --- the dealer customer list -------------------------------------------------
+
+
+def test_dealer_customer_list_names_the_shopper(merchant, customer_user, group):
+    """Saleor's `User.__str__` is a UUID, which names nobody."""
+    DealerCustomer.objects.create(user=customer_user, group=group)
+
+    body = merchant.get(DEALER_CUSTOMERS).content.decode()
+
+    assert customer_user.email in body
+    assert str(customer_user.uuid) not in body
+
+
+def test_dealer_customer_search_by_email(merchant, customer_user, customer_user2, group):
+    """The decoy is another shopper: the signed-in staff email is in the header."""
+    DealerCustomer.objects.create(user=customer_user, group=group)
+    DealerCustomer.objects.create(user=customer_user2, group=group)
+
+    body = merchant.get(DEALER_CUSTOMERS, {"q": customer_user.email}).content.decode()
+
+    assert customer_user.email in body
+    assert customer_user2.email not in body
+
+
+# --- the pickers --------------------------------------------------------------
+
+
+def test_the_user_picker_answers_the_autocomplete(merchant, customer_user):
+    response = merchant.get(
+        AUTOCOMPLETE,
+        {
+            "app_label": "wsm_dealer",
+            "model_name": "dealercustomer",
+            "field_name": "user",
+            "term": customer_user.email,
+        },
+    )
+
+    assert response.status_code == 200
+    texts = [result["text"] for result in response.json()["results"]]
+    assert any(customer_user.email in text for text in texts), texts
+
+
+def test_the_variant_picker_names_the_product_and_the_sku(merchant, variant):
+    response = merchant.get(
+        AUTOCOMPLETE,
+        {
+            "app_label": "wsm_dealer",
+            "model_name": "tierprice",
+            "field_name": "variant",
+            "term": variant.sku,
+        },
+    )
+
+    assert response.status_code == 200
+    texts = [result["text"] for result in response.json()["results"]]
+    assert len(texts) == 1, texts
+    assert variant.product.name in texts[0]
+    assert variant.sku in texts[0]
+
+
+def test_the_pickers_stay_off_the_index_and_refuse_writes(merchant):
+    index = merchant.get("/admin/").content.decode()
+
+    assert "Tier prices" in index
+    assert "/admin/account/user/" not in index
+    assert merchant.get("/admin/account/user/add/").status_code == 403
+
+
+# --- dealer settings ----------------------------------------------------------
+
+
+def test_dealer_settings_opens_the_one_row_and_states_the_default(merchant):
+    """An empty list told the walk nothing. The row says what stacking does."""
+    assert not DealerSettings.objects.exists()
+
+    response = merchant.get(DEALER_SETTINGS)
+
+    assert response.status_code == 302
+    row = DealerSettings.objects.get()
+    assert row.discount_stacking is False
+    assert response["Location"].endswith(f"{DEALER_SETTINGS}{row.pk}/change/")
+    page = merchant.get(response["Location"]).content.decode()
+    assert "takes no" in page and "voucher" in page
+
+
+def test_dealer_settings_does_not_make_a_second_row(merchant):
+    merchant.get(DEALER_SETTINGS)
+    merchant.get(DEALER_SETTINGS)
+
+    assert DealerSettings.objects.count() == 1
+
+
+# --- the tier group namespace, for wsm.compose to call ------------------------
+
+
+def test_dealer_group_codes_lists_the_namespace(group):
+    DealerGroup.objects.create(code="warehouse")
+
+    assert DealerGroup.objects.codes() == ["dealer-1", "warehouse"]
+
+
+def test_validate_tier_group_code_refuses_a_code_with_no_group(group):
+    from ..models import validate_tier_group_code
+
+    with pytest.raises(ValidationError) as refusal:
+        validate_tier_group_code("dealer-9")
+
+    assert "dealer-1" in str(refusal.value)
+
+
+def test_validate_tier_group_code_accepts_a_real_code(group):
+    from ..models import validate_tier_group_code
+
+    assert validate_tier_group_code("dealer-1") is None

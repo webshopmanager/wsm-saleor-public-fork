@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models.signals import post_delete, post_save
 
 from . import pricing
 
@@ -399,6 +400,58 @@ class OptionValue(models.Model):
         )
 
 
+# The product metafield the PDP configurator gates on: the storefront asks a
+# product nothing without it (design doc, section 2). The 5.0 importer has its
+# own copy of these two strings and is not ours to edit in this wave;
+# `test_the_importer_and_the_signal_agree_on_the_marker` is what keeps the two
+# from drifting apart.
+CONFIGURABLE_METAFIELD = "compose.configurable"
+CONFIGURABLE_VALUE = "true"
+
+
+def sync_configurable_marker(product_id) -> None:
+    """Make the marker equal to "this product has configuration on it".
+
+    Only `import_option_sets_50` ever wrote it, so a merchant who built a
+    question or a charge in /admin/ got a working set, a working price and a PDP
+    that asked nothing: the one screen the whole feature is for. Deleting the
+    last set had the mirror defect, leaving a configurator that asks nothing on
+    a product the storefront still treats as configurable.
+
+    Fees count as configuration on their own. A product whose only Compose row
+    is a declinable crating charge still has something the PDP has to put in
+    front of the shopper.
+
+    Two to four queries, on a path a merchant drives by hand. Nothing on any
+    read, pricing or checkout path calls this.
+    """
+    if not product_id:
+        return
+    from ...product.models import Product
+
+    product = Product.objects.filter(pk=product_id).only("id", "metadata").first()
+    if product is None:
+        # A cascading product delete takes its sets with it, and the row is
+        # already gone by the time this runs.
+        return
+    configurable = (
+        OptionSet.objects.filter(product_id=product_id).exists()
+        or Fee.objects.filter(product_id=product_id).exists()
+    )
+    current = product.metadata.get(CONFIGURABLE_METAFIELD)
+    if configurable == (current == CONFIGURABLE_VALUE):
+        return
+    if configurable:
+        product.metadata[CONFIGURABLE_METAFIELD] = CONFIGURABLE_VALUE
+    else:
+        product.metadata.pop(CONFIGURABLE_METAFIELD, None)
+    product.save(update_fields=["metadata"])
+
+
+def _sync_marker_from(sender, instance, **kwargs):
+    sync_configurable_marker(instance.product_id)
+
+
 class DealerTierOptionPrice(models.Model):
     """One buyer group's delta for one option value (requirement 2.2).
 
@@ -683,3 +736,18 @@ def _ensure_fee_variant(fee, channel):
     )
     _ENSURED_FEE_VARIANTS.add((fee.pk, channel.pk))
     return variant
+
+
+# Every door that adds or removes configuration, not just `save()`: the admin
+# deletes through a queryset, which skips `Model.delete` and fires this.
+for _sender in (OptionSet, Fee):
+    post_save.connect(
+        _sync_marker_from,
+        sender=_sender,
+        dispatch_uid=f"wsm_compose.configurable_marker.save.{_sender.__name__}",
+    )
+    post_delete.connect(
+        _sync_marker_from,
+        sender=_sender,
+        dispatch_uid=f"wsm_compose.configurable_marker.delete.{_sender.__name__}",
+    )

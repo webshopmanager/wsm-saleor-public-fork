@@ -31,6 +31,8 @@ Disappears when pricing is in-process (each had a live consumer only because pri
 Stays (has a live consumer): the storefront REST contract (5 endpoints) for the bake-off only, so B6 holds with zero storefront code;
 line metadata wsm.options, wsm.options.sku, wsm.options.cid, wsm.options.acc, wsm.dealer (presence only), compose.fee (label, apply_to), compose.parent_line.
 The product metafield compose.configurable (the PDP asks nothing without it).
+Written and cleared by wsm.compose itself, on every OptionSet and Fee save and delete, fee-only products included;
+the 5.0 importer is no longer the only writer.
 
 ## 3. Simplify: the seam
 

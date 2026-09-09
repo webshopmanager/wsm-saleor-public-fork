@@ -617,7 +617,7 @@ def test_checkout_complete_blocked_when_lines_changed_after_payment(
     lines, _ = fetch_checkout_lines(checkout)
     checkout_info = fetch_checkout_info(checkout, lines, manager)
     total = calculations.calculate_checkout_total_with_gift_cards(
-        manager, checkout_info, lines, address
+        manager, checkout_info, lines
     )
 
     transaction = transaction_item_generator(
@@ -706,7 +706,7 @@ def test_checkout_complete_annotates_order_with_shipping_drift_after_payment(
     lines, _ = fetch_checkout_lines(checkout)
     checkout_info = fetch_checkout_info(checkout, lines, manager)
     total = calculations.calculate_checkout_total_with_gift_cards(
-        manager, checkout_info, lines, address
+        manager, checkout_info, lines
     )
 
     transaction = transaction_item_generator(

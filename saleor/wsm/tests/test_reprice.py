@@ -18,7 +18,6 @@ import json
 from decimal import Decimal
 
 import pytest
-from django.core.exceptions import ValidationError
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -268,7 +267,9 @@ def graphql(client, query, variables):
         content_type="application/json",
     )
     assert response.status_code == 200, response.content
-    return response.json()["data"]
+    body = response.json()
+    assert "errors" not in body, body["errors"]
+    return body["data"]
 
 
 def test_a_dealer_stamp_a_shopper_wrote_for_themselves_buys_nothing(
@@ -450,22 +451,144 @@ def test_a_checkout_this_fork_does_not_own_costs_no_queries(checkout_with_items)
     assert captured.captured_queries == []
 
 
-def test_a_configured_line_whose_option_vanished_refuses_rather_than_guesses(
-    client, checkout, stage_2_kit, omit_parts, crating_fee,
-):
-    """No correction can invent the right price, so the cart says so."""
+# --- the cart that can no longer be priced, and still reads -----------------
+
+
+LINES_DELETE = """
+    mutation($id: ID!, $lines: [ID!]!) {
+      checkoutLinesDelete(id: $id, linesIds: $lines) {
+        errors { field message code }
+      }
+    }"""
+
+
+@pytest.fixture
+def handling_fee(stage_2_kit):
+    """A fee the shopper may decline, which the required crating fee is not."""
+    from saleor.wsm.compose.models import Fee
+
+    return Fee.objects.create(
+        product=stage_2_kit.product,
+        label="Handling",
+        sku="HANDLE-01",
+        basis="fixed",
+        amount=Decimal("25.00"),
+        apply_to="line",
+        required=False,
+    )
+
+
+def ident(checkout):
+    return {"id": gid("Checkout", checkout.token)}
+
+
+def prices(read):
+    return [row["unitPrice"]["gross"]["amount"] for row in read["checkout"]["lines"]]
+
+
+def delete_lines(client, checkout, *lines):
+    """The stock mutation any cart's remove button calls."""
+    payload = graphql(
+        client,
+        LINES_DELETE,
+        {
+            "id": gid("Checkout", checkout.token),
+            "lines": [gid("CheckoutLine", line.pk) for line in lines],
+        },
+    )["checkoutLinesDelete"]
+    assert payload["errors"] == [], payload["errors"]
+
+
+def configure(client, checkout, stage_2_kit, omit_parts, accepted=()):
     option_set, values = omit_parts
-    post_line(
+    response = post_line(
         client,
         checkout,
         stage_2_kit,
         selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
-        accepted=[crating_fee.pk],
+        accepted=[fee.pk for fee in accepted],
     )
-    OptionValue.objects.filter(pk=values[0].pk).delete()
+    assert response.status_code == 200, response.content
+    parent = checkout.lines.get(variant_id=stage_2_kit.pk)
+    return parent, list(checkout.lines.exclude(pk=parent.pk))
+
+
+def test_deleting_an_optional_fee_line_declines_it_and_keeps_the_item(
+    client, checkout, stage_2_kit, omit_parts, handling_fee,
+):
+    """The wedge, and the shape of the answer.
+
+    Every price recalculation runs through this funnel, and a recalculation is
+    what a cart READ is. Raising here did not warn the shopper about one line,
+    it made the whole checkout impossible to render, impossible to repair and
+    impossible to empty, reachable with the stock remove button on a fee line.
+
+    A charge the shopper was allowed to decline, declined the hard way, is a
+    decline: the fee goes, the item stays, the cart reads.
+    """
+    parent, fees = configure(
+        client, checkout, stage_2_kit, omit_parts, accepted=[handling_fee]
+    )
+    assert len(fees) == 1
+
+    delete_lines(client, checkout, fees[0])
+    read = graphql(client, READ_CHECKOUT, ident(checkout))
+
+    assert prices(read) == [float(CONFIGURED_UNIT)]
+    parent.refresh_from_db()
+    assert parent.price_override == Decimal(CONFIGURED_UNIT)
+
+
+def test_deleting_a_required_fee_line_takes_the_item_with_it(
+    client, checkout, stage_2_kit, omit_parts, crating_fee,
+):
+    """A required charge cannot be declined, so the item it belongs to goes.
+
+    Leaving the parent would sell a crated item without the crate, which is the
+    undercharge that deleting the line would otherwise buy. The cart still
+    READS, which is the whole point of the policy; it just no longer holds an
+    item this fork cannot price correctly.
+    """
+    parent, fees = configure(client, checkout, stage_2_kit, omit_parts)
+    assert len(fees) == 1, "the crating fee is required, so it is charged unasked"
+
+    delete_lines(client, checkout, fees[0])
+    read = graphql(client, READ_CHECKOUT, {"id": gid("Checkout", checkout.token)})
+
+    # The render that does the dropping had already loaded the line, so it draws
+    # it one last time at nothing, which is what the total it shows says too.
+    assert prices(read) == [0.0]
+    assert not CheckoutLine.objects.filter(pk=parent.pk).exists()
+    assert prices(graphql(client, READ_CHECKOUT, ident(checkout))) == []
+
+
+def test_deleting_the_configured_parent_takes_its_charges_with_it(
+    client, checkout, stage_2_kit, omit_parts, crating_fee,
+):
+    """A crate with nothing to crate is not a thing anyone owes money for."""
+    parent, fees = configure(client, checkout, stage_2_kit, omit_parts)
+
+    delete_lines(client, checkout, parent)
+    read = graphql(client, READ_CHECKOUT, ident(checkout))
+
+    assert prices(read) == [0.0]
+    assert not CheckoutLine.objects.filter(pk=fees[0].pk).exists()
+    assert prices(graphql(client, READ_CHECKOUT, ident(checkout))) == []
+
+
+def test_a_configured_line_whose_option_vanished_leaves_the_cart_readable(
+    client, checkout, stage_2_kit, omit_parts, crating_fee,
+):
+    """No correction can invent the right price, so the line stops existing.
+
+    The merchant deleted a value a live cart was built on. Guessing at a price
+    is worse than not selling it, and so is a checkout that 500s forever.
+    """
+    parent, fees = configure(client, checkout, stage_2_kit, omit_parts)
+    OptionValue.objects.filter(pk=omit_parts[1][0].pk).delete()
 
     checkout_info, lines = checkout_info_for(checkout)
+    reprice(checkout_info, lines)
 
-    with pytest.raises(ValidationError) as raised:
-        reprice(checkout_info, lines)
-    assert "lines" in raised.value.error_dict
+    assert not CheckoutLine.objects.filter(pk__in=[parent.pk, fees[0].pk]).exists()
+    assert prices(graphql(client, READ_CHECKOUT, ident(checkout))) == []

@@ -595,12 +595,39 @@ snapshot says `tier_applied`, and `_mark_dealer` rewrites or clears it on every
 recalculation, because a tier can start or stop applying in between (a quantity
 change, a group change, the merchant deleting the row).
 
-**Correct and proceed** is the behaviour for drift. **Refuse**, as a
-`ValidationError` on `lines`, is reserved for the case where the price cannot be
-derived at all: an unparseable snapshot, an option value or fee that no longer
-exists, a fee line orphaned from its parent. Those are states no correction can
-invent a right answer for, and shipping the wrong number is worse than a cart
-that says so.
+**Correct and proceed** is the behaviour for drift. **A read never raises**, and
+that is the whole of the policy for everything else. This funnel runs on every
+price recalculation, and a recalculation is what a cart READ is, so an exception
+here does not warn a shopper about one line: `checkout` resolves to `null` and
+the cart becomes impossible to render, impossible to repair and impossible to
+empty. The shopper cannot even delete the line that caused it, because the
+delete mutation returns the checkout.
+
+*The exploit.* A configured item carries its charges as ordinary sibling
+checkout lines. Any shopper could point the stock `checkoutLinesDelete` at the
+crating-fee line, which every storefront's remove button already calls, and the
+next read of that checkout raised `{'lines': ['the charges on a configured item
+in this checkout no longer match it']}` with `data.checkout = null`. Not an
+undercharge: a self-service denial of service on one's own cart, needing no
+tools, no forged input and no account, and leaving support the only exit. The
+same wedge was reachable by deleting the configured parent and leaving its fee
+behind, and by a merchant deleting an option value a live cart was built on.
+
+So a line this fork can no longer price stops being on the checkout. The row is
+deleted and one `logger.warning` names the checkout token, the line pk and the
+reason. A charge the shopper was **allowed to decline**, declined the hard way,
+is simply declined and the item stays. A **required** charge cannot be declined,
+so the configured item goes with it, because leaving the parent is what would
+turn the deletion into the undercharge: a crated item sold without the crate. A
+fee line whose parent is gone, or which never said what it belonged to, goes on
+its own. `Unrepriceable` still exists as this module's internal per-line signal
+and is never raised past `reprice()`.
+
+The request that does the dropping has already loaded those lines and resolves a
+non-nullable `unitPrice` off them, so they cannot be pulled out of its list
+mid-resolve. They are priced at zero instead: that render draws the doomed line
+one last time at nothing, which is exactly the total the next read will show, and
+the next read does not see the row at all.
 
 ### Cost
 
@@ -610,6 +637,8 @@ the WHOLE checkout and not per line: one dealer-ladder query, one option-set
 query, one fee query, one buyer-group query, and one `bulk_update` only when a
 number actually moved. The wrapper reproduces the original's `price_expiration`
 early return, so a checkout whose prices are still fresh costs nothing at all.
+Dropping adds **one** query, and only on the recalculation that finds a line it
+cannot price, which is not a state a healthy cart reaches twice.
 
 ### Verified by
 

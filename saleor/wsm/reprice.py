@@ -49,15 +49,14 @@ did, which is the common case.
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from decimal import Decimal
 from functools import wraps
 
 from django.conf import settings
-from django.core.exceptions import ValidationError
 from django.utils import timezone
 
-from ..checkout.error_codes import CheckoutErrorCode
 from ..checkout.models import CheckoutLine
 from ..core.db.connection import allow_writer
 from . import patches
@@ -118,8 +117,16 @@ CACHED_ON_LINE_INFO = (
 _installed = False
 
 
+logger = logging.getLogger(__name__)
+
+
 class Unrepriceable(Exception):
-    """A line we own whose price cannot be re-derived from the catalog at all."""
+    """A line we own whose price cannot be re-derived from the catalog at all.
+
+    Internal to this module and never raised past `reprice()`: it is the signal
+    that drives `_drop`, not a refusal. A cart READ that raises is a cart nobody
+    can render, repair or empty, and this funnel runs on every read.
+    """
 
 
 def install() -> None:
@@ -193,33 +200,50 @@ def reprice(checkout_info, lines) -> list:
     # One writer block for the whole pass. Core restricts the writer on a cart
     # request, and every read below is a read that backs a write, so opting in
     # once here is the honest shape rather than sprinkling it over each query.
-    try:
-        with allow_writer():
-            if dealer_lines:
-                _reprice_dealer(
-                    checkout_info, dealer_lines, database_connection_name, mark
-                )
-            if configured or fee_lines:
-                _reprice_configured(
-                    checkout_info,
-                    configured,
-                    fee_lines,
-                    database_connection_name,
-                    mark,
-                )
-            if moved:
-                CheckoutLine.objects.bulk_update(
-                    [info.line for info in moved], list(WRITTEN_FIELDS)
-                )
-    except Unrepriceable as problem:
-        raise ValidationError(
-            {
-                "lines": ValidationError(
-                    str(problem), code=CheckoutErrorCode.INVALID.value
-                )
-            }
-        ) from problem
+    with allow_writer():
+        if dealer_lines:
+            _reprice_dealer(checkout_info, dealer_lines, database_connection_name, mark)
+        dropped = []
+        if configured or fee_lines:
+            dropped = _reprice_configured(
+                checkout_info,
+                configured,
+                fee_lines,
+                database_connection_name,
+                mark,
+            )
+        if dropped:
+            _drop(dropped)
+        if moved:
+            CheckoutLine.objects.bulk_update(
+                [info.line for info in moved], list(WRITTEN_FIELDS)
+            )
     return moved
+
+
+def _drop(dropped):
+    """Take lines off the checkout that this fork can no longer price. One query.
+
+    Reading a cart must never raise. This funnel runs on every price
+    recalculation, and a recalculation is what a cart READ is, so an exception
+    here does not warn a shopper about one line: it makes the whole checkout
+    impossible to render, impossible to repair and impossible to empty. That
+    wedge was reachable with the stock remove button on a fee line.
+
+    The rows go, and the in-flight calculation keeps the objects, deliberately.
+    The GraphQL layer has already loaded these lines for this request and
+    resolves a non-nullable `unitPrice` off the very `CheckoutLineInfo` list
+    handed to us, so pulling entries out of it mid-resolve turns one wedge into
+    another. They are priced at nothing instead: this render still shows the
+    line, the TOTAL it shows is already the total without it, the next read does
+    not see the row at all, and completion re-fetches from the table, so nothing
+    that no longer exists can be charged for.
+    """
+    for line_info in dropped:
+        line_info.line.price_override = Decimal(0)
+        for name in CACHED_ON_LINE_INFO:
+            line_info.__dict__.pop(name, None)
+    CheckoutLine.objects.filter(pk__in={info.line.pk for info in dropped}).delete()
 
 
 def _classify(lines):
@@ -379,35 +403,57 @@ def _reprice_configured(
     # it is ours and not the shopper's.
     stamped_group_stands = user is None
 
+    token = checkout_info.checkout.token
+    dropped = []
+
     fee_lines_by_parent = defaultdict(dict)
     for line_info in fee_lines:
         parent = (line_info.line.private_metadata or {}).get(META_PARENT)
         if not parent:
-            raise Unrepriceable(
-                "a fee line on this checkout does not say which item it belongs to"
-            )
+            _log_drop(token, line_info, "the charge does not say what it belongs to")
+            dropped.append(line_info)
+            continue
         fee_lines_by_parent[parent][line_info.line.variant_id] = line_info
 
     claimed = set()
     for line_info in configured:
-        claimed.add(
-            _reprice_one_configured(
-                line_info,
-                sets_by_product,
-                fees_by_product,
-                fees_by_id,
-                fee_lines_by_parent,
-                tier_group,
-                stamped_group_stands,
-                mark,
+        cid = (line_info.line.private_metadata or {}).get(META_CID)
+        try:
+            claimed.add(
+                _reprice_one_configured(
+                    line_info,
+                    sets_by_product,
+                    fees_by_product,
+                    fees_by_id,
+                    fee_lines_by_parent,
+                    tier_group,
+                    stamped_group_stands,
+                    mark,
+                    dropped,
+                )
             )
-        )
+        except Unrepriceable as problem:
+            # No correction can invent what this line should cost, so it stops
+            # being on the checkout. Its charges go with it: a crate with
+            # nothing to crate is not a thing anyone owes money for.
+            _log_drop(token, line_info, str(problem))
+            dropped.append(line_info)
+            dropped.extend(fee_lines_by_parent.pop(cid, {}).values())
 
-    orphans = set(fee_lines_by_parent) - claimed
-    if orphans:
-        raise Unrepriceable(
-            "a charge on this checkout no longer belongs to any item in it"
-        )
+    for orphaned in set(fee_lines_by_parent) - claimed:
+        for line_info in fee_lines_by_parent[orphaned].values():
+            _log_drop(token, line_info, "the item this charge belongs to is gone")
+            dropped.append(line_info)
+    return dropped
+
+
+def _log_drop(token, line_info, reason):
+    logger.warning(
+        "wsm reprice: dropping checkout line %s from checkout %s: %s",
+        line_info.line.pk,
+        token,
+        reason,
+    )
 
 
 def _reprice_one_configured(
@@ -419,6 +465,7 @@ def _reprice_one_configured(
     tier_group,
     stamped_group_stands,
     mark,
+    dropped,
 ):
     line = line_info.line
     stamps = line.private_metadata or {}
@@ -476,7 +523,7 @@ def _reprice_one_configured(
         mark(line_info)
 
     _reprice_fee_lines(
-        cid, line.quantity, priced, fees_by_id, fee_lines_by_parent, mark
+        cid, line.quantity, priced, fees_by_id, fee_lines_by_parent, mark, dropped
     )
     return cid
 
@@ -500,7 +547,9 @@ def _mark_dealer(line, snapshot):
         line.delete_value_from_private_metadata(DEALER_META)
 
 
-def _reprice_fee_lines(cid, quantity, priced, fees_by_id, fee_lines_by_parent, mark):
+def _reprice_fee_lines(
+    cid, quantity, priced, fees_by_id, fee_lines_by_parent, mark, dropped
+):
     """Make the fee lines say what the pricing engine just charged for them.
 
     A per-unit fee is one line of the parent's quantity and a per-line fee is one
@@ -514,17 +563,25 @@ def _reprice_fee_lines(cid, quantity, priced, fees_by_id, fee_lines_by_parent, m
     expected = {}
     for row in priced.snapshot["fees"]:
         fee = fees_by_id.get(row["id"])
-        if fee is None or fee.variant_id is None:
-            raise Unrepriceable("a charge on this checkout no longer has a product")
-        expected[fee.variant_id] = row
+        if fee is not None and fee.variant_id in present:
+            expected[fee.variant_id] = row
+            continue
+        # The line this charge is written on is not on the checkout: deleted
+        # with the stock `checkoutLinesDelete`, or the merchant unhooked the fee
+        # product. Adding a line back is a cart mutation and this is a
+        # recalculation, so it cannot be put right here. An OPTIONAL charge is
+        # then simply declined, which is a choice the shopper is allowed to
+        # make. A REQUIRED one is not: the configured item is not sellable
+        # without it, and selling it anyway is the undercharge that deleting a
+        # crate line would otherwise buy. The item goes instead.
+        if fee is None or fee.required:
+            raise Unrepriceable("a required charge on this item can no longer be taken")
 
-    if set(expected) != set(present):
-        # Adding or dropping a line is a cart mutation, not a recalculation, so
-        # the honest answer here is to stop rather than to sell a configured
-        # item with a charge missing or a charge nobody is owed.
-        raise Unrepriceable(
-            "the charges on a configured item in this checkout no longer match it"
-        )
+    # A charge nobody is owed any more, because the configuration stopped
+    # triggering it. Its line goes; the item it hangs off does not.
+    dropped.extend(
+        info for variant_id, info in present.items() if variant_id not in expected
+    )
 
     for variant_id, row in expected.items():
         line_info = present[variant_id]

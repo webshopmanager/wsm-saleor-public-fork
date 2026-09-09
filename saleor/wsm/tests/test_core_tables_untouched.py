@@ -187,3 +187,51 @@ def test_the_installed_monkey_patches_are_the_documented_ones():
         f"undocumented monkey patch: {sorted(installed - pinned)}. Add it to "
         "saleor/wsm/patches.py PINNED and to docs/wsm/CORE-TOUCHES.md."
     )
+
+
+def test_the_guard_names_a_planted_patch_even_beside_a_test_double():
+    """`installed()` has to survive the namespace the full suite leaves behind.
+
+    Two failures in one test, because the fix for the second must not buy its
+    green by blinding the first. A wrapper planted in a core module namespace
+    has to be NAMED, or the pin is decoration. And a test double left in that
+    same namespace answers EVERY attribute, `__code__` included, so a sweep
+    that trusts the answer dies on `co_filename`: under the full suite the
+    guard then errors instead of reporting, which is the loudest possible way
+    to stop guarding. The double is planted first and the assertion is made
+    with it still in place.
+    """
+    import functools
+    from unittest import mock
+
+    from saleor.checkout import calculations
+
+    @functools.wraps(calculations.fetch_checkout_data)
+    def undocumented(*args, **kwargs):  # pragma: no cover - never called
+        return calculations.fetch_checkout_data(*args, **kwargs)
+
+    planted = "saleor.checkout.calculations.fetch_checkout_data"
+    assert planted not in frozenset(patches.PINNED), (
+        "this test needs a core function the fork does NOT patch"
+    )
+
+    class AnswersAnything:
+        """A test double of the shape the full suite leaves lying around.
+
+        It answers `__wrapped__` and `__code__` like a wrapper does, with a
+        sentinel, so a sweep that trusts the answer reaches `co_filename` on an
+        object that has none.
+        """
+
+        def __getattr__(self, name):
+            return mock.sentinel.whatever_was_asked_for
+
+    with mock.patch.object(
+        calculations, "wsm_guard_probe_double", AnswersAnything(), create=True
+    ):
+        assert planted not in patches.installed()
+
+        with mock.patch.object(
+            calculations, "wsm_guard_probe_patch", undocumented, create=True
+        ):
+            assert planted in patches.installed()

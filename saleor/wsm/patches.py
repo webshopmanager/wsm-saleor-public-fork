@@ -22,6 +22,7 @@ discount onto a dealer price.
 
 import importlib
 import sys
+import types
 
 from django.core.exceptions import ImproperlyConfigured
 
@@ -89,7 +90,11 @@ def installed() -> frozenset[str]:
         for value in list(vars(module).values()):
             original = getattr(value, "__wrapped__", None)
             code = getattr(value, "__code__", None)
-            if original is None or code is None:
+            # `isinstance`, not a None check: a test double left in a core
+            # module namespace answers EVERY attribute, so it hands back a
+            # stand-in for `__code__` too and `co_filename` then raises. Only a
+            # real code object can say where a function was defined.
+            if original is None or not isinstance(code, types.CodeType):
                 continue
             if "/saleor/wsm/" in code.co_filename.replace("\\", "/"):
                 found.add(f"{original.__module__}.{original.__qualname__}")

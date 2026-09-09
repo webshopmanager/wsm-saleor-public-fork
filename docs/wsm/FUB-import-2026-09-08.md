@@ -37,10 +37,23 @@ Everything the import does follows from two facts measured before it was written
    each group's rows, and every one of the 1,148 dealer rows has a retail sibling,
    so the natural key needs no new column and no schema change.
 
-An option value is never a Saleor variant. The catalog still carries 607 shadow
-variants (`FMBG-62810-0:490-7-20815` and friends) from an older import that made
-one; matching on the exact stock number leaves them alone, which is what
+An option value is never a Saleor variant. The catalog carried 607 shadow
+variants (`FMBG-62810-0:490-7-20815` and friends) from the 2026-08-31
+app-platform import, which priced each choice as one; matching on the exact
+stock number leaves them alone, which is what
 `test_tier_price_lands_on_the_base_variant_not_the_shadow` holds in place.
+
+They are now gone. `purge_shadow_option_variants --site fuelab --apply` deleted
+all 607 on 2026-09-08, leaving the channel's 315 base variants and nothing else:
+`fuelab` went from 922 variants to 315, and their 607 channel listings went with
+them. The marker is the public metadata key `option_set_id`, which only that
+import writes and which no other variant of the 48,914 in this database carried.
+The `<stock number>:<set>-<n>-<value>` SKU shape is deliberately NOT the marker:
+48,596 variants here have a colon in the SKU for unrelated reasons. Not one of
+the 607 was on an order line, a checkout line or a stock row, none was a
+product's `default_variant`, and no product was left without a variant, so
+nothing was held back and nothing refused; the second run finds 0 candidates.
+Compose's own tables are untouched by it: still 126 sets and 607 values.
 
 ## Counts
 

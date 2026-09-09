@@ -88,6 +88,18 @@ def _cell(text):
     )
 
 
+def _related_count(model):
+    """How many rows of `model` point at the product this row is."""
+    return Subquery(
+        model.objects.filter(product_id=OuterRef("pk"))
+        .order_by()
+        .values("product_id")
+        .annotate(n=Count("pk"))
+        .values("n")[:1],
+        output_field=IntegerField(),
+    )
+
+
 def _with_currency(queryset, product_path):
     """Carry the product's channel currency on the row, not one query per row.
 
@@ -102,6 +114,28 @@ def _with_currency(queryset, product_path):
             ).values("currency")[:1]
         )
     )
+
+
+class ProductFilteredMixin:
+    """A changelist that can be opened for ONE product, from the product itself.
+
+    Django refuses a changelist query parameter that no `list_filter` declares,
+    and the honest `list_filter` here would be a dropdown of every product in
+    the catalog: the screen the pickers exist to avoid. Allowing the one exact
+    lookup keeps the sidebar empty and the link working.
+    """
+
+    def lookup_allowed(self, lookup, value, request=None):
+        if lookup == "product__id__exact":
+            return True
+        return super().lookup_allowed(lookup, value, request)
+
+    def product_url(self, product):
+        """The read-only product row, found the way the picker finds anything."""
+        return "{}?q={}".format(
+            reverse(f"{self.admin_site.name}:product_product_changelist"),
+            product.slug,
+        )
 
 
 class ComposeAdminSite(admin.AdminSite):
@@ -176,7 +210,7 @@ class DealerTierOptionPriceInline(admin.TabularInline):
 
 
 @admin.register(OptionSet, site=site)
-class OptionSetAdmin(WsmAdminMixin, admin.ModelAdmin):
+class OptionSetAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
     """The list a merchant scans to find one question on one product.
 
     Product first, because that is what they are looking for. The name is
@@ -210,7 +244,9 @@ class OptionSetAdmin(WsmAdminMixin, admin.ModelAdmin):
 
     @admin.display(description="Product", ordering="product__name")
     def product_name(self, obj):
-        return _cell(obj.product.name)
+        return format_html(
+            '<a href="{}">{}</a>', self.product_url(obj.product), _cell(obj.product.name)
+        )
 
     @admin.display(description="Question", ordering="name")
     def short_name(self, obj):
@@ -258,7 +294,7 @@ class OptionValueAdmin(WsmAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(Fee, site=site)
-class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
+class FeeAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
     """A charge, in a merchant's words. See FeeForm for the labels.
 
     The hidden variant is created by the first configured add, never by hand, so
@@ -268,7 +304,7 @@ class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
 
     form = FeeForm
     list_display = (
-        "product",
+        "product_name",
         "label",
         "sku",
         "charged_as",
@@ -276,6 +312,10 @@ class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
         "how_often",
         "required",
     )
+    # The product cell is a link to the product, so it cannot also be the link
+    # into the charge: Django nests one anchor inside the other and the merchant
+    # loses the only doorway to the row.
+    list_display_links = ("label",)
     list_select_related = ("product",)
     list_filter = ("basis", "apply_to", "required")
     search_fields = ("label", "sku", "product__name")
@@ -310,6 +350,12 @@ class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
     def get_queryset(self, request):
         return _with_currency(super().get_queryset(request), "product_id")
 
+    @admin.display(description="Product", ordering="product__name")
+    def product_name(self, obj):
+        return format_html(
+            '<a href="{}">{}</a>', self.product_url(obj.product), _cell(obj.product.name)
+        )
+
     @admin.display(description="Charged as", ordering="basis")
     def charged_as(self, obj):
         return obj.get_basis_display()
@@ -326,6 +372,13 @@ class FeeAdmin(WsmAdminMixin, admin.ModelAdmin):
         return obj.get_apply_to_display()
 
 
+# One product exists per fee, created by `Fee.ensure_variant` under this product
+# type, only because an order line needs a variant to hang money on. The merchant
+# walk found them sitting in the product lookup named after the charge, where
+# picking one would hang a question off something that is not on the shelf.
+FEE_CARRIER_PRODUCT_TYPE_SLUG = "wsm-fee"
+
+
 @admin.register(Product, site=site)
 class ComposeProductPickerAdmin(WsmAdminMixin, admin.ModelAdmin):
     """Read-only product list, so the option-set lookup popup resolves.
@@ -335,9 +388,46 @@ class ComposeProductPickerAdmin(WsmAdminMixin, admin.ModelAdmin):
     Every write is refused regardless of what the user was granted.
     """
 
-    list_display = ("name", "slug", "product_type")
+    list_display = ("name", "slug", "product_type", "option_sets", "fees")
     search_fields = ("name", "slug", "variants__sku")
     ordering = ("name",)
+
+    def get_queryset(self, request):
+        """Two counts, no extra round trip and no join that multiplies rows.
+
+        A pair of `Count` aggregates over two reverse relations would cross-join
+        them and count each set once per fee; correlated subqueries are two more
+        columns on the query the changelist already runs.
+        """
+        return (
+            super()
+            .get_queryset(request)
+            .exclude(product_type__slug=FEE_CARRIER_PRODUCT_TYPE_SLUG)
+            .annotate(
+                wsm_set_count=_related_count(OptionSet),
+                wsm_fee_count=_related_count(Fee),
+            )
+        )
+
+    def _linked_count(self, obj, model_name, count):
+        # The subquery has no row to return where the product has none, so the
+        # annotation is NULL rather than 0.
+        if not count:
+            return "-"
+        url = reverse(
+            f"{self.admin_site.name}:wsm_compose_{model_name}_changelist"
+        )
+        return format_html(
+            '<a href="{}?product__id__exact={}">{}</a>', url, obj.pk, count
+        )
+
+    @admin.display(description="Option sets", ordering="wsm_set_count")
+    def option_sets(self, obj):
+        return self._linked_count(obj, "optionset", obj.wsm_set_count)
+
+    @admin.display(description="Fees", ordering="wsm_fee_count")
+    def fees(self, obj):
+        return self._linked_count(obj, "fee", obj.wsm_fee_count)
 
     def has_module_permission(self, request):
         return self.has_view_permission(request)

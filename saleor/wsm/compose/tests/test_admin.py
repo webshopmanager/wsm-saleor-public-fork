@@ -133,3 +133,76 @@ def test_no_lookup_shows_a_bare_row_id(client, merchant):
     assert merchant_site._registry[OptionSet].autocomplete_fields == ("product",)
 
 
+@pytest.mark.django_db
+def test_a_question_links_to_the_product_it_is_asked_on(client, merchant, product):
+    """There was no path from a product to what it asks the shopper."""
+    client.force_login(merchant, backend=BACKEND)
+    OptionSet.objects.create(product=product, name="Color", label="Colour")
+
+    body = client.get("/admin/wsm_compose/optionset/").content.decode()
+
+    assert f"/admin/product/product/?q={product.slug}" in body
+
+
+@pytest.mark.django_db
+def test_a_list_opens_for_one_product(client, merchant, product_list):
+    """The link a product row points at has to answer, not 500 on the lookup."""
+    client.force_login(merchant, backend=BACKEND)
+    first, second = product_list[0], product_list[1]
+    OptionSet.objects.create(product=first, name="Tank size", label="Tank size")
+    OptionSet.objects.create(product=second, name="Pump", label="Pump wiring")
+    Fee.objects.create(
+        product=first, label="Crating", basis=pricing.FIXED, amount=Decimal("149")
+    )
+
+    sets = client.get(
+        f"/admin/wsm_compose/optionset/?product__id__exact={first.pk}"
+    )
+    fees = client.get(f"/admin/wsm_compose/fee/?product__id__exact={second.pk}")
+
+    assert sets.status_code == 200
+    assert "Tank size" in sets.content.decode()
+    assert "Pump wiring" not in sets.content.decode()
+    assert fees.status_code == 200
+    assert "Crating" not in fees.content.decode()
+
+
+@pytest.mark.django_db
+def test_a_product_row_counts_its_questions_and_charges(client, merchant, product):
+    """The product screen is where a merchant starts, so it says what is on it."""
+    client.force_login(merchant, backend=BACKEND)
+    OptionSet.objects.create(product=product, name="Color", label="Colour")
+    Fee.objects.create(
+        product=product, label="Crating", basis=pricing.FIXED, amount=Decimal("149")
+    )
+
+    body = client.get("/admin/product/product/").content.decode()
+
+    assert f"/admin/wsm_compose/optionset/?product__id__exact={product.pk}" in body
+    assert f"/admin/wsm_compose/fee/?product__id__exact={product.pk}" in body
+
+
+@pytest.mark.django_db
+def test_the_fee_carriers_are_not_in_the_product_lookup(
+    client, merchant, product, channel_USD
+):
+    """A charge owns a product only so its order line has something to hang on.
+
+    The merchant walk found two of them in the lookup, named after the charge.
+    Picking one hangs a question off something that is not on the shelf. This
+    also pins the product type slug the exclusion is written against.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    fee = Fee.objects.create(
+        product=product,
+        label="Crating",
+        basis=pricing.FIXED,
+        amount=Decimal("149"),
+    )
+    carrier = fee.ensure_variant(channel_USD).product
+
+    body = client.get("/admin/product/product/").content.decode()
+
+    assert carrier.product_type.slug == "wsm-fee"
+    assert product.name in body
+    assert carrier.slug not in body

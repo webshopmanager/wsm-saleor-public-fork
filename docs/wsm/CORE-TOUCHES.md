@@ -572,6 +572,29 @@ the checkout's CURRENT user:
 - every Compose fee line's `quantity` (parent quantity for a per-unit fee, 1
   otherwise) and `price_override`.
 
+**Whose group.** A checkout with a user on it knows its buyer, and that buyer's
+group is the only authority: no stamp promotes a signed-in retail shopper. A
+checkout WITHOUT one is the storefront's normal shape, because the key-gated add
+resolves the customer server side and never attaches them, so there the group the
+add stamped on the line stands. Both dealer lines and configured lines work this
+way. Configured lines did not: `_reprice_configured` read only
+`tier_group_for(checkout.user)`, so on the anonymous checkout every storefront
+actually creates, the FIRST recalculation repriced a dealer's configured line at
+retail and rewrote the snapshot to match. Measured on the Stage 2 Kit: 3394.00
+became 3494.00, silently, with nothing left on the line to say a tier had ever
+applied, and the dealer paid 100.00 more than they were quoted. The stamp is
+private metadata, so it is ours to trust; see the stamps section above.
+
+**A configured line that took a tier is a dealer line, and now says so.** MP1 and
+MP2 find one by the presence of the `wsm.dealer` key and by nothing else. The
+compose add never wrote it, so a SPECIFIC_PRODUCT voucher or a catalogue
+promotion came straight off a price that was already the dealer's: 10 percent off
+a 3394.00 dealer configuration is 3054.60, both discounts on one line, which
+"better of, never both" exists to refuse. The add writes the key when the priced
+snapshot says `tier_applied`, and `_mark_dealer` rewrites or clears it on every
+recalculation, because a tier can start or stop applying in between (a quantity
+change, a group change, the merchant deleting the row).
+
 **Correct and proceed** is the behaviour for drift. **Refuse**, as a
 `ValidationError` on `lines`, is reserved for the case where the price cannot be
 derived at all: an unparseable snapshot, an option value or fee that no longer

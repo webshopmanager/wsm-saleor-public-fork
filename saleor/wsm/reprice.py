@@ -370,6 +370,14 @@ def _reprice_configured(
     tier_group = dealer_pricing.tier_group_for(
         user.pk if user else None, database_connection_name=database_connection_name
     )
+    # A checkout with a user on it knows its buyer, and that buyer's group is the
+    # only authority: a stamp is never allowed to promote a signed-in retail
+    # shopper. A checkout WITHOUT one is the storefront's normal shape, because
+    # the key-gated add resolves the customer server side and never attaches
+    # them, so there the group the add stamped stands, exactly as it already
+    # does for a plain dealer line (`_reprice_dealer`). The stamp is private, so
+    # it is ours and not the shopper's.
+    stamped_group_stands = user is None
 
     fee_lines_by_parent = defaultdict(dict)
     for line_info in fee_lines:
@@ -390,6 +398,7 @@ def _reprice_configured(
                 fees_by_id,
                 fee_lines_by_parent,
                 tier_group,
+                stamped_group_stands,
                 mark,
             )
         )
@@ -408,6 +417,7 @@ def _reprice_one_configured(
     fees_by_id,
     fee_lines_by_parent,
     tier_group,
+    stamped_group_stands,
     mark,
 ):
     line = line_info.line
@@ -425,6 +435,9 @@ def _reprice_one_configured(
         raise Unrepriceable(
             "the options recorded on a configured line cannot be read"
         ) from error
+
+    if stamped_group_stands:
+        tier_group = snapshot.get("tier_group") or None
 
     product_fees = fees_by_product.get(line_info.product.pk, [])
     # Exactly what the add endpoint does with the same list: a required fee is
@@ -456,6 +469,7 @@ def _reprice_one_configured(
     line.price_override = Decimal(priced.unit_cents) / 100
     line.price_override_reason = COMPOSE_REASON
     line.store_value_in_private_metadata({META_OPTIONS: fresh})
+    _mark_dealer(line, priced.snapshot)
     # The public copy the storefront cart reads. Display, never an input.
     line.store_value_in_metadata({META_OPTIONS: fresh, META_SKU: priced.composite_sku})
     if before != _snapshot_of(line):
@@ -465,6 +479,25 @@ def _reprice_one_configured(
         cid, line.quantity, priced, fees_by_id, fee_lines_by_parent, mark
     )
     return cid
+
+
+def _mark_dealer(line, snapshot):
+    """A configured line that took a tier IS a dealer line, and says so.
+
+    MP1 and MP2 find a dealer line by the presence of this key
+    (`dealer.no_stacking.is_dealer_line`) and nothing else. Without it a
+    catalogue promotion or a SPECIFIC_PRODUCT voucher comes off a price that is
+    already the dealer's, and the dealer collects both, which "better of, never
+    both" exists to refuse. Written here as well as at the add, because a tier
+    can start or stop applying between the two: a quantity change, a group
+    change, or the merchant deleting the row.
+    """
+    if snapshot.get("tier_applied"):
+        line.store_value_in_private_metadata(
+            {DEALER_META: json.dumps({"group": snapshot.get("tier_group") or ""})}
+        )
+    else:
+        line.delete_value_from_private_metadata(DEALER_META)
 
 
 def _reprice_fee_lines(cid, quantity, priced, fees_by_id, fee_lines_by_parent, mark):

@@ -35,6 +35,7 @@ from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...plugins.manager import get_plugins_manager
 from ...product.models import Product, ProductVariant, ProductVariantChannelListing
 from ..dealer import pricing as dealer_pricing
+from ..dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from ..checkout import LineRefused, check_addable, whole_number
 from ..http import storefront_key_required
 from . import pricing
@@ -309,6 +310,14 @@ def configured_line(request):
         for item in lines_data[0].metadata_list
         if item.key in PRICED_FROM
     }
+    if priced.snapshot.get("tier_applied"):
+        # A configured line that took a tier IS a dealer line. MP1 and MP2 find
+        # one by the presence of this key and nothing else, so without it a
+        # voucher or a catalogue promotion comes off a price that is already the
+        # dealer's. MP3 rewrites it on every recalculation (`_mark_dealer`).
+        stamps_by_variant[variant.pk][DEALER_KEY] = json.dumps(
+            {"group": priced.snapshot.get("tier_group") or ""}
+        )
 
     for fee_id, row in sorted(charged.items()):
         fee = fees_by_id[fee_id]

@@ -32,6 +32,7 @@ from saleor.wsm.compose.tests.test_api import (  # noqa: F401
     CONFIGURED_UNIT,
     FEE_AMOUNT,
     crating_fee,
+    dealer_credit,
     gid,
     omit_parts,
     post_line,
@@ -44,6 +45,8 @@ from saleor.wsm.dealer.tests.test_views import (  # noqa: F401
     post,
     tiers,
 )
+from saleor.wsm.compose.views import META_OPTIONS as OPTIONS_KEY
+from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from saleor.wsm.reprice import reprice
 
 pytestmark = pytest.mark.django_db
@@ -241,6 +244,17 @@ UPDATE_METADATA = """
       }
     }"""
 
+ADD_PROMO_CODE = """
+    mutation($id: ID!, $code: String!) {
+      checkoutAddPromoCode(id: $id, promoCode: $code) {
+        errors { field message }
+        checkout { lines {
+          variant { id }
+          totalPrice { gross { amount } }
+        } }
+      }
+    }"""
+
 READ_CHECKOUT = """
     query($id: ID!) {
       checkout(id: $id) { lines { unitPrice { gross { amount } } } }
@@ -310,6 +324,116 @@ def test_a_dealer_stamp_a_shopper_wrote_for_themselves_buys_nothing(
     assert line.price_override_reason is None
     assert "wsm.dealer" not in line.metadata, "the forged key is cleared, not kept"
     assert "wsm.dealer" not in line.private_metadata
+
+
+# --- exploit 4: the dealer group a configured line quietly loses -------------
+
+
+# The dealer's own price for the Stage 2 Kit configured with all three credits:
+# 3998.99 less 29.99, 30.00 and the dealer's 545.00 in place of retail's 445.00.
+DEALER_CONFIGURED = Decimal("3394.00")
+
+
+def test_a_configured_dealer_line_keeps_its_group_on_an_anonymous_checkout(
+    client, checkout, stage_2_kit, omit_parts, dealer_credit,
+):
+    """The storefront's normal shape: a dealer priced, no user on the checkout.
+
+    The key-gated add resolves the customer server side and never attaches them,
+    so `checkout_info.user` is None on every recalculation that follows. Before
+    the stamped-group fallback, the first one repriced this line at RETAIL and
+    rewrote the snapshot to match: 3494.00, silently, 100.00 more than the
+    dealer agreed to and with nothing left on the line to say a tier ever
+    applied. `_reprice_dealer` has had this fallback all along.
+    """
+    option_set, values = omit_parts
+    post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+        customer=dealer_credit,
+    )
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert line.price_override == DEALER_CONFIGURED
+    assert checkout.user is None, "the add attaches nobody, which is the point"
+
+    checkout_info, lines = checkout_info_for(checkout)
+    reprice(checkout_info, lines)
+
+    line.refresh_from_db()
+    assert line.price_override == DEALER_CONFIGURED
+    assert json.loads(line.private_metadata[OPTIONS_KEY])["tier_applied"] is True
+
+
+def test_a_signed_in_retail_shopper_cannot_inherit_a_stamped_group(
+    client, checkout, stage_2_kit, omit_parts, dealer_credit, staff_user,
+):
+    """The fallback is for a checkout with NO buyer, never for the wrong one.
+
+    Same line, same stamp, but the checkout now knows who is buying and it is
+    not the dealer. The group on the line loses to the buyer on the checkout,
+    and the price goes back to retail because this buyer really does pay retail.
+    """
+    option_set, values = omit_parts
+    post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+        customer=dealer_credit,
+    )
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert line.price_override == DEALER_CONFIGURED
+
+    checkout.user = staff_user
+    checkout.save(update_fields=["user"])
+    checkout_info, lines = checkout_info_for(checkout)
+    reprice(checkout_info, lines)
+
+    line.refresh_from_db()
+    assert line.price_override == Decimal(CONFIGURED_UNIT)
+
+
+def test_a_voucher_does_not_stack_on_a_configured_line_that_took_a_tier(
+    client, checkout, stage_2_kit, omit_parts, dealer_credit, voucher_percentage,
+):
+    """Better of, never both, on a configured line as much as a plain one.
+
+    MP1 finds a dealer line by the presence of the `wsm.dealer` stamp and by
+    nothing else. A configured line never carried it, so a SPECIFIC_PRODUCT
+    voucher came straight off a price that was already the dealer's: 10 percent
+    off 3394.00 is 3054.60, which is the stack this refuses.
+    """
+    from saleor.discount import VoucherType
+
+    option_set, values = omit_parts
+    voucher_percentage.type = VoucherType.SPECIFIC_PRODUCT
+    voucher_percentage.save(update_fields=["type"])
+    voucher_percentage.products.add(stage_2_kit.product)
+
+    post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+        customer=dealer_credit,
+    )
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert DEALER_KEY in line.private_metadata, "a tiered line says it is a dealer line"
+
+    payload = graphql(
+        client,
+        ADD_PROMO_CODE,
+        {"id": gid("Checkout", checkout.token), "code": voucher_percentage.codes.first().code},
+    )["checkoutAddPromoCode"]
+    assert payload["errors"] == [], payload["errors"]
+
+    totals = {
+        row["variant"]["id"]: row["totalPrice"]["gross"]["amount"]
+        for row in payload["checkout"]["lines"]
+    }
+    assert totals[gid("ProductVariant", stage_2_kit.pk)] == float(DEALER_CONFIGURED)
 
 
 # --- the cost, and the one case that refuses -------------------------------

@@ -13,15 +13,29 @@ showing a merchant. A private site takes only what we register and is immune to
 whatever a future app drops on the default one.
 """
 
+import re
 from functools import wraps
 
 from django.contrib import admin
-from django.db.models import Count, IntegerField, OuterRef, Subquery
+from django.db.models import (
+    Case,
+    Count,
+    Exists,
+    IntegerField,
+    OuterRef,
+    Prefetch,
+    Q,
+    Subquery,
+    Value,
+    When,
+)
 from django.urls import URLResolver, reverse
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
+from django.utils.text import capfirst
+from django.utils.safestring import mark_safe
 
 from ...core.db.connection import allow_writer
-from ...product.models import Product, ProductChannelListing
+from ...product.models import Product, ProductChannelListing, ProductVariant
 from .forms import (
     DealerTierOptionPriceForm,
     DealerTierOptionPriceFormSet,
@@ -123,6 +137,64 @@ def _with_currency(queryset, product_path):
             ).values("currency")[:1]
         )
     )
+
+
+def whole_token(term):
+    """A pattern that matches `term` only where it is not part of a longer run.
+
+    Postgres flavour, for `iregex`. The catalog is full of SKUs that CONTAIN a
+    part number without being it: `trp:1471801` contains `71801`.
+    """
+    return r"(^|[^0-9A-Za-z])" + re.escape(term) + r"([^0-9A-Za-z]|$)"
+
+
+class SkuRankedSearchMixin:
+    """The row a merchant typed comes first, not the one that sorts first.
+
+    Measured on the live Fuel Lab catalog: typing `71801`, a manufacturer part
+    number, put the product that carries it FIFTH, behind four Truxedo covers
+    whose SKUs (`trp:1471801`, `trp:1571801`) merely contain those digits,
+    because product name was the only order the picker had. A merchant reads
+    the first row of an autocomplete and a picker that buries the exact match
+    is a picker that gets the wrong product onto a question.
+
+    Three tiers, one CASE, no extra round trip: the whole term as a SKU, the
+    whole term as a word inside a SKU or a name, then everything else in the
+    order it already had. The subqueries are correlated columns on the query
+    the search already runs, and not joins, because a join on a reverse
+    relation would return the same product once per variant.
+    """
+
+    # How a row of THIS model reaches the variant that carries a SKU.
+    sku_owner_field = "product"
+    # Where this model's own merchant-readable name lives.
+    name_field = "name"
+
+    def get_search_results(self, request, queryset, search_term):
+        queryset, may_have_duplicates = super().get_search_results(
+            request, queryset, search_term
+        )
+        term = (search_term or "").strip()
+        if not term:
+            return queryset, may_have_duplicates
+
+        owner = {self.sku_owner_field: OuterRef("pk")}
+        pattern = whole_token(term)
+        exact = ProductVariant.objects.filter(**owner, sku__iexact=term)
+        token = ProductVariant.objects.filter(**owner, sku__iregex=pattern)
+        ranked = queryset.annotate(
+            wsm_match_rank=Case(
+                When(Exists(exact), then=Value(0)),
+                When(
+                    Q(Exists(token)) | Q(**{f"{self.name_field}__iregex": pattern}),
+                    then=Value(1),
+                ),
+                default=Value(2),
+                output_field=IntegerField(),
+            )
+        )
+        ordering = self.get_ordering(request) or ()
+        return ranked.order_by("wsm_match_rank", *ordering), may_have_duplicates
 
 
 class ProductFilteredMixin:
@@ -227,6 +299,41 @@ class ComposeAdminSite(admin.AdminSite):
 site = ComposeAdminSite(name="wsm")
 
 
+class EmptyStateMixin:
+    """A list with nothing in it says what the thing IS and how to make one.
+
+    The merchant walk of 2026-09-08 opened Fees and Kits on a store that has
+    none of either and got a heading, a search box, a filter sidebar and the
+    words "0 fees". Nothing on the screen said what a fee is, so a merchant who
+    does not already know cannot tell an empty feature from a missing one.
+
+    Django has no hook for this: `empty_value_display` is about an empty CELL.
+    The decision of whether the table is REALLY empty is made here, in Python,
+    where the search term and the filters can be read, and the template stays a
+    template. A search that matched nothing is not this state and Django
+    already words it.
+    """
+
+    change_list_template = "wsm/admin/change_list_empty_state.html"
+    # (what is missing, what the thing is, the label on the one link)
+    empty_state: tuple[str, ...] = ()
+
+    def changelist_view(self, request, extra_context=None):
+        response = super().changelist_view(request, extra_context)
+        changelist = getattr(response, "context_data", {}).get("cl")
+        if (
+            self.empty_state
+            and changelist is not None
+            and changelist.result_count == 0
+            and not changelist.query
+            and not changelist.get_filters_params()
+        ):
+            response.context_data["wsm_empty_state"] = self.empty_state
+            # Django's "Select kit to change" contradicts "No kits yet."
+            response.context_data["title"] = capfirst(self.opts.verbose_name_plural)
+        return response
+
+
 class WsmAdminMixin:
     """Saleor's User has no `has_module_perms`, so the admin cannot ask for one.
 
@@ -246,13 +353,115 @@ class WsmAdminMixin:
         return any(self.get_model_perms(request).values())
 
 
+# The 5.0 import brings the shopper-facing help across as it was written, and
+# 118 of Fuel Lab's 126 questions carry markup in it. The storefront renders it
+# as HTML, so the stored text is right and the SCREEN was the defect: a merchant
+# opening the field saw `<strong>Color</strong>` with nothing saying whether the
+# shopper would see bold text or those characters. Written with entities because
+# Django renders `help_text` unescaped, and this sentence has to SHOW the tags.
+NOTE_IS_HTML = (
+    "HTML is allowed here and is shown to the shopper as formatted text: "
+    "&lt;strong&gt;Color&lt;/strong&gt; reads as a bold Color on the storefront."
+)
+
+
+def _dealer_delta_prefetch():
+    """Every dealer tier row for the whole page, in ONE query, already named.
+
+    `DealerTierOptionPrice.tier_group` stores a `DealerGroup` CODE, so a column
+    that showed the merchant's word for the group would be a lookup per row on a
+    screen that renders every choice a question has. The name rides back on the
+    prefetch as a correlated column instead, which costs nothing extra: it is
+    one more column on a query that had to run anyway.
+    """
+    from ..dealer.models import DealerGroup
+
+    return Prefetch(
+        "tier_deltas",
+        queryset=DealerTierOptionPrice.objects.annotate(
+            wsm_group_name=Subquery(
+                DealerGroup.objects.filter(code=OuterRef("tier_group")).values(
+                    "name"
+                )[:1]
+            )
+        ).order_by("tier_group"),
+    )
+
+
 class OptionValueInline(admin.TabularInline):
     model = OptionValue
     form = OptionValueInlineForm
     formset = OptionValueInlineFormSet
     extra = 3
-    fields = ("sort_order", "name", "sku_fragment", "price_delta", "image_url")
+    fields = (
+        "sort_order",
+        "name",
+        "sku_fragment",
+        "price_delta",
+        "image_url",
+        "dealer_prices",
+    )
+    readonly_fields = ("dealer_prices",)
     show_change_link = True
+
+    def get_queryset(self, request):
+        """One prefetch for the tier rows, one annotated column for the currency.
+
+        The merchant walk of 2026-09-08 opened a question that carries 1,062
+        dealer tier rows across its choices and the screen said nothing about
+        any of them: a merchant editing a retail price could not see that the
+        same choice was priced separately for two dealer groups. Django cannot
+        nest an inline inside an inline and a dependency that fakes it is not
+        worth the money, so this column REPORTS the tier rows and links to the
+        one screen that edits them.
+
+        A choice prints itself as "Black (Fuel Lab QSST: Colour)", so every row
+        Django renders asks for its question and that question's product. That
+        was two queries a row before this column existed; `select_related` pays
+        for them once, and the query-count pin below holds it there.
+        """
+        rows = (
+            super()
+            .get_queryset(request)
+            .select_related("option_set__product")
+            .prefetch_related(_dealer_delta_prefetch())
+        )
+        return _with_currency(rows, "option_set__product_id")
+
+    @admin.display(description="Dealer prices")
+    def dealer_prices(self, obj):
+        """Read from the prefetch. Never a query per row, whatever the row count.
+
+        One group per line and no wrapping inside a line: rendered as running
+        text the cell folded "Dealer 1 +6.65 USD, Dealer 2 +4.52 USD" into a
+        nine line ribbon and made every row of the inline 200 pixels tall.
+        The row's own "Change" link, above, is the way in to edit these.
+        """
+        if obj is None or obj.pk is None:
+            # One of the blank rows the inline offers. It has no tier prices
+            # because it is not a choice yet.
+            return "-"
+        rows = list(obj.tier_deltas.all())
+        if not rows:
+            return format_html(
+                '<a href="{}">Add dealer prices</a>',
+                reverse(
+                    f"{self.admin_site.name}:wsm_compose_optionvalue_change",
+                    args=[obj.pk],
+                ),
+            )
+        currency = getattr(obj, "wsm_currency", "") or ""
+        return format_html_join(
+            mark_safe("<br>"),
+            '<span style="white-space: nowrap">{} {}</span>',
+            (
+                (
+                    row.wsm_group_name or row.tier_group,
+                    money(row.price_delta, currency, signed=True),
+                )
+                for row in rows
+            ),
+        )
 
     def get_formset(self, request, obj=None, **kwargs):
         formset = super().get_formset(request, obj, **kwargs)
@@ -310,6 +519,21 @@ class OptionSetAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
         # One annotated query, not one COUNT per row.
         return super().get_queryset(request).annotate(_values=Count("values"))
 
+    def get_form(self, request, obj=None, **kwargs):
+        """Say what the markup in the help field DOES, without touching the data.
+
+        The stored text is not rewritten and not sanitised: a merchant who wrote
+        HTML in 5.0 means it, and stripping it here would silently change what
+        their shoppers read. `get_form` builds a fresh form class per request,
+        so writing to `base_fields` is local to this page, the same reasoning
+        `label_money_field` runs on.
+        """
+        form = super().get_form(request, obj, **kwargs)
+        field = form.base_fields.get("note")
+        if field is not None:
+            field.help_text = f"{field.help_text} {NOTE_IS_HTML}".strip()
+        return form
+
     @admin.display(description="Product", ordering="product__name")
     def product_name(self, obj):
         return format_html(
@@ -362,7 +586,9 @@ class OptionValueAdmin(WsmAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(Fee, site=site)
-class FeeAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
+class FeeAdmin(
+    EmptyStateMixin, ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin
+):
     """A charge, in a merchant's words. See FeeForm for the labels.
 
     The hidden variant is created by the first configured add, never by hand, so
@@ -371,6 +597,12 @@ class FeeAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
     """
 
     form = FeeForm
+    empty_state = (
+        "No fees yet.",
+        "A fee is a charge added to a product at checkout, such as crating or "
+        "a core charge.",
+        "Add the first one",
+    )
     list_display = (
         "product_name",
         "label",
@@ -448,7 +680,9 @@ FEE_CARRIER_PRODUCT_TYPE_SLUG = "wsm-fee"
 
 
 @admin.register(Product, site=site)
-class ComposeProductPickerAdmin(WsmAdminMixin, admin.ModelAdmin):
+class ComposeProductPickerAdmin(
+    SkuRankedSearchMixin, WsmAdminMixin, admin.ModelAdmin
+):
     """Read-only product list, so the option-set lookup popup resolves.
 
     Registered because `autocomplete_fields` needs a changelist to search,

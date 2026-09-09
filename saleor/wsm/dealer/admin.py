@@ -17,9 +17,10 @@ runs a private one. `WsmAdminMixin` comes from there too: Saleor's User has no
 
 from django import forms
 from django.contrib import admin, messages
-from django.db.models import OuterRef, Subquery
+from django.db.models import Count, Max, Min, OuterRef, Subquery
 from django.shortcuts import redirect
 from django.urls import reverse
+from django.utils.html import format_html
 
 from ..admin_pickers import PickerLabelMixin
 from ..compose.admin import WsmAdminMixin
@@ -30,8 +31,58 @@ from .models import DealerCustomer, DealerGroup, DealerSettings, TierPrice
 
 @admin.register(DealerGroup, site=merchant_site)
 class DealerGroupAdmin(WsmAdminMixin, admin.ModelAdmin):
+    """A group is two text fields and, on the live data, 304 prices.
+
+    The merchant walk of 2026-09-08 opened "Dealer 1" and saw the two text
+    fields: nothing on the screen said the group carried 304 prices or what
+    they ran between, so the one question a merchant opens a group to answer
+    ("is this the group I think it is?") had no answer on the page.
+
+    Not an inline. 304 rows is a report, not a form: it would load in full every
+    time someone opened the screen to correct a spelling, and it would offer to
+    edit them one page at a time in a widget with no search. What the form owes
+    the merchant is the SHAPE of what the group holds and a door to the list
+    that can already search, filter and page it.
+    """
+
     list_display = ("code", "name")
     search_fields = ("code", "name")
+    # The summary is on the form only, so the list costs exactly what it did.
+    readonly_fields = ("tier_price_summary",)
+    fields = ("code", "name", "tier_price_summary")
+
+    @admin.display(description="Tier prices")
+    def tier_price_summary(self, obj):
+        """Two queries: one aggregate over the group, one for the currency.
+
+        Both are per PAGE, not per row, which is the whole reason this is a
+        summary and not an inline.
+        """
+        if obj is None or obj.pk is None:
+            return "None yet. Save the group, then add prices on the tier price screen."
+
+        totals = TierPrice.objects.filter(group=obj).aggregate(
+            count=Count("pk"), lowest=Min("amount"), highest=Max("amount")
+        )
+        if not totals["count"]:
+            return format_html(
+                'No tier prices yet. <a href="{}">Add the first one</a>',
+                reverse(f"{self.admin_site.name}:wsm_dealer_tierprice_add"),
+            )
+
+        list_url = reverse(f"{self.admin_site.name}:wsm_dealer_tierprice_changelist")
+        currency = currency_for(None)
+        noun = "tier price" if totals["count"] == 1 else "tier prices"
+        return format_html(
+            '{} {}, lowest {}, highest {}<br>'
+            '<a href="{}?group__id__exact={}">See this group\'s tier prices</a>',
+            totals["count"],
+            noun,
+            money(totals["lowest"], currency),
+            money(totals["highest"], currency),
+            list_url,
+            obj.pk,
+        )
 
 
 @admin.register(DealerCustomer, site=merchant_site)

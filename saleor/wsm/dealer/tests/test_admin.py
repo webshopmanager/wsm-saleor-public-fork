@@ -16,12 +16,14 @@ import pytest
 from django.core.exceptions import ValidationError
 
 from ....permission.models import Permission
+from ...compose.admin import site as merchant_site
 from ..models import DealerCustomer, DealerGroup, DealerSettings, TierPrice
 
 pytestmark = pytest.mark.django_db
 
 AUTH_BACKEND = "saleor.wsm.compose.auth.AdminPasswordBackend"
 TIER_PRICES = "/admin/wsm_dealer/tierprice/"
+DEALER_GROUPS = "/admin/wsm_dealer/dealergroup/"
 DEALER_CUSTOMERS = "/admin/wsm_dealer/dealercustomer/"
 DEALER_SETTINGS = "/admin/wsm_dealer/dealersettings/"
 AUTOCOMPLETE = "/admin/autocomplete/"
@@ -226,6 +228,33 @@ def test_the_user_picker_answers_the_autocomplete(merchant, customer_user):
     assert any(customer_user.email in text for text in texts), texts
 
 
+def test_the_variant_picker_puts_the_exact_sku_first(merchant, variant):
+    """Same defect, same fix, on the picker that finds a SKU to price.
+
+    The decoys sort ahead of the exact match on SKU, which is the only order
+    this picker had, so a merchant pricing a tier for 71801 was offered two
+    Truxedo covers before the part they typed.
+    """
+    from ....product.models import ProductVariant
+
+    for sku in ("1471801", "1571801", "71801"):
+        ProductVariant.objects.create(product=variant.product, sku=sku, name="Base")
+
+    response = merchant.get(
+        AUTOCOMPLETE,
+        {
+            "app_label": "wsm_dealer",
+            "model_name": "tierprice",
+            "field_name": "variant",
+            "term": "71801",
+        },
+    )
+
+    texts = [result["text"] for result in response.json()["results"]]
+    assert texts[0].endswith("[71801]"), texts
+    assert len(texts) == 3, texts
+
+
 def test_the_variant_picker_names_the_product_and_the_sku(merchant, variant):
     response = merchant.get(
         AUTOCOMPLETE,
@@ -320,3 +349,65 @@ def test_the_settings_singleton_offers_no_add_screen(merchant):
     assert refused_empty.status_code == 403
     assert landed["Location"].endswith(f"{DEALER_SETTINGS}{row.pk}/change/")
     assert refused_full.status_code == 403
+
+
+# --- the dealer group form ----------------------------------------------------
+
+
+def test_dealer_group_form_summarises_its_tier_prices(
+    merchant, two_skus, group, channel_USD
+):
+    """The walk opened a group holding 304 prices and saw two text fields."""
+    decoy, wanted = two_skus
+    price(wanted, group, amount="12.000")
+    price(decoy, group, amount="3498.990")
+
+    body = merchant.get(f"{DEALER_GROUPS}{group.pk}/change/").content.decode()
+
+    assert "2 tier prices" in body
+    assert "lowest 12.00 USD" in body
+    assert "highest 3498.99 USD" in body
+
+
+def test_dealer_group_form_links_to_this_groups_tier_prices(
+    merchant, two_skus, group, channel_USD
+):
+    """One door, pre-filtered, into the list that can already page 304 rows."""
+    decoy, wanted = two_skus
+    price(wanted, group)
+
+    body = merchant.get(f"{DEALER_GROUPS}{group.pk}/change/").content.decode()
+
+    assert f'href="{TIER_PRICES}?group__id__exact={group.pk}"' in body
+    assert "See this group" in body
+
+
+def test_dealer_group_form_says_so_when_the_group_prices_nothing(merchant, group):
+    """An empty group is a real state: a code that nothing points at yet."""
+    body = merchant.get(f"{DEALER_GROUPS}{group.pk}/change/").content.decode()
+
+    assert "No tier prices yet" in body
+    assert f'href="{TIER_PRICES}add/"' in body
+
+
+def test_dealer_group_summary_costs_two_queries(
+    two_skus, group, channel_USD, django_assert_num_queries
+):
+    """One aggregate and one currency, per PAGE. An inline would be 304 rows."""
+    decoy, wanted = two_skus
+    price(wanted, group)
+    price(decoy, group)
+    model_admin = merchant_site.get_model_admin(DealerGroup)
+
+    with django_assert_num_queries(2):
+        model_admin.tier_price_summary(group)
+
+
+def test_dealer_group_list_carries_no_summary(merchant, two_skus, group, channel_USD):
+    """The summary answers a question asked on one group, so the list pays nothing."""
+    decoy, wanted = two_skus
+    price(wanted, group)
+
+    body = merchant.get(DEALER_GROUPS).content.decode()
+
+    assert "tier prices, lowest" not in body

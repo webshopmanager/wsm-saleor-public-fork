@@ -11,38 +11,72 @@ behind it is a screen a merchant cannot use at all.
 
 `axes` is the other half of that walk's finding. It is a JSON list on the model
 because that is what the storefront and the indexer read out of the collection's
-metadata, but a merchant should never be typing brackets and quotes: the form
-below takes a comma-separated list of attribute slugs and refuses one that names
-no attribute, which used to be a silently dead configurator question.
+metadata, but a merchant should never be typing brackets and quotes, and the
+walk of 2026-09-08 found that typing them into a free-text box meant looking the
+slugs up in a DIFFERENT application first. The form below offers the store's own
+product attributes, by name, and writes the same JSON list back.
 """
 
 from django import forms
 from django.contrib import admin
+from django.db.models import Count, Q
 
+from ...attribute import AttributeType
 from ...attribute.models import Attribute
+from ...product.models import Product
 from ..admin_pickers import PickerLabelMixin
-from ..compose.admin import WsmAdminMixin
+from ..compose.admin import EmptyStateMixin, WsmAdminMixin
 from ..compose.admin import site as merchant_site
 from . import pricing
 from .models import KitConfig, KitMember, SeriesConfig
 
+MISSING = "(missing)"
+
+
+def axis_choices(held):
+    """Every product attribute this store has, named, plus any slug it has lost.
+
+    ONE query. `held` is what the row already carries: a slug that no longer
+    names an attribute is offered anyway, marked, because a form that silently
+    dropped it would delete a configurator question the merchant never asked to
+    lose and would say nothing about it.
+    """
+    known = list(
+        Attribute.objects.filter(type=AttributeType.PRODUCT_TYPE)
+        .order_by("name")
+        .values_list("slug", "name")
+    )
+    choices = [(slug, f"{name} ({slug})") for slug, name in known]
+    slugs = {slug for slug, _ in known}
+    choices.extend((slug, f"{slug} {MISSING}") for slug in held if slug not in slugs)
+    return choices
+
 
 class SeriesConfigForm(forms.ModelForm):
-    """`axes` as a comma-separated list of attribute slugs, checked against the store."""
+    """`axes` picked from the store's own attributes, stored as the same JSON list.
 
-    axes = forms.CharField(
+    ponytail: the order the questions are asked is now the order the choices are
+    listed in, alphabetically by attribute name, and a merchant cannot reorder
+    them. That is the ceiling of a checkbox list. It is deliberate over a free
+    text box that could order them but sent a merchant to another application to
+    find out what to type, and over a silent reorder: what the screen shows is
+    what is saved. Upgrade path if a merchant asks for an order: an ordered
+    widget, which is JavaScript, on this one field.
+    """
+
+    axes = forms.MultipleChoiceField(
         required=False,
-        label="Axes",
-        widget=forms.TextInput(attrs={"size": "60"}),
+        label="Questions the configurator asks",
+        widget=forms.CheckboxSelectMultiple,
         help_text=(
-            "The questions the configurator asks, in the order it asks them, "
-            "separated by commas. Example: bed-length, color. Each one is a "
-            "product attribute SLUG: the short lowercase name an attribute is "
-            "stored under, which is not always what the attribute is called on "
-            "screen. Find it in the Saleor dashboard under Configuration, "
-            "Attributes, on the attribute itself. Every slug has to already "
-            "exist there."
+            "Tick every question this series asks. They are asked in the order "
+            "listed here. An entry marked (missing) is one this series still "
+            "holds that the store no longer has an attribute for: untick it to "
+            "drop it."
         ),
+    )
+    partitioning_axis = forms.ChoiceField(
+        label="The question that decides which product",
     )
 
     class Meta:
@@ -51,32 +85,26 @@ class SeriesConfigForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # `initial` comes from `model_to_dict`, so it holds the list, not the
-        # text this field edits.
-        if self.instance and self.instance.pk:
-            self.initial["axes"] = ", ".join(self.instance.axes or [])
+        held = list(self.instance.axes or []) if self.instance.pk else []
+        if self.instance.pk and self.instance.partitioning_axis:
+            held.append(self.instance.partitioning_axis)
+        choices = axis_choices(held)
+        self.fields["axes"].choices = choices
+        # Never a pre-selected first attribute: an empty choice is what makes
+        # "required" mean the merchant chose, rather than the merchant not
+        # noticing. The model's own rules still decide whether the choice is a
+        # legal one for a published series.
+        self.fields["partitioning_axis"].choices = [("", "---------"), *choices]
+        self.fields["partitioning_axis"].help_text = SeriesConfig._meta.get_field(
+            "partitioning_axis"
+        ).help_text
+        if self.instance.pk:
+            self.initial["axes"] = list(self.instance.axes or [])
 
     def clean_axes(self):
-        slugs = []
-        for chunk in self.cleaned_data["axes"].split(","):
-            slug = chunk.strip()
-            # A repeat is a question asked twice, never an error worth stopping
-            # a merchant over.
-            if slug and slug not in slugs:
-                slugs.append(slug)
-
-        known = set(
-            Attribute.objects.filter(slug__in=slugs).values_list("slug", flat=True)
-        )
-        missing = [slug for slug in slugs if slug not in known]
-        if missing:
-            raise forms.ValidationError(
-                "No product attribute has the slug %(missing)s. Check the "
-                "attribute's slug in the Saleor dashboard, under Configuration, "
-                "Attributes.",
-                params={"missing": ", ".join(repr(slug) for slug in missing)},
-            )
-        return slugs
+        """Back to a JSON list, in the order the merchant was shown."""
+        chosen = set(self.cleaned_data["axes"])
+        return [slug for slug, _ in self.fields["axes"].choices if slug in chosen]
 
 
 SERIES_DERIVED_NOTE = (
@@ -91,6 +119,7 @@ SERIES_DERIVED_NOTE = (
 
 class SeriesConfigAdmin(PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin):
     form = SeriesConfigForm
+    readonly_fields = ("member_count",)
     fieldsets = [
         (
             None,
@@ -98,6 +127,7 @@ class SeriesConfigAdmin(PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin):
                 "description": SERIES_DERIVED_NOTE,
                 "fields": (
                     "collection",
+                    "member_count",
                     "brand",
                     "axes",
                     "partitioning_axis",
@@ -122,6 +152,30 @@ class SeriesConfigAdmin(PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin):
     def axes_display(self, obj):
         return ", ".join(obj.axes or []) or "-"
 
+    @admin.display(description="Products in this series")
+    def member_count(self, obj):
+        """One aggregate, and it answers the publish rule before it refuses.
+
+        A merchant reads "publishing is refused unless 2 or more members are
+        published" on the field below and then has no way to find out how many
+        there are without leaving for the Saleor dashboard.
+        """
+        if obj is None or obj.pk is None:
+            return (
+                "Pick a collection and save. The products come from the "
+                "collection, which is managed in the Saleor dashboard."
+            )
+        counts = Product.objects.filter(collections__id=obj.collection_id).aggregate(
+            total=Count("pk", distinct=True),
+            published=Count(
+                "pk", filter=Q(channel_listings__is_published=True), distinct=True
+            ),
+        )
+        return (
+            f"{counts['total']} in the collection, {counts['published']} published. "
+            "Add or remove products on the collection, in the Saleor dashboard."
+        )
+
 
 class KitMemberInline(PickerLabelMixin, WsmAdminMixin, admin.TabularInline):
     model = KitMember
@@ -130,7 +184,15 @@ class KitMemberInline(PickerLabelMixin, WsmAdminMixin, admin.TabularInline):
     autocomplete_fields = ("variant",)
 
 
-class KitConfigAdmin(PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin):
+class KitConfigAdmin(
+    EmptyStateMixin, PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin
+):
+    empty_state = (
+        "No kits yet.",
+        "A kit is a collection of products sold as one, priced at the sum of "
+        "its parts or at a saving you set.",
+        "Add the first one",
+    )
     list_display = ("collection_name", "saving", "active")
     list_filter = ("active", "discount_kind")
     list_select_related = ("collection",)

@@ -14,10 +14,18 @@ from decimal import Decimal
 import pytest
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 
 from saleor.permission.models import Permission
+from saleor.product.models import Product, ProductVariant
 from saleor.wsm.compose import pricing
-from saleor.wsm.compose.models import Fee, OptionSet, OptionValue
+from saleor.wsm.compose.models import (
+    DealerTierOptionPrice,
+    Fee,
+    OptionSet,
+    OptionValue,
+)
 
 BACKEND = "saleor.wsm.compose.auth.AdminPasswordBackend"
 
@@ -266,3 +274,302 @@ def test_the_fee_carriers_are_not_in_the_product_lookup(
     assert carrier.product_type.slug == "wsm-fee"
     assert product.name in body
     assert carrier.slug not in body
+
+
+# --- dealer tier prices, reported on the question that owns the choice --------
+
+
+def _priced_choice(option_set, name, delta, *groups):
+    """A choice, with one tier row per named dealer group."""
+    value = OptionValue.objects.create(
+        option_set=option_set, name=name, price_delta=Decimal(delta)
+    )
+    for code, tier_delta in groups:
+        DealerTierOptionPrice.objects.create(
+            option_value=value, tier_group=code, price_delta=Decimal(tier_delta)
+        )
+    return value
+
+
+@pytest.fixture
+def two_dealer_groups(db):
+    from saleor.wsm.dealer.models import DealerGroup
+
+    return [
+        DealerGroup.objects.create(code="dealer-1", name="Dealer 1"),
+        DealerGroup.objects.create(code="dealer-2", name="Dealer 2"),
+    ]
+
+
+@pytest.mark.django_db
+def test_the_question_screen_reports_each_choices_dealer_prices(
+    client, merchant, product, two_dealer_groups
+):
+    """1,062 tier rows sit under Fuel Lab's questions and the screen said nothing.
+
+    A merchant editing a retail price could not see that the same choice was
+    priced separately for two dealer groups, so the deeper price was silently
+    the one that shipped.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
+    priced = _priced_choice(
+        option_set, "Black", "25", ("dealer-1", "-50"), ("dealer-2", "-75")
+    )
+    bare = _priced_choice(option_set, "Silver", "0")
+
+    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+
+    assert "Dealer 1 -50.00 USD" in body
+    assert "Dealer 2 -75.00 USD" in body
+    assert "Add dealer prices" in body
+    assert f"/admin/wsm_compose/optionvalue/{priced.pk}/change/" in body
+    assert f"/admin/wsm_compose/optionvalue/{bare.pk}/change/" in body
+
+
+@pytest.mark.django_db
+def test_the_dealer_price_column_names_the_group_not_its_code(
+    client, merchant, product, two_dealer_groups
+):
+    """`tier_group` stores a code. A merchant knows the group by its name."""
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
+    _priced_choice(option_set, "Black", "25", ("dealer-1", "-50"))
+
+    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+
+    assert "Dealer 1 -50.00 USD" in body
+
+
+@pytest.mark.django_db
+def test_the_dealer_price_column_costs_no_query_per_choice(
+    client, merchant, product, two_dealer_groups
+):
+    """The pin. One prefetch for the page, whatever the page holds.
+
+    Three more choices and six more tier rows have to cost the same number of
+    queries, or the column is a lookup per row wearing a summary's clothes.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
+    _priced_choice(option_set, "Black", "25", ("dealer-1", "-50"), ("dealer-2", "-75"))
+    url = f"/admin/wsm_compose/optionset/{option_set.pk}/change/"
+    client.get(url)  # warm anything cached per process, not per page
+
+    with CaptureQueriesContext(connection) as one_choice:
+        assert client.get(url).status_code == 200
+
+    for name in ("Silver", "Red", "Gunmetal"):
+        _priced_choice(
+            option_set, name, "25", ("dealer-1", "-50"), ("dealer-2", "-75")
+        )
+
+    with CaptureQueriesContext(connection) as four_choices:
+        assert client.get(url).status_code == 200
+
+    assert len(four_choices.captured_queries) == len(one_choice.captured_queries), [
+        query["sql"] for query in four_choices.captured_queries
+    ]
+
+
+# --- the shopper-facing help field, which holds markup on purpose ------------
+
+MARKUP_NOTE = "Pick a <strong>Color</strong>. See the <a href=\"/sizing\">chart</a>."
+
+
+@pytest.mark.django_db
+def test_the_help_field_says_that_its_markup_is_rendered(client, merchant, product):
+    """118 of Fuel Lab's 126 questions carry HTML here, imported from 5.0.
+
+    The field showed the tags with nothing saying whether a shopper reads bold
+    text or the characters, so the screen taught the merchant that their data
+    was broken. The sentence has to SHOW a tag, so it is stored as entities and
+    the admin renders help text unescaped.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(
+        product=product, name="Color", label="Colour", note=MARKUP_NOTE
+    )
+
+    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+
+    assert "HTML is allowed here and is shown to the shopper as formatted text" in body
+    assert "&lt;strong&gt;Color&lt;/strong&gt; reads as a bold Color" in body
+
+
+@pytest.mark.django_db
+def test_the_help_field_keeps_the_markup_the_merchant_wrote(client, merchant, product):
+    """No sanitising, no rewriting. The storefront renders it and means to."""
+    client.force_login(merchant, backend=BACKEND)
+    option_set = OptionSet.objects.create(
+        product=product, name="Color", label="Colour", note=MARKUP_NOTE
+    )
+
+    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+    option_set.refresh_from_db()
+
+    assert option_set.note == MARKUP_NOTE
+    # The textarea shows the source, escaped by the template, not stripped.
+    assert "Pick a &lt;strong&gt;Color&lt;/strong&gt;" in body
+
+
+@pytest.mark.django_db
+def test_the_question_list_never_prints_the_stored_markup(client, merchant, product):
+    """The guard on the other half of the defect.
+
+    Measured on Fuel Lab: markup lives in `note` alone, no name or label carries
+    a tag, and no column on this list shows `note`, so there is nothing to strip
+    today. This fails the day a column starts printing it raw.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    OptionSet.objects.create(
+        product=product, name="Color", label="Colour", note=MARKUP_NOTE
+    )
+
+    body = client.get("/admin/wsm_compose/optionset/").content.decode()
+
+    assert "<strong>Color</strong>" not in body
+    assert "/sizing" not in body
+
+
+# --- the picker ranks what the merchant typed --------------------------------
+
+AUTOCOMPLETE = "/admin/autocomplete/"
+PRODUCT_LOOKUP = {
+    "app_label": "wsm_compose",
+    "model_name": "optionset",
+    "field_name": "product",
+}
+
+
+def _catalog_row(twin_of, name, slug, sku):
+    """Another product in the same catalog, carrying one SKU."""
+    product = Product.objects.create(
+        name=name,
+        slug=slug,
+        product_type=twin_of.product_type,
+        category=twin_of.category,
+    )
+    ProductVariant.objects.create(product=product, sku=sku, name="Base")
+    return product
+
+
+@pytest.mark.django_db
+def test_the_product_picker_puts_the_typed_part_number_first(
+    client, merchant, product
+):
+    """Measured on Fuel Lab: typing 71801 put the product carrying it fifth.
+
+    Four Truxedo covers whose SKUs merely CONTAIN those digits came first,
+    because the product name was the only order the picker had. A merchant
+    reads the first row of an autocomplete, so the picker was quietly putting
+    the wrong product on the question.
+    """
+    client.force_login(merchant, backend=BACKEND)
+    _catalog_row(product, "Truxedo Lo Pro", "truxedo-lo-pro", "trp:1471801")
+    _catalog_row(product, "Truxedo Sentry CT", "truxedo-sentry-ct", "trp:1571801")
+    _catalog_row(product, "Zzz Fuel Pump", "zzz-fuel-pump", "71801")
+
+    response = client.get(AUTOCOMPLETE, {**PRODUCT_LOOKUP, "term": "71801"})
+
+    texts = [result["text"] for result in response.json()["results"]]
+    assert texts[0] == "Zzz Fuel Pump", texts
+    # The others are still offered: ranking is not filtering.
+    assert set(texts) == {"Zzz Fuel Pump", "Truxedo Lo Pro", "Truxedo Sentry CT"}
+
+
+@pytest.mark.django_db
+def test_a_part_number_inside_the_products_name_outranks_a_substring(
+    client, merchant, product
+):
+    """The exact SKU is one tier. A whole word in a name is the next one."""
+    client.force_login(merchant, backend=BACKEND)
+    _catalog_row(product, "Aaa Cover trp:1471801", "aaa-cover", "trp:1471801")
+    _catalog_row(product, "Zzz Fuel Pump 71801", "zzz-fuel-pump", "fmbg-71801")
+
+    response = client.get(AUTOCOMPLETE, {**PRODUCT_LOOKUP, "term": "71801"})
+
+    texts = [result["text"] for result in response.json()["results"]]
+    assert texts[0] == "Zzz Fuel Pump 71801", texts
+
+
+@pytest.mark.django_db
+def test_the_picker_still_orders_by_name_with_nothing_to_rank(
+    client, merchant, product
+):
+    """No exact match means the old order, unchanged."""
+    client.force_login(merchant, backend=BACKEND)
+    _catalog_row(product, "Zzz Truxedo Sentry", "zzz-truxedo", "trp:1571801")
+    _catalog_row(product, "Aaa Truxedo Lo Pro", "aaa-truxedo", "trp:1471801")
+
+    response = client.get(AUTOCOMPLETE, {**PRODUCT_LOOKUP, "term": "truxedo"})
+
+    texts = [result["text"] for result in response.json()["results"]]
+    assert texts == ["Aaa Truxedo Lo Pro", "Zzz Truxedo Sentry"]
+
+
+# --- a list with nothing in it -----------------------------------------------
+
+FEES = "/admin/wsm_compose/fee/"
+
+
+@pytest.mark.django_db
+def test_an_empty_fee_list_says_what_a_fee_is(client, merchant):
+    """"0 fees" over a search box and a filter sidebar teaches a merchant
+    nothing about whether the feature is empty or missing.
+    """
+    client.force_login(merchant, backend=BACKEND)
+
+    body = client.get(FEES).content.decode()
+
+    assert "No fees yet." in body
+    assert "such as crating or a core charge" in body
+    assert 'href="/admin/wsm_compose/fee/add/"' in body
+
+
+@pytest.mark.django_db
+def test_the_empty_fee_list_hides_what_there_is_nothing_to_narrow(client, merchant):
+    client.force_login(merchant, backend=BACKEND)
+
+    body = client.get(FEES).content.decode()
+
+    assert 'id="searchbar"' not in body
+
+
+@pytest.mark.django_db
+def test_the_empty_fee_list_is_not_headed_select_fee_to_change(client, merchant):
+    """Django's stock heading asks the merchant to select one of nothing."""
+    client.force_login(merchant, backend=BACKEND)
+
+    body = client.get(FEES).content.decode()
+
+    assert "Select fee to change" not in body
+    assert "<h1>Fees</h1>" in body
+
+
+@pytest.mark.django_db
+def test_a_fee_list_with_a_fee_in_it_is_the_ordinary_list(
+    client, merchant, product
+):
+    client.force_login(merchant, backend=BACKEND)
+    Fee.objects.create(product=product, label="Freight crating", amount=Decimal("149"))
+
+    body = client.get(FEES).content.decode()
+
+    assert "No fees yet." not in body
+    assert "Freight crating" in body
+    assert 'id="searchbar"' in body
+
+
+@pytest.mark.django_db
+def test_a_search_that_found_nothing_is_not_an_empty_list(
+    client, merchant, product
+):
+    """Django already words this one, and it is a different sentence."""
+    client.force_login(merchant, backend=BACKEND)
+    Fee.objects.create(product=product, label="Freight crating", amount=Decimal("149"))
+
+    body = client.get(FEES, {"q": "nothing matches this"}).content.decode()
+
+    assert "No fees yet." not in body
+    assert 'id="searchbar"' in body

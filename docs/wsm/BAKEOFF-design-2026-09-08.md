@@ -117,6 +117,7 @@ caller; a future one inherits the rules by calling `full_clean()`.
 
 Nine reviewers walked the fork and every money defect below was reproduced
 before it was fixed. Each carries what it let through.
+
 - **One rounding rule for the fork, `saleor/wsm/money.py`, HALF_UP.** The same
   conversion was written three times in two modes: `compose.models.to_cents`
   quantized with the Decimal default, HALF_EVEN, while the dealer ladders and
@@ -151,6 +152,15 @@ before it was fixed. Each carries what it let through.
   configuration a walk-in shopper buys at 3,553.99. A dealer never pays more
   than retail for the same choice, and a line that lost to retail is not stamped
   as tier-priced, so promotions still reach it.
+- **A kit member holds at least one of its variant, and the discount reported is
+  the discount taken.** `KitMember.quantity` of 0 divided by zero inside the
+  proration and surfaced as a 500 rather than as the bad kit row it is. And a
+  fixed discount smaller than the member quantities can carry (two 1.00 units,
+  one cent off) allocated nothing while `discount_cents` still reported the ask,
+  so the kit's own arithmetic disagreed with itself by a cent: an order that
+  said it discounted money it had charged. The residue is not invented onto a
+  unit price it cannot divide into; `price_kit` reports what the members
+  actually took, and `list_total - discount == total` holds again.
 - **The 5.0 importer validates every row it writes.** Twelve write sites went
   straight to `save()`, so every rule above was bypassed by the one writer that
   touches a whole tenant at once: sub-zero configurations, dealer deltas above

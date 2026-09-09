@@ -451,6 +451,35 @@ def test_a_checkout_this_fork_does_not_own_costs_no_queries(checkout_with_items)
     assert captured.captured_queries == []
 
 
+def test_a_price_correction_does_not_write_back_a_stale_quantity(
+    client, checkout, stage_2_kit, omit_parts, crating_fee,
+):
+    """This funnel owns the price on a line. It does not own the quantity.
+
+    Core loads the line objects it hands us on the REPLICA, so their `quantity`
+    is whatever that replica last saw. Writing the whole set of fields back
+    meant a recalculation triggered by anything at all, a merchant editing what
+    an option costs, silently undid a quantity the shopper had committed in
+    another request moments earlier: they get charged for one when they asked
+    for four, or for four when they cut back to one, with nothing in the cart
+    saying it changed. It only takes replica lag, not a race.
+    """
+    parent, _ = configure(client, checkout, stage_2_kit, omit_parts)
+    checkout_info, lines = checkout_info_for(checkout)
+    # Committed by another request, after the line objects above were read.
+    CheckoutLine.objects.filter(pk=parent.pk).update(quantity=4)
+    # And the merchant edits an option price, so this line does have to move.
+    OptionValue.objects.filter(pk=omit_parts[1][0].pk).update(
+        price_delta=Decimal("-50.00")
+    )
+
+    reprice(checkout_info, lines)
+
+    parent.refresh_from_db()
+    assert parent.quantity == 4, "MP3 owns the price on this line, not the quantity"
+    assert parent.price_override != CONFIGURED_UNIT, "the price correction still lands"
+
+
 # --- the cart that can no longer be priced, and still reads -----------------
 
 

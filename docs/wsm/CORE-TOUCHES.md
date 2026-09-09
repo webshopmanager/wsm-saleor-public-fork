@@ -648,6 +648,15 @@ early return, so a checkout whose prices are still fresh costs nothing at all.
 Dropping adds **one** query, and only on the recalculation that finds a line it
 cannot price, which is not a state a healthy cart reaches twice.
 
+That `bulk_update` writes `price_override`, `price_override_reason`, `metadata`
+and `private_metadata`, and **not `quantity`**. Core loads the line objects this
+wrapper is handed on the REPLICA, so their quantity is whatever that replica last
+saw; writing it back turned any price correction into a silent undo of a quantity
+the shopper had committed in another request, charging them for one when they
+asked for four. The only lines whose quantity this file owns are fee lines, since
+a per-unit fee is one line of its parent's quantity, and those go in a second
+`bulk_update` by pk that runs only when that number actually moved.
+
 ### Verified by
 
 `saleor/wsm/tests/test_reprice.py`, which drives both exploits end to end

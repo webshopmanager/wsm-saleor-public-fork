@@ -81,10 +81,16 @@ TARGET = "saleor.checkout.calculations._fetch_checkout_prices_if_expired"
 
 # The line fields this file is allowed to move. Named once so the bulk_update
 # and the reader agree on the blast radius.
+# What this funnel writes on EVERY line it touches. `quantity` is deliberately
+# absent: core loads the line objects handed to us on the REPLICA, so their
+# quantity is whatever that replica last saw, and writing it back turned a price
+# correction into a silent undo of the quantity the shopper had just committed
+# in another request. The only lines whose quantity this file owns are fee lines
+# (a per-unit fee is one line of the parent's quantity), and those are written
+# separately, by pk, and only when the number actually moved.
 WRITTEN_FIELDS = (
     "price_override",
     "price_override_reason",
-    "quantity",
     "metadata",
     "private_metadata",
 )
@@ -185,12 +191,15 @@ def reprice(checkout_info, lines) -> list:
     # a write, so every read is a writer read.
     database_connection_name = settings.DATABASE_CONNECTION_DEFAULT_NAME
     moved: list = []
+    requantified: list = []
 
-    def mark(line_info):
+    def mark(line_info, quantity=False):
         for name in CACHED_ON_LINE_INFO:
             line_info.__dict__.pop(name, None)
         if line_info not in moved:
             moved.append(line_info)
+        if quantity and line_info.line not in requantified:
+            requantified.append(line_info.line)
 
     configured, fee_lines, dealer_lines = _classify(lines)
     _disown_forged_stamps(lines, mark)
@@ -218,6 +227,8 @@ def reprice(checkout_info, lines) -> list:
             CheckoutLine.objects.bulk_update(
                 [info.line for info in moved], list(WRITTEN_FIELDS)
             )
+        if requantified:
+            CheckoutLine.objects.bulk_update(requantified, ["quantity"])
     return moved
 
 
@@ -587,6 +598,7 @@ def _reprice_fee_lines(
         line_info = present[variant_id]
         line = line_info.line
         before = _snapshot_of(line)
+        was = line.quantity
         line.quantity = quantity if row["apply_to"] == compose_pricing.PER_UNIT else 1
         line.price_override = Decimal(row["amount"]) / 100
         line.price_override_reason = COMPOSE_REASON
@@ -595,7 +607,7 @@ def _reprice_fee_lines(
         # The public copy the storefront cart reads. Display, never an input.
         line.store_value_in_metadata({META_FEE: stamp})
         if before != _snapshot_of(line):
-            mark(line_info)
+            mark(line_info, quantity=line.quantity != was)
 
 
 def _selections_from(snapshot):

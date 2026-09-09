@@ -511,6 +511,24 @@ PROP65_METAFIELD = "pl.rules.prop65"
 PROP65_TEXT_METAFIELD = "pl.rules.prop65.text"
 PROP65_VALUE = "true"
 
+# Where the part may not GO, on the same public lane and stamped by the same
+# function, because it is the same class of fact: something about the product
+# that only changes when a merchant saves, and that a storefront has to be able
+# to act on. The plugin refuses a restricted destination at ORDER CREATION,
+# which on the Authorize.Net and Braintree paths is after the card is charged;
+# with the rule stamped, the checkout can ask at the address step, one step
+# before any gateway is loaded, for no query at all. The plugin stays exactly
+# as it is: it is the backstop, and a browser is never the enforcement.
+#
+# The states key is the GATE, so the message key exists exactly as long as the
+# restriction does. Empty message means the standard sentence, which the
+# storefront builds from the product name and the state the same way
+# `refusal_message` does. That is why this one key is stamped blank rather than
+# absent, where `pl.rules.prop65.text` is absent: there the FLAG is the gate and
+# the text is optional decoration on it.
+RESTRICTED_STATES_METAFIELD = "pl.rules.restricted_states"
+RESTRICTION_MESSAGE_METAFIELD = "pl.rules.restriction_message"
+
 
 class ProductCompliance(models.Model):
     """What a product must SAY, and where it may not GO. One row per product.
@@ -524,8 +542,10 @@ class ProductCompliance(models.Model):
 
     Nothing here is money, so nothing here is on a pricing path. The disclosure
     is denormalized onto the product at WRITE time (`sync_product_stamps`) the
-    way the floor is; the destination rule is read once, at order creation, by
-    `restrictions.is_destination_serviced`.
+    way the floor is, and so is the destination rule, so a checkout can refuse
+    a restricted address for free. The rule is still ENFORCED once, at order
+    creation, by `restrictions.is_destination_serviced`: the stamp is what the
+    shopper is told, the plugin is what cannot be skipped.
     """
 
     product = models.OneToOneField(
@@ -730,7 +750,7 @@ def price_floor_by_channel(product_id, *, option_sets=None, fees=None) -> dict:
 
 
 def sync_product_stamps(product_id, product=None) -> set:
-    """Make this product's three public stamps equal to what its rows say.
+    """Make this product's public stamps equal to what its rows say.
 
     `compose.configurable` gates the PDP configurator: the storefront asks a
     product nothing without it, so a merchant who built a question or a charge
@@ -743,11 +763,14 @@ def sync_product_stamps(product_id, product=None) -> set:
     `pl.rules.prop65` (and its text) is the California disclosure, on the same
     lane for the same reason: it is a fact about the product that a storefront
     has to draw, and computing it on a shopper read would be a join per PDP for
-    an answer that only changes when a merchant saves.
+    an answer that only changes when a merchant saves. `pl.rules.restricted_states`
+    (and its message) is the destination rule on that same lane, which is what
+    lets a checkout refuse an address BEFORE a gateway charges the card instead
+    of at order creation, after it.
 
-    ONE function and ONE write for all three, because every door that can move
-    one can move another, and three hooks on the same save paths would be three
-    reads and three UPDATEs of one column.
+    ONE function and ONE write for all of them, because every door that can move
+    one can move another, and a hook per stamp on the same save paths would be a
+    read and an UPDATE of one column per stamp.
 
     Index-time denormalization, Dana's standing rule: the floor is computed here
     on a merchant save and stamped, never computed on a shopper read. Nothing on
@@ -806,21 +829,33 @@ def sync_product_stamps(product_id, product=None) -> set:
     # the reason the flag alone is enough for a storefront.
     compliance = (
         ProductCompliance.objects.filter(product_id=product_id)
-        .only("prop65", "prop65_text")
+        .only("prop65", "prop65_text", "restricted_states", "restriction_message")
         .first()
     )
-    wanted_prop65 = {}
+    wanted = {}
     if compliance is not None and compliance.prop65:
-        wanted_prop65[PROP65_METAFIELD] = PROP65_VALUE
+        wanted[PROP65_METAFIELD] = PROP65_VALUE
         if compliance.prop65_text.strip():
-            wanted_prop65[PROP65_TEXT_METAFIELD] = compliance.prop65_text.strip()
-    for key in (PROP65_METAFIELD, PROP65_TEXT_METAFIELD):
-        if wanted_prop65.get(key) == product.metadata.get(key):
+            wanted[PROP65_TEXT_METAFIELD] = compliance.prop65_text.strip()
+    # The codes exactly as the row stores them, normalised: a merchant who
+    # writes them around `clean()` still gets a stamp a reader can compare
+    # against. No states means no restriction, whatever else the row says.
+    if compliance is not None and compliance.state_codes:
+        wanted[RESTRICTED_STATES_METAFIELD] = ", ".join(compliance.state_codes)
+        wanted[RESTRICTION_MESSAGE_METAFIELD] = compliance.restriction_message.strip()
+    for key in (
+        PROP65_METAFIELD,
+        PROP65_TEXT_METAFIELD,
+        RESTRICTED_STATES_METAFIELD,
+        RESTRICTION_MESSAGE_METAFIELD,
+    ):
+        if wanted.get(key) == product.metadata.get(key):
             continue
-        if key in wanted_prop65:
-            product.metadata[key] = wanted_prop65[key]
+        if key in wanted:
+            product.metadata[key] = wanted[key]
         else:
-            # Absent, never blank: a reader takes a missing key as "no warning".
+            # Absent, never blank: a reader takes a missing warning key as "no
+            # warning" and a missing states key as "every destination is fine".
             product.metadata.pop(key, None)
         changed.add(key)
 

@@ -26,6 +26,8 @@ from saleor.shipping.models import ShippingZone
 from saleor.wsm.compose.models import (
     PROP65_METAFIELD,
     PROP65_TEXT_METAFIELD,
+    RESTRICTED_STATES_METAFIELD,
+    RESTRICTION_MESSAGE_METAFIELD,
     ProductCompliance,
 )
 from saleor.wsm.compose.restrictions import is_destination_serviced
@@ -203,6 +205,72 @@ def test_deleting_the_row_takes_the_stamp_with_it(ca_restricted, carb_part):
     carb_part.refresh_from_db()
 
     assert PROP65_METAFIELD not in carb_part.metadata
+    assert RESTRICTED_STATES_METAFIELD not in carb_part.metadata
+    assert RESTRICTION_MESSAGE_METAFIELD not in carb_part.metadata
+
+
+def test_the_destination_rule_lands_on_the_product(ca_restricted, carb_part):
+    """The checkout reads the rule off the product, not off a query.
+
+    That is what lets it refuse an address before a gateway charges the
+    card. The plugin still refuses at order creation; the stamp is what
+    makes reaching that refusal abnormal.
+    """
+    carb_part.refresh_from_db()
+
+    assert carb_part.metadata[RESTRICTED_STATES_METAFIELD] == "CA"
+    # Present and blank: the states key is the gate, and blank means the
+    # standard sentence, the one `refusal_message` builds.
+    assert carb_part.metadata[RESTRICTION_MESSAGE_METAFIELD] == ""
+
+
+def test_the_merchants_refusal_sentence_is_stamped(ca_restricted, carb_part):
+    ca_restricted.restriction_message = "Not CARB certified: no California sales."
+    ca_restricted.save()
+    carb_part.refresh_from_db()
+
+    assert (
+        carb_part.metadata[RESTRICTION_MESSAGE_METAFIELD]
+        == "Not CARB certified: no California sales."
+    )
+
+
+def test_several_states_are_stamped_the_way_the_row_stores_them(carb_part):
+    row = ProductCompliance(product=carb_part, restricted_states=" ca ,hi")
+    row.clean()
+    row.save()
+    carb_part.refresh_from_db()
+
+    assert carb_part.metadata[RESTRICTED_STATES_METAFIELD] == "CA, HI"
+
+
+def test_clearing_the_states_takes_both_keys_with_it(ca_restricted, carb_part):
+    """A merchant who empties the field restricts nothing.
+
+    The stamp has to say so: a stale key is a checkout refusing an address
+    nobody banned.
+    """
+    ca_restricted.restriction_message = "No California sales."
+    ca_restricted.save()
+    carb_part.refresh_from_db()
+    assert RESTRICTED_STATES_METAFIELD in carb_part.metadata
+
+    ca_restricted.restricted_states = ""
+    ca_restricted.save()
+    carb_part.refresh_from_db()
+
+    assert RESTRICTED_STATES_METAFIELD not in carb_part.metadata
+    assert RESTRICTION_MESSAGE_METAFIELD not in carb_part.metadata
+    # The disclosure is a separate decision and is untouched by this one.
+    assert carb_part.metadata[PROP65_METAFIELD] == "true"
+
+
+def test_a_disclosure_alone_stamps_no_restriction(carb_part):
+    ProductCompliance.objects.create(product=carb_part, prop65=True)
+    carb_part.refresh_from_db()
+
+    assert RESTRICTED_STATES_METAFIELD not in carb_part.metadata
+    assert RESTRICTION_MESSAGE_METAFIELD not in carb_part.metadata
 
 
 # --- the two storefront surfaces -------------------------------------------

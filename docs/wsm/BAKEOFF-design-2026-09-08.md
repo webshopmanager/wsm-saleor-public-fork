@@ -535,6 +535,15 @@ the merchant wrote their own; the flag with no text means "draw the standard
 short-form warning, pictogram included", which is the storefront's call to
 render.
 
+**The restriction is stamped too, and that is what refuses before the card is
+charged.** `pl.rules.restricted_states` (the codes as stored) and
+`pl.rules.restriction_message` (blank for the standard sentence) ride the same
+`sync_product_stamps` write, so the storefront's address step can refuse a
+destination for zero queries, one step before any gateway is loaded. The plugin
+is unchanged and remains the enforcement: a browser is never the gate. The
+message key is stamped BLANK rather than absent, unlike `pl.rules.prop65.text`,
+because here the states key is the gate and the message is its optional wording.
+
 **Fail SAFE means do LESS.** The interim service failed CLOSED: an undecidable
 destination vetoed the checkout, and a rule scoped to no states matched
 everywhere. Today's ruling inverts both.

@@ -11,6 +11,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.db import models
 
+from .. import money
 from . import pricing
 
 # What a merchant reads for each stored value. The value itself is the
@@ -37,12 +38,9 @@ PROMPT_TYPE_CHOICES = [(p, PROMPT_LABELS.get(p, p)) for p in pricing.PROMPT_TYPE
 FEE_BASIS_CHOICES = [(b, BASIS_LABELS.get(b, b)) for b in pricing.FEE_BASES]
 FEE_SCOPE_CHOICES = [(s, SCOPE_LABELS.get(s, s)) for s in pricing.FEE_SCOPES]
 
-_CENT = Decimal("0.01")
-
-
-def to_cents(amount) -> int:
-    """Two-decimal currency to integer cents. Exact where a float is not."""
-    return int(Decimal(amount).quantize(_CENT) * 100)
+# One rounding rule for the whole fork, HALF_UP, lives in wsm/money.py. Kept as
+# a name here because this module is where every writer already imports it from.
+to_cents = money.to_cents
 
 
 def tier_group_choices():

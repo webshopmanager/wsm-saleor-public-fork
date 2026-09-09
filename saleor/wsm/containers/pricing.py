@@ -24,6 +24,8 @@ import uuid
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
+from .. import money
+
 FIXED = "fixed"
 PERCENT = "percent"
 DISCOUNT_KINDS = (FIXED, PERCENT)
@@ -43,9 +45,9 @@ class KitRefusal(Exception):
     """A kit whose numbers cannot be charged. Never swallowed, never guessed past."""
 
 
-def to_cents(amount) -> int:
-    """Two-decimal currency to integer cents. Exact where a float is not."""
-    return int(Decimal(amount).quantize(_CENT, rounding=ROUND_HALF_UP) * 100)
+# The fork's one rounding rule, HALF_UP. Re-exported because `containers/models`
+# and the tests reach it as `pricing.to_cents`.
+to_cents = money.to_cents
 
 
 @dataclass(frozen=True)

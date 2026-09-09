@@ -112,6 +112,22 @@ caller; a future one inherits the rules by calling `full_clean()`.
   amount (a reduction belongs on an option choice as a credit, where the floor
   rule guards it) and a percentage above 100. No override flag.
 
+### Money rules added after the Wild West review (2026-09-08)
+
+Nine reviewers walked the fork and every money defect below was reproduced
+before it was fixed. Each carries what it let through.
+- **One rounding rule for the fork, `saleor/wsm/money.py`, HALF_UP.** The same
+  conversion was written three times in two modes: `compose.models.to_cents`
+  quantized with the Decimal default, HALF_EVEN, while the dealer ladders and
+  the kit math rounded HALF_UP. A tier price of 8.005, which the field's three
+  decimals invite, was quoted to the shopper at 8.01 by the dealer endpoint and
+  charged at 8.00 by anything that priced through Compose: the shop's own two
+  surfaces disagreed by a cent on the same row, every time, in whichever
+  direction the merchant did not expect. Both names still exist and both now
+  point at the one function, so no caller changed. HALF_UP is the rule because
+  it is what the ladders already quote and what a merchant means by half a cent;
+  Saleor's own `quantize_price` stays HALF_EVEN and is untouched.
+
 Where one submit changes several rows at once, the value inline formset
 (`compose/forms.py`) runs both cross-row rules over the whole POST and the rows
 carry `floor_checked_by_formset` so the model skips its single-row version

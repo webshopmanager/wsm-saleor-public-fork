@@ -26,7 +26,7 @@ and 8.01 on the other. One quantize, here, and both paths charge 8.01.
 from __future__ import annotations
 
 from collections import defaultdict
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import NamedTuple
 
 import graphene
@@ -34,6 +34,7 @@ from django.conf import settings
 from django.db.models import OuterRef, Q, Subquery
 
 from ...product.models import ProductVariantChannelListing
+from .. import money
 from .models import DealerCustomer, TierPrice
 
 # Endpoint 3's cap. A storefront asking about more variants than a page can show
@@ -64,18 +65,9 @@ def tier_group_for(user_pk, *, database_connection_name=None) -> str | None:
     )
 
 
-_CENT = Decimal("0.01")
-
-
-def to_money(amount) -> Decimal:
-    """A stored tier amount as the money that will actually be charged.
-
-    ROUND_HALF_UP, which is what a merchant means by a half cent and what the
-    containers cent conversion already did. Saleor's own `quantize_price` is
-    ROUND_HALF_EVEN and would send 8.005 down to 8.00, so it cannot be the
-    shared point here.
-    """
-    return Decimal(amount).quantize(_CENT, rounding=ROUND_HALF_UP)
+# A stored tier amount as the money that will actually be charged. The fork's one
+# rounding rule, HALF_UP, lives in wsm/money.py; see its docstring for why.
+to_money = money.to_money
 
 
 class DealerPrice(NamedTuple):

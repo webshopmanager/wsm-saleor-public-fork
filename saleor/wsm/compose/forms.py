@@ -23,6 +23,7 @@ from .models import (
     OptionSet,
     OptionValue,
     configured_floor_cents,
+    dealer_floor_problem,
     duplicate_fragment_error,
     floor_error,
     tier_group_choices,
@@ -210,11 +211,20 @@ class OptionValueInlineFormSet(BaseInlineFormSet):
         for form in pending:
             form.instance.option_set_id = self.instance.pk
             values.append(form.instance)
-        floor, base = configured_floor_cents(
-            product_id,
-            pending_set=self.instance,
-            pending_values=values,
-            removed_value_pks=removed,
-        )
+        # The edit as it WOULD be saved, asked once of retail and once of every
+        # dealer group, because both floors read the same pending rows.
+        edit = {
+            "pending_set": self.instance,
+            "pending_values": values,
+            "removed_value_pks": removed,
+        }
+        floor, base = configured_floor_cents(product_id, **edit)
         if floor is not None and floor <= 0:
             raise ValidationError(floor_error(floor, base))
+        # And once per dealer group with rows on this product. The retail floor
+        # is only an upper bound on a dealer's: a group whose credits are deeper
+        # goes under first, and the same submit is the merchant's last chance to
+        # hear about it before that group's add-to-cart starts refusing.
+        problem = dealer_floor_problem(product_id, **edit)
+        if problem is not None:
+            raise problem

@@ -10,8 +10,15 @@ from decimal import Decimal
 
 import pytest
 
+from django.core.exceptions import ValidationError
+
 from saleor.product import ProductTypeKind
-from saleor.product.models import Product, ProductType
+from saleor.product.models import (
+    Product,
+    ProductType,
+    ProductVariant,
+    ProductVariantChannelListing,
+)
 from saleor.wsm.compose import pricing
 from saleor.wsm.compose.models import (
     DealerTierOptionPrice,
@@ -67,7 +74,8 @@ def test_stored_rows_reach_the_fixture_number(credit_sets, base, expected_cents)
     assert result.composite_sku == "L600084-NCB-NPK-NGS"
 
 
-def test_stored_tier_row_on_a_credit_is_verbatim(credit_sets):
+def test_a_stored_tier_row_worse_than_retail_leaves_the_dealer_at_retail(credit_sets):
+    """The stored half of verdict 7: better of, off real rows."""
     gasket = credit_sets[-1]
     value = gasket.values.get()
     DealerTierOptionPrice.objects.create(
@@ -79,7 +87,23 @@ def test_stored_tier_row_on_a_credit_is_verbatim(credit_sets):
         [Selection(set_id=gasket.pk, value_ids=(value.pk,))],
         "dealer-1",
     )
-    assert result.unit_cents == 399899 - 30000
+    assert result.unit_cents == 355399
+    assert result.snapshot["tier_applied"] is False
+
+
+def test_a_stored_tier_row_deeper_than_retail_is_the_one_charged(credit_sets):
+    gasket = credit_sets[-1]
+    value = gasket.values.get()
+    DealerTierOptionPrice.objects.create(
+        option_value=value, tier_group="dealer-1", price_delta=Decimal("-500.00")
+    )
+    result = price_configured(
+        to_cents(Decimal("3998.99")),
+        [gasket.to_pricing()],
+        [Selection(set_id=gasket.pk, value_ids=(value.pk,))],
+        "dealer-1",
+    )
+    assert result.unit_cents == 349899
     assert result.snapshot["tier_applied"] is True
 
 
@@ -152,3 +176,86 @@ def test_the_fee_variant_sku_is_ours_and_the_merchant_sku_still_ships(
     assert variant.sku == f"wsm-fee-{crating_fee.pk}"
     # CRATE-01 is what the ERP reads, and it rides the priced snapshot.
     assert crating_fee.to_pricing().sku == "CRATE-01"
+
+
+# --- verdict 7: the two rules a tier row is saved under ----------------------
+
+
+@pytest.fixture
+def listed_product(dd_product, channel_USD):
+    """A product with a price, which is what makes a configured floor a number."""
+    variant = ProductVariant.objects.create(product=dd_product, sku="L600084")
+    ProductVariantChannelListing.objects.create(
+        variant=variant,
+        channel=channel_USD,
+        price_amount=Decimal("400.00"),
+        discounted_price_amount=Decimal("400.00"),
+        currency=channel_USD.currency_code,
+    )
+    return dd_product
+
+
+@pytest.fixture
+def dealer_1(db):
+    from saleor.wsm.dealer.models import DealerGroup
+
+    return DealerGroup.objects.create(code="dealer-1", name="Dealer 1")
+
+
+def a_value(product, delta):
+    option_set = OptionSet.objects.create(product=product, name="Finish")
+    return OptionValue.objects.create(
+        option_set=option_set, name="Titanium", sku_fragment="TI", price_delta=delta
+    )
+
+
+def test_a_tier_row_above_retail_is_refused_where_the_merchant_can_fix_it(
+    listed_product, dealer_1
+):
+    """It used to save, quote retail on the page, and refuse the add to cart.
+
+    The ceiling lived in `pricing.delta_for`, two layers from the screen, and it
+    raised at add-to-cart time with a message written for a developer. Same test,
+    said as a field error on the row that breaks it.
+    """
+    value = a_value(listed_product, Decimal("100.00"))
+    row = DealerTierOptionPrice(
+        option_value=value, tier_group="dealer-1", price_delta=Decimal("150.00")
+    )
+
+    with pytest.raises(ValidationError) as refused:
+        row.full_clean()
+
+    assert "price_delta" in refused.value.message_dict
+    assert "100.00" in str(refused.value)
+
+
+def test_a_tier_credit_that_takes_this_group_to_nothing_is_refused(
+    listed_product, dealer_1
+):
+    """The retail floor cannot see this one: retail stops at 300.00, safely up.
+
+    The dealer pays the better of its own delta and retail on every choice, so a
+    -450.00 dealer credit on a 400.00 product is a configuration that comes to
+    less than nothing FOR THAT GROUP, and every dealer add-to-cart on it would
+    have refused at checkout instead.
+    """
+    value = a_value(listed_product, Decimal("-100.00"))
+    row = DealerTierOptionPrice(
+        option_value=value, tier_group="dealer-1", price_delta=Decimal("-450.00")
+    )
+
+    with pytest.raises(ValidationError) as refused:
+        row.full_clean()
+
+    assert "dealer-1" in str(refused.value)
+    assert "-50.00" in str(refused.value)
+
+
+def test_a_tier_credit_the_product_can_carry_still_saves(listed_product, dealer_1):
+    """The rule is a floor, not a ban on dealer credits."""
+    value = a_value(listed_product, Decimal("-100.00"))
+
+    DealerTierOptionPrice(
+        option_value=value, tier_group="dealer-1", price_delta=Decimal("-150.00")
+    ).full_clean()

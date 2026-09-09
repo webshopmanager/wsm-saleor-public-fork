@@ -89,10 +89,11 @@ caller; a future one inherits the rules by calling `full_clean()`.
   one-of contributes its lowest delta, a many-of contributes every credit it
   carries, an optional one-of contributes its lowest delta or nothing). The
   floor has to stay above zero, because `pricing.price_configured` refuses at
-  or below it (requirement 1.3). Dealer tier deltas are excluded: `delta_for`
-  floors a positive tier row at retail and takes a credit verbatim, so a dealer
-  floor is a dealer rule and belongs on the dealer rows. A product with no
-  priced listing is not checked at all.
+  or below it (requirement 1.3). The floor is computed once for retail and once
+  for EVERY dealer group with a tier row on the product, pricing each choice the
+  way `delta_for` would price it for that group: the retail floor is only an
+  upper bound on a dealer's, and a group whose credits are deeper goes under
+  first. A product with no priced listing is not checked at all.
 - **A SKU code is unique inside one question.** Two choices with the same
   `sku_fragment` produce one composite SKU at two different prices, and the
   order cannot say which was bought. Enforced in `clean()` and NOT as a UNIQUE
@@ -138,6 +139,18 @@ before it was fixed. Each carries what it let through.
   price comes out of, for the rows written before either existed. The floor is a
   cent rather than "above zero" because the amount carries three decimals and is
   charged at two: 0.004 is a positive number and a zero charge.
+- **An option-value tier delta is bounded on both sides.** Above, a tier row
+  higher than the retail delta (floored at zero) is refused at save, in the
+  field, naming the retail amount. It used to save clean, quote retail on the
+  product page and then refuse the add-to-cart from `pricing.delta_for` with a
+  message written for a developer, so a merchant who priced a free option at
+  25.00 for one dealer group broke that group's cart and got told nothing.
+  Below, the charge is the BETTER OF the tier delta and retail: a -300.00 dealer
+  credit sitting where retail credits -445.00 is a legal row and used to stand
+  verbatim, which the merchant walk measured as a dealer quoted 3,698.99 for the
+  configuration a walk-in shopper buys at 3,553.99. A dealer never pays more
+  than retail for the same choice, and a line that lost to retail is not stamped
+  as tier-priced, so promotions still reach it.
 
 Where one submit changes several rows at once, the value inline formset
 (`compose/forms.py`) runs both cross-row rules over the whole POST and the rows

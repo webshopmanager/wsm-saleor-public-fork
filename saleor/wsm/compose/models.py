@@ -617,6 +617,14 @@ def _ensure_fee_variant(fee, channel):
 
     variant = fee.variant
     if variant is None:
+        # `wsm-fee` is the exclusion key. Fee products are catalog plumbing
+        # with a real, published URL (the checkout write path refuses an
+        # unpublished variant), so the storefront, the sitemap, the feed and
+        # the PartsLogic indexer exclude them by product type rather than by a
+        # slug prefix or a new field. Named in BAKEOFF-design section 8.
+        # Never shipping required: a Fee carries no freight marker of its own
+        # (`freight_class` lives on KitConfig, on the kit, not on the charge),
+        # so the charge never asks the shipping engine for a rate of its own.
         product_type, _ = ProductType.objects.get_or_create(
             slug="wsm-fee",
             defaults={
@@ -667,13 +675,28 @@ def _ensure_fee_variant(fee, channel):
             "discounted_price_amount": Decimal("0"),
         },
     )
-    ProductVariantChannelListing.objects.get_or_create(
+    # Both amounts, always. Stock `get_variant_availability` guards a NULL
+    # `price` and then dereferences `discounted_price` unguarded, so a listing
+    # carrying only the first of the two turns the public
+    # `variants { pricing }` field into a 500 for anyone, with no login, on
+    # every fee a merchant has ever sold. The sibling product listing above
+    # already writes both; this row was the omission.
+    listing, created = ProductVariantChannelListing.objects.get_or_create(
         variant=variant,
         channel=channel,
         defaults={
             "currency": channel.currency_code,
             "price_amount": Decimal("0"),
+            "discounted_price_amount": Decimal("0"),
         },
     )
+    # The rows minted before that line existed repair themselves the next time
+    # this runs. A one-off management command would be a second writer of the
+    # same column for a set that is four rows wide today; this path already
+    # holds the row, so a correct listing costs nothing and a broken one costs
+    # one UPDATE, once.
+    if not created and listing.discounted_price_amount is None:
+        listing.discounted_price_amount = listing.price_amount or Decimal("0")
+        listing.save(update_fields=["discounted_price_amount"])
     _ENSURED_FEE_VARIANTS.add((fee.pk, channel.pk))
     return variant

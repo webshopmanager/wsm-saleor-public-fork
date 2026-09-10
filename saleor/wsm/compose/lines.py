@@ -39,7 +39,7 @@ PRICED_FROM = (META_OPTIONS, META_CID, META_ACCEPTED, META_FEE, META_PARENT)
 
 
 def fee_line(fee, row, channel, *, cid, quantity, extra_metadata=()):
-    """The hidden variant and the checkout line to write, for ONE charged fee.
+    """Build the hidden variant and the checkout line for ONE charged fee.
 
     `row` is the fee as the pricing engine reported charging it
     (`compose.pricing.apply_fees`), so no amount here ever came from a caller.
@@ -77,7 +77,7 @@ def fee_line(fee, row, channel, *, cid, quantity, extra_metadata=()):
 
 
 def private_stamps(line_data, extra=None):
-    """The copy MP3 prices from, taken off a line this process just built.
+    """Take the copy MP3 prices from off a line this process just built.
 
     Only the priced-from keys, and only from a line we wrote ourselves:
     promoting whatever happens to be in a line's public metadata would honour

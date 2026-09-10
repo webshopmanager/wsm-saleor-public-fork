@@ -242,6 +242,7 @@ class KitFee:
     variant: object
     parent_variant_id: int
     label: str
+    sku: str
     unit_cents: int
     quantity: int
     apply_to: str
@@ -252,7 +253,7 @@ class KitFee:
 
 
 def kit_fee_rows(priced, fees_by_variant):
-    """The charges a priced kit owes: `(fee, row, line quantity, parent variant)`.
+    """Charge a priced kit's members: `(fee, row, line quantity, parent variant)`.
 
     The same engine the configured line charges through
     (`compose.pricing.apply_fees`), on the member's CHARGED unit and the
@@ -336,7 +337,13 @@ def member_fees(priced, database_connection_name=None):
 
 
 def add_kit_to_checkout(
-    checkout, kit, quantity, user=None, tier_lookup=None, tier_group=None
+    checkout,
+    kit,
+    quantity,
+    user=None,
+    tier_lookup=None,
+    tier_group=None,
+    variant_ids=None,
 ):
     """Explode a kit into ordinary checkout lines at prices computed right here.
 
@@ -365,7 +372,7 @@ def add_kit_to_checkout(
     from .models import KitRulesRefused, evaluate_rules
 
     priced = price_kit(
-        kit.pricing_members(checkout.channel),
+        kit.pricing_members(checkout.channel, variant_ids),
         kit.discount_kind,
         kit.discount_amount,
         kit_quantity=quantity,
@@ -387,8 +394,17 @@ def add_kit_to_checkout(
     collection_slug = kit.collection.slug
     # The stamp MP3 re-derives every line of this add from, member and charge
     # alike. Written once because it is the same string on every one of them.
+    # The picks are ON the stamp, not just in this request: MP3 re-derives a kit
+    # from it on every cart read, and without them a kit bought as three of five
+    # parts would be re-priced as all five, quietly moving money in a cart the
+    # shopper never touched.
     kit_stamp = json.dumps(
-        {"collection": collection_slug, "group": group_id, "quantity": quantity},
+        {
+            "collection": collection_slug,
+            "group": group_id,
+            "quantity": quantity,
+            "variants": sorted(line.member.variant.pk for line in priced.lines),
+        },
         sort_keys=True,
     )
     variants = []
@@ -462,6 +478,9 @@ def add_kit_to_checkout(
                 variant=fee_variant,
                 parent_variant_id=parent_variant_id,
                 label=row["label"],
+                # The MERCHANT's code for the charge, which is what the ERP
+                # export reads; the fee variant's own SKU is ours and namespaced.
+                sku=row["sku"],
                 unit_cents=row["amount"],
                 quantity=fee_quantity,
                 apply_to=row["apply_to"],

@@ -25,7 +25,7 @@ from ..dealer import pricing as dealer_pricing
 from ..dealer.tax import bind_tax_exemption
 from ..http import storefront_key_required
 from . import pricing
-from .models import KitConfig, KitRulesRefused
+from .models import KitConfig, KitRulesRefused, UnknownKitMember
 
 
 def _money(cents: int) -> str:
@@ -63,20 +63,41 @@ def _refused(message: str):
     return JsonResponse({"violations": [message]}, status=422)
 
 
+def _variant_pk(raw):
+    """One posted part, as a primary key, or None.
+
+    A global id is what the storefront sends and what this endpoint answers
+    with. A bare id is accepted too: it costs one branch and it is the shape
+    every other caller of a REST endpoint reaches for first. Neither is trusted
+    past this point, because the pk still has to name a member of THIS kit.
+    """
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.isdigit():
+        return int(raw)
+    pk = _from_gid(raw or "", "ProductVariant")
+    return int(pk) if pk is not None and pk.isdigit() else None
+
+
 def _rule_json(rule):
     """One cross-member rule as the storefront reads it.
 
     Variants are named by the same global ids the rest of this response uses, so
     a storefront pairs a rule to a line it already holds without a second call.
     """
+    targets = [
+        _to_gid("ProductVariant", variant_id)
+        for variant_id in rule.target_variant_ids
+    ]
+    subject = _to_gid("ProductVariant", rule.subject.variant_id)
     return {
         "kind": rule.kind,
         "message": rule.message,
-        "subject": _to_gid("ProductVariant", rule.subject.variant_id),
-        "targets": [
-            _to_gid("ProductVariant", variant_id)
-            for variant_id in rule.target_variant_ids
-        ],
+        "subject": subject,
+        "targets": targets,
+        # Every part the rule speaks about, subject first: a page that only
+        # wants to mark the rows a refusal is about reads this and nothing else.
+        "variantIds": [subject, *targets],
     }
 
 
@@ -148,6 +169,19 @@ def kit_line(request):
     if quantity < 1:
         return _refused("quantity must be at least 1")
 
+    # The shopper's picks. Absent is the kit as the merchant built it; present
+    # and empty is a page that let someone pick nothing, which has no price.
+    raw_picks = body.get("variantIds")
+    variant_ids = None
+    if raw_picks is not None:
+        if not isinstance(raw_picks, list):
+            return _refused("variantIds must be a list of parts")
+        if not raw_picks:
+            return _refused("choose at least one part of this kit")
+        variant_ids = [_variant_pk(raw) for raw in raw_picks]
+        if any(pk is None for pk in variant_ids):
+            return _not_found("part")
+
     checkout = (
         Checkout.objects.select_related("channel").filter(token=checkout_token).first()
     )
@@ -195,6 +229,7 @@ def kit_line(request):
             user=user,
             tier_lookup=tier_lookup,
             tier_group=tier_group,
+            variant_ids=variant_ids,
         )
     except KitRulesRefused as refusal:
         # The merchant wrote these sentences for a shopper, so they are what the
@@ -205,6 +240,18 @@ def kit_line(request):
                 "violations": [rule.message for rule in refusal.rules],
                 "code": refusal.code,
                 "rules": [_rule_json(rule) for rule in refusal.rules],
+            },
+            status=422,
+        )
+    except UnknownKitMember as refusal:
+        return JsonResponse(
+            {
+                "violations": [str(refusal)],
+                "code": refusal.code,
+                "variantIds": [
+                    _to_gid("ProductVariant", variant_id)
+                    for variant_id in refusal.variant_ids
+                ],
             },
             status=422,
         )
@@ -241,6 +288,19 @@ def kit_line(request):
                 for priced_line in priced.lines
             ],
             "kitTotal": _money(priced.total_cents),
+            # What the picked parts cost before the kit did anything, and the
+            # saving as its OWN row. The rail used to be handed two numbers and
+            # had to subtract them to name a discount; a page that computes a
+            # discount is a page that can disagree with the till. `amount` is
+            # the sum of the per-line spreads by construction, tier lines
+            # included, so list less amount IS the kit total, to the cent.
+            "listTotal": _money(priced.list_total_cents),
+            "discount": {
+                "label": kit.discount_label,
+                "percent": kit.discount_percent,
+                "amount": _money(priced.list_total_cents - priced.total_cents),
+                "listTotal": _money(priced.list_total_cents),
+            },
             # The kit total is the MEMBERS. A charge is money on top of them, it
             # is not what the kit discount was computed on, and folding it into
             # the same number would quietly discount a core deposit.
@@ -257,6 +317,10 @@ def kit_line(request):
                         "ProductVariant", fee.parent_variant_id
                     ),
                     "label": fee.label,
+                    "sku": fee.sku,
+                    # The whole charge on this line, which is what a cart row
+                    # shows, and the unit and count it is made of.
+                    "amount": _money(fee.total_cents),
                     "unitPrice": _money(fee.unit_cents),
                     "quantity": fee.quantity,
                     "applyTo": fee.apply_to,

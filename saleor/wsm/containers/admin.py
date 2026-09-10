@@ -27,7 +27,6 @@ from ...product.models import Product
 from ..admin_pickers import PickerLabelMixin
 from ..compose.admin import EmptyStateMixin, WsmAdminMixin
 from ..compose.admin import site as merchant_site
-from . import pricing
 from .models import KitConfig, KitMember, KitMemberRule, SeriesConfig
 
 MISSING = "(missing)"
@@ -260,11 +259,13 @@ class KitConfigAdmin(
         """Two columns said "fixed" and "0.00"; one column says what that means."""
         if not obj.discount_amount:
             return "None (sells at the sum of its parts)"
-        amount = f"{obj.discount_amount:.2f}"
-        if obj.discount_kind == pricing.PERCENT:
+        percent = obj.discount_percent
+        if percent is not None:
             # The column is read, not summed: 10.00% is two characters of noise.
-            return f"{amount.rstrip('0').rstrip('.')}% off the kit"
-        return f"{amount} off the kit"
+            # Trimmed on the model, so the screen and the shopper's own discount
+            # row can never print the number differently.
+            return f"{percent}% off the kit"
+        return f"{obj.discount_amount:.2f} off the kit"
 
 
 def register(site):

@@ -303,7 +303,13 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
     for line_info in kit_lines:
         try:
             stamp = json.loads(line_info.line.private_metadata[META_KIT]) or {}
-            key = (str(stamp["collection"]), int(stamp["quantity"]))
+            # The picks are part of the identity of what was bought: two adds of
+            # the same kit with different parts are two kits, priced apart.
+            key = (
+                str(stamp["collection"]),
+                int(stamp["quantity"]),
+                tuple(sorted(int(v) for v in stamp.get("variants") or ())),
+            )
         except (KeyError, TypeError, ValueError):
             _log_drop(token, line_info, "this item does not say which kit priced it")
             dropped.append(line_info)
@@ -316,13 +322,13 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
             continue
         groups[key].append(line_info)
 
-    for (slug, quantity), infos in groups.items():
+    for (slug, quantity, picks), infos in groups.items():
         try:
             kit = KitConfig.objects.filter(collection__slug=slug).first()
             if kit is None:
                 raise kit_pricing.KitRefusal(f"the kit {slug} no longer exists")
             priced = kit_pricing.price_kit(
-                kit.pricing_members(checkout_info.channel),
+                kit.pricing_members(checkout_info.channel, picks or None),
                 kit.discount_kind,
                 kit.discount_amount,
                 kit_quantity=quantity,
@@ -342,7 +348,7 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
         # nothing for this. A charge that is no longer owed goes; a REQUIRED one
         # whose line the shopper deleted takes the kit with it, because the kit
         # is not sellable without it and selling it anyway is the undercharge.
-        kit_charges = charges.get((slug, quantity)) or []
+        kit_charges = charges.get((slug, quantity, picks)) or []
         if kit_charges:
             try:
                 expected = _kit_charges(priced, database_connection_name)

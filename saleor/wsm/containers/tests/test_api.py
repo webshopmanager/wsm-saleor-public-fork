@@ -43,7 +43,9 @@ def kit(collection, product_list):
     return kit
 
 
-def post_kit(client, checkout, collection_id, quantity=1, customer=None):
+def post_kit(
+    client, checkout, collection_id, quantity=1, customer=None, variant_ids=None
+):
     body = {
         "checkoutId": gid("Checkout", checkout.token),
         "collectionId": gid("Collection", collection_id),
@@ -51,6 +53,10 @@ def post_kit(client, checkout, collection_id, quantity=1, customer=None):
     }
     if customer is not None:
         body["customerId"] = gid("User", customer.pk)
+    if variant_ids is not None:
+        # What the kit page posts on every call: the shopper's own picks, as the
+        # same global ids this endpoint answers with.
+        body["variantIds"] = [gid("ProductVariant", pk) for pk in variant_ids]
     return client.post(
         KIT_LINE_URL,
         data=json.dumps(body),
@@ -539,6 +545,10 @@ def test_a_kit_that_breaks_its_own_rule_is_refused_in_the_merchants_words(
             "message": "The billet cover cannot be fitted with the OEM tensioner.",
             "subject": gid("ProductVariant", members[0].variant_id),
             "targets": [gid("ProductVariant", members[2].variant_id)],
+            "variantIds": [
+                gid("ProductVariant", members[0].variant_id),
+                gid("ProductVariant", members[2].variant_id),
+            ],
         }
     ]
     # Refused, never re-priced: nothing reached the checkout.
@@ -571,6 +581,10 @@ def test_a_satisfied_rule_lets_the_kit_through_and_says_what_it_was(
             "message": "Requires Manual or HD Tensioner.",
             "subject": gid("ProductVariant", members[0].variant_id),
             "targets": [gid("ProductVariant", members[1].variant_id)],
+            "variantIds": [
+                gid("ProductVariant", members[0].variant_id),
+                gid("ProductVariant", members[1].variant_id),
+            ],
         }
     ]
 
@@ -661,6 +675,9 @@ def test_a_kit_member_carrying_a_fee_lands_with_its_own_deposit_line(
     assert len(payload["fees"]) == 1
     charge = payload["fees"][0]
     assert charge["label"] == "Core deposit, refundable"
+    # The merchant's own code for the charge, and the whole charge on the line.
+    assert charge["sku"] == "170-0565A-CORE"
+    assert charge["amount"] == "100.00"
     assert charge["unitPrice"] == "100.00"
     assert charge["quantity"] == 1
     assert charge["parentVariantId"] == gid("ProductVariant", core.pk)
@@ -732,3 +749,193 @@ def test_a_kit_with_no_fees_gains_no_lines(client, checkout, kit):
     assert payload["feeTotal"] == "0.00"
     assert payload["fees"] == []
     assert checkout.lines.count() == 3
+
+
+# --- the shopper's picks, and the saving as its own row -----------------------
+#
+# The kit page posts `variantIds` on every call (wsm-storefront demo/tno,
+# src/lib/kitLine.ts): a kit that offers a manual or an HD tensioner is bought
+# as the parts the shopper chose. Measured 2026-09-09: the endpoint ignored them
+# and priced the collection's own members, so a substitution was never priced.
+
+
+def test_the_picked_parts_are_the_kit_that_is_priced(client, checkout, kit, product_list):
+    """The discount prorates over what is being bought, and over nothing else."""
+    picked = [product_list[0].variants.first().pk, product_list[2].variants.first().pk]
+
+    response = post_kit(client, checkout, kit.collection_id, variant_ids=picked)
+
+    assert response.status_code == 200, response.content
+    payload = response.json()
+    # 10.00 + 30.00 list, 10 percent off, prorated 1.00 / 3.00.
+    assert payload["listTotal"] == "40.00"
+    assert payload["kitTotal"] == "36.00"
+    assert [line["unitPrice"] for line in payload["lines"]] == ["9.00", "27.00"]
+    assert {line.variant_id for line in checkout.lines.all()} == set(picked)
+
+
+def test_a_pick_that_is_not_in_the_kit_is_refused(client, checkout, kit, product_list, variant):
+    """Never quietly dropped: pricing a different kit is the whole defect."""
+    stranger = variant
+    assert stranger.pk not in set(kit.members.values_list("variant_id", flat=True))
+
+    response = post_kit(
+        client,
+        checkout,
+        kit.collection_id,
+        variant_ids=[kit.members.first().variant_id, stranger.pk],
+    )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["code"] == "kit_member_unknown"
+    assert payload["variantIds"] == [gid("ProductVariant", stranger.pk)]
+    assert checkout.lines.count() == 0
+
+
+def test_an_empty_pick_list_is_refused(client, checkout, kit):
+    response = post_kit(client, checkout, kit.collection_id, variant_ids=[])
+
+    assert response.status_code == 422
+    assert response.json()["violations"] == ["choose at least one part of this kit"]
+    assert checkout.lines.count() == 0
+
+
+def test_no_picks_is_the_kit_the_merchant_built(client, checkout, kit):
+    response = post_kit(client, checkout, kit.collection_id)
+
+    assert response.status_code == 200
+    assert len(response.json()["lines"]) == 3
+    assert response.json()["listTotal"] == "60.00"
+
+
+def test_the_saving_is_its_own_row(client, checkout, kit, collection):
+    """The rail prints a discount it was GIVEN, never one it worked out itself."""
+    payload = post_kit(client, checkout, kit.collection_id).json()
+
+    assert payload["discount"] == {
+        "label": f"{collection.name} bundle discount (10%)",
+        "percent": "10",
+        "amount": "6.00",
+        "listTotal": "60.00",
+    }
+    assert payload["listTotal"] == "60.00"
+    assert payload["kitTotal"] == "54.00"
+    assert Decimal(payload["listTotal"]) - Decimal(
+        payload["discount"]["amount"]
+    ) == Decimal(payload["kitTotal"])
+
+
+def test_a_flat_saving_quotes_no_percentage(client, checkout, kit, collection):
+    """A number the merchant did not type is a number nobody can check."""
+    kit.discount_kind = pricing.FIXED
+    kit.discount_amount = Decimal("5.00")
+    kit.save(update_fields=["discount_kind", "discount_amount"])
+
+    payload = post_kit(client, checkout, kit.collection_id).json()
+
+    assert payload["discount"] == {
+        "label": f"{collection.name} bundle discount",
+        "percent": None,
+        "amount": "5.00",
+        "listTotal": "60.00",
+    }
+
+
+def test_the_saving_counts_a_tiered_member_too(client, checkout, kit, customer_user):
+    """`amount` is the sum of the per-line spreads, so the rail always adds up.
+
+    The dear member takes a 25.00 tier instead of its kit-discounted 27.00, so
+    the saving on the kit is 1.00 + 2.00 + 5.00, not the 6.00 the percentage
+    alone would have said.
+    """
+    from saleor.wsm.dealer.models import DealerCustomer, DealerGroup, TierPrice
+
+    group = DealerGroup.objects.create(code="tier-1", name="Tier 1")
+    DealerCustomer.objects.create(user=customer_user, group=group)
+    dear = kit.members.order_by("-sort_order").first().variant
+    TierPrice.objects.create(
+        variant=dear, group=group, min_quantity=1, amount=Decimal("25.00")
+    )
+
+    payload = post_kit(
+        client, checkout, kit.collection_id, customer=customer_user
+    ).json()
+
+    assert payload["kitTotal"] == "52.00"
+    assert payload["discount"]["amount"] == "8.00"
+    assert Decimal(payload["listTotal"]) - Decimal(
+        payload["discount"]["amount"]
+    ) == Decimal(payload["kitTotal"])
+
+
+def test_a_rule_is_asked_of_the_picks_and_not_of_the_kit(client, checkout, kit):
+    """Demo 3, as the shopper meets it: the tensioner they chose is the question."""
+    from saleor.wsm.containers.models import REQUIRES_ONE_OF, RULE_VIOLATION_CODE
+
+    members = list(kit.members.order_by("sort_order"))
+    rule(
+        kit,
+        REQUIRES_ONE_OF,
+        members[0],
+        [members[1]],
+        "Requires Manual or HD Tensioner.",
+    )
+
+    without = post_kit(
+        client,
+        checkout,
+        kit.collection_id,
+        variant_ids=[members[0].variant_id, members[2].variant_id],
+    )
+    assert without.status_code == 422
+    assert without.json()["violations"] == ["Requires Manual or HD Tensioner."]
+    assert without.json()["code"] == RULE_VIOLATION_CODE
+    assert without.json()["rules"][0]["variantIds"] == [
+        gid("ProductVariant", members[0].variant_id),
+        gid("ProductVariant", members[1].variant_id),
+    ]
+    assert checkout.lines.count() == 0
+
+    with_it = post_kit(
+        client,
+        checkout,
+        kit.collection_id,
+        variant_ids=[members[0].variant_id, members[1].variant_id],
+    )
+    assert with_it.status_code == 200
+    assert checkout.lines.count() == 2
+
+
+def test_a_charge_on_a_part_nobody_picked_is_not_taken(
+    client, checkout, fee_kit, product_list
+):
+    """The deposit belongs to the core, so a kit bought without it owes nothing."""
+    body = product_list[0].variants.first()
+
+    response = post_kit(
+        client, checkout, fee_kit.collection_id, variant_ids=[body.pk]
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["fees"] == []
+    assert payload["feeTotal"] == "0.00"
+    assert checkout.lines.count() == 1
+
+
+def test_the_picked_kit_is_re_derived_as_the_picked_kit(
+    client, checkout, kit, product_list
+):
+    """The stamp carries the picks, so a cart read cannot re-price the whole kit."""
+    picked = [product_list[0].variants.first().pk, product_list[2].variants.first().pk]
+    assert (
+        post_kit(client, checkout, kit.collection_id, variant_ids=picked).status_code
+        == 200
+    )
+    before = {line.variant_id: line.price_override for line in checkout.lines.all()}
+
+    after = recalculate(checkout)
+
+    assert after == before
+    assert set(after) == set(picked)

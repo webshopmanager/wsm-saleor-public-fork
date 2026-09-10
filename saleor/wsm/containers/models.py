@@ -294,6 +294,21 @@ class SeriesConfig(models.Model):
         self.collection.save(update_fields=["metadata"])
 
 
+class UnknownKitMember(pricing.KitRefusal):
+    """A pick that is not in this kit. Refused, never quietly dropped.
+
+    A `KitRefusal` for the same reason `KitRulesRefused` is one: every path that
+    already refuses a kit it cannot charge refuses this too, and the endpoint
+    that knows how to name the parts names them.
+    """
+
+    code = "kit_member_unknown"
+
+    def __init__(self, variant_ids):
+        self.variant_ids = sorted(variant_ids)
+        super().__init__("this kit does not contain one of the parts chosen")
+
+
 class KitConfig(models.Model):
     """What a Collection needs to behave as a kit: a discount, and members."""
 
@@ -346,17 +361,59 @@ class KitConfig(models.Model):
     def __str__(self):
         return f"Kit: {self.collection.name}"
 
-    def pricing_members(self, channel):
+    @property
+    def discount_percent(self):
+        """The percentage a merchant typed, without the trailing zeros. None if flat.
+
+        `10.00%` is two characters of noise on a row a shopper reads, and the
+        number belongs to the row rather than to the screen: the kit response
+        and the admin column both take it from here.
+        """
+        if self.discount_kind != pricing.PERCENT:
+            return None
+        return f"{self.discount_amount:.2f}".rstrip("0").rstrip(".")
+
+    @property
+    def discount_label(self):
+        """The saving as its own row, named the way a shopper would name it.
+
+        Derived, not typed: the collection already carries the merchant's name
+        for the bundle and the discount carries its size, so a label column
+        would be a third place to keep them agreeing.
+        ponytail: the ceiling is that a merchant cannot word this row
+        themselves. The upgrade is one `label` field on this model, the day one
+        asks.
+        """
+        percent = self.discount_percent
+        if percent is None:
+            return f"{self.collection.name} bundle discount"
+        return f"{self.collection.name} bundle discount ({percent}%)"
+
+    def pricing_members(self, channel, variant_ids=None):
         """Price this kit's members in one channel, in two queries, in member order.
 
         Two rather than one because a channel listing per member is a second
         table and joining it would still return a row per member: the second
         query is the cheap half of the pair, and it keeps the member rows from
         multiplying if a variant is ever listed in more than one channel.
+
+        `variant_ids` is the shopper's PICKS. A kit page that offers a manual or
+        an HD tensioner sends back the one they chose, and the money is then the
+        money for what they are buying: the discount prorates over the picked
+        parts and over no others. Absent means the kit as the merchant built it.
+        A pick this kit does not contain is refused rather than dropped, because
+        silently pricing a different kit than the one the shopper is looking at
+        is the whole defect.
         """
         from ...product.models import ProductVariantChannelListing
 
         members = list(self.members.select_related("variant"))
+        if variant_ids is not None:
+            picked = {int(variant_id) for variant_id in variant_ids}
+            unknown = picked - {member.variant_id for member in members}
+            if unknown:
+                raise UnknownKitMember(unknown)
+            members = [member for member in members if member.variant_id in picked]
         if not members:
             raise pricing.KitRefusal("a kit with no members has no price")
 

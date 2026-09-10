@@ -63,7 +63,7 @@ from . import patches
 from .compose import pricing as compose_pricing
 from .containers import pricing as kit_pricing
 from .compose.models import Fee, OptionSet, to_cents
-from .compose.views import (
+from .compose.lines import (
     META_ACCEPTED,
     META_CID,
     META_FEE,
@@ -299,6 +299,7 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
 
     groups: dict[tuple, list] = defaultdict(list)
     dropped = []
+    charges: dict[tuple, list] = defaultdict(list)
     for line_info in kit_lines:
         try:
             stamp = json.loads(line_info.line.private_metadata[META_KIT]) or {}
@@ -306,6 +307,12 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
         except (KeyError, TypeError, ValueError):
             _log_drop(token, line_info, "this item does not say which kit priced it")
             dropped.append(line_info)
+            continue
+        if META_FEE in (line_info.line.private_metadata or {}):
+            charges[key].append(line_info)
+            # A kit that is nothing BUT charges is not a kit any more; the group
+            # still has to be visited so those lines go with it.
+            groups.setdefault(key, [])
             continue
         groups[key].append(line_info)
 
@@ -330,6 +337,47 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
             dropped.extend(infos)
             continue
 
+        # The kit's charges, re-derived from the same priced members, and only
+        # when the checkout is carrying one: a kit whose parts have no fees pays
+        # nothing for this. A charge that is no longer owed goes; a REQUIRED one
+        # whose line the shopper deleted takes the kit with it, because the kit
+        # is not sellable without it and selling it anyway is the undercharge.
+        kit_charges = charges.get((slug, quantity)) or []
+        if kit_charges:
+            try:
+                expected = _kit_charges(priced, database_connection_name)
+            except kit_pricing.KitRefusal as problem:
+                for line_info in infos + kit_charges:
+                    _log_drop(token, line_info, str(problem))
+                dropped.extend(infos + kit_charges)
+                continue
+            parents = {
+                (info.line.private_metadata or {}).get(META_CID) for info in infos
+            }
+            present = {info.line.variant_id for info in kit_charges}
+            if set(expected) - present:
+                for line_info in infos + kit_charges:
+                    _log_drop(
+                        token,
+                        line_info,
+                        "a required charge on this kit can no longer be taken",
+                    )
+                dropped.extend(infos + kit_charges)
+                continue
+            for line_info in kit_charges:
+                stamps = line_info.line.private_metadata or {}
+                if stamps.get(META_PARENT) not in parents:
+                    _log_drop(token, line_info, "the part this charge belongs to is gone")
+                    dropped.append(line_info)
+                    continue
+                owed = expected.get(line_info.line.variant_id)
+                if owed is None:
+                    _log_drop(token, line_info, "this charge is no longer owed")
+                    dropped.append(line_info)
+                    continue
+                row, fee_quantity = owed
+                _write_fee_line(line_info, row, fee_quantity, mark)
+
         by_variant = {row.member.variant.pk: row for row in priced.lines}
         for line_info in infos:
             line = line_info.line
@@ -352,6 +400,39 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
             if before != _snapshot_of(line):
                 mark(line_info)
     return dropped
+
+
+def _kit_charges(priced, database_connection_name):
+    """`{fee variant id: (row, line quantity)}` for a priced kit. ONE fee query.
+
+    The same function the add charged through (`containers.pricing`), so a
+    charge cannot be quoted at the till and re-derived differently on the next
+    cart read.
+    """
+    return {
+        fee.variant_id: (row, quantity)
+        for fee, row, quantity, _parent in kit_pricing.kit_fee_rows(
+            priced,
+            kit_pricing.member_fees(priced, database_connection_name),
+        )
+        if fee.variant_id is not None
+    }
+
+
+def _write_fee_line(line_info, row, quantity, mark):
+    """Make one fee line say what the pricing engine just charged for it."""
+    line = line_info.line
+    before = _snapshot_of(line)
+    was = line.quantity
+    line.quantity = quantity
+    line.price_override = Decimal(row["amount"]) / 100
+    line.price_override_reason = COMPOSE_REASON
+    stamp = json.dumps({"label": row["label"], "apply_to": row["apply_to"]})
+    line.store_value_in_private_metadata({META_FEE: stamp})
+    # The public copy the storefront cart reads. Display, never an input.
+    line.store_value_in_metadata({META_FEE: stamp})
+    if before != _snapshot_of(line):
+        mark(line_info, quantity=line.quantity != was)
 
 
 def _kit_group(infos):
@@ -385,7 +466,13 @@ def _classify(lines):
     for line_info in lines:
         stamps = line_info.line.private_metadata or {}
         if META_FEE in stamps:
-            fee_lines.append(line_info)
+            # A charge on a KIT member is re-derived from the kit, because that
+            # is where its money comes from; it has no configured parent to hang
+            # off and used to be dropped as an orphan on the first cart read.
+            if META_KIT in stamps:
+                kit_lines.append(line_info)
+            else:
+                fee_lines.append(line_info)
         elif META_OPTIONS in stamps:
             configured.append(line_info)
         elif META_KIT in stamps:
@@ -715,19 +802,12 @@ def _reprice_fee_lines(
     )
 
     for variant_id, row in expected.items():
-        line_info = present[variant_id]
-        line = line_info.line
-        before = _snapshot_of(line)
-        was = line.quantity
-        line.quantity = quantity if row["apply_to"] == compose_pricing.PER_UNIT else 1
-        line.price_override = Decimal(row["amount"]) / 100
-        line.price_override_reason = COMPOSE_REASON
-        stamp = json.dumps({"label": row["label"], "apply_to": row["apply_to"]})
-        line.store_value_in_private_metadata({META_FEE: stamp})
-        # The public copy the storefront cart reads. Display, never an input.
-        line.store_value_in_metadata({META_FEE: stamp})
-        if before != _snapshot_of(line):
-            mark(line_info, quantity=line.quantity != was)
+        _write_fee_line(
+            present[variant_id],
+            row,
+            quantity if row["apply_to"] == compose_pricing.PER_UNIT else 1,
+            mark,
+        )
 
 
 def _selections_from(snapshot):

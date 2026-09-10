@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
 from .. import money
+from ..compose import pricing as compose_pricing
 
 FIXED = "fixed"
 PERCENT = "percent"
@@ -234,14 +235,115 @@ def price_kit(
     )
 
 
+@dataclass(frozen=True)
+class KitFee:
+    """One charge a kit owes, and the part of the kit that owes it."""
+
+    variant: object
+    parent_variant_id: int
+    label: str
+    unit_cents: int
+    quantity: int
+    apply_to: str
+
+    @property
+    def total_cents(self) -> int:
+        return self.unit_cents * self.quantity
+
+
+def kit_fee_rows(priced, fees_by_variant):
+    """The charges a priced kit owes: `(fee, row, line quantity, parent variant)`.
+
+    The same engine the configured line charges through
+    (`compose.pricing.apply_fees`), on the member's CHARGED unit and the
+    member's own line quantity, so a percentage rides on what the shopper
+    actually pays for that part and never on the kit's list price. The kit
+    discount is therefore already spent before a fee is looked at: it comes off
+    the member lines and never off a charge.
+
+    Declinable charges are not taken. A kit add asks the shopper nothing, and a
+    fee the shopper was never shown cannot be charged by a caller that forgot to
+    ask, which is the same default-deny the configured line keeps.
+    """
+    charged: dict[int, tuple] = {}
+    for line in priced.lines:
+        fees = fees_by_variant.get(line.member.variant.pk) or ()
+        if not fees:
+            continue
+        rows, _total = compose_pricing.apply_fees(
+            [fee.to_pricing() for fee in fees],
+            (),
+            line.unit_cents,
+            line.line_quantity,
+        )
+        by_id = {fee.pk: fee for fee in fees}
+        for row in rows:
+            quantity = (
+                line.line_quantity
+                if row["apply_to"] == compose_pricing.PER_UNIT
+                else 1
+            )
+            held = charged.get(row["id"])
+            if held is None:
+                charged[row["id"]] = (
+                    by_id[row["id"]],
+                    row,
+                    quantity,
+                    line.member.variant.pk,
+                )
+                continue
+            fee, first, so_far, parent = held
+            if first["amount"] != row["amount"]:
+                # One charge on two parts of the same kit at two different
+                # amounts, which is a percentage riding on two different member
+                # prices. One line cannot carry both.
+                # ponytail: refused rather than guessed, because the alternative
+                # is silently wrong money. The upgrade path is a fee variant per
+                # (fee, member) pair, the day a merchant writes one.
+                raise KitRefusal(
+                    f"the charge {row['label']!r} lands on more than one part of "
+                    "this kit at different amounts"
+                )
+            charged[row["id"]] = (fee, first, so_far + quantity, parent)
+    return [charged[fee_id] for fee_id in sorted(charged)]
+
+
+def member_fees(priced, database_connection_name=None):
+    """Every REQUIRED charge on the kit's member products, keyed by variant. One query.
+
+    Zero queries for a kit whose members carry none is not on offer: whether
+    they do is the question. It is ONE query for the whole kit, never one per
+    member, and the fee table is indexed on the product.
+    """
+    from ..compose.models import Fee
+
+    by_product = {}
+    fees = Fee.objects.filter(
+        product_id__in={line.member.variant.product_id for line in priced.lines},
+        required=True,
+    )
+    if database_connection_name is not None:
+        fees = fees.using(database_connection_name)
+    for fee in fees:
+        by_product.setdefault(fee.product_id, []).append(fee)
+    if not by_product:
+        return {}
+    return {
+        line.member.variant.pk: by_product[line.member.variant.product_id]
+        for line in priced.lines
+        if line.member.variant.product_id in by_product
+    }
+
+
 def add_kit_to_checkout(
     checkout, kit, quantity, user=None, tier_lookup=None, tier_group=None
 ):
     """Explode a kit into ordinary checkout lines at prices computed right here.
 
-    Returns `(group_id, KitPrice, {variant_id: CheckoutLine}, [KitMemberRule])`.
-    The rules ride back because the caller has to publish them and this is the
-    one place they are read; see `models.evaluate_rules`. The lines are
+    Returns `(group_id, KitPrice, {variant_id: CheckoutLine}, [KitMemberRule],
+    (KitFee, ...))`. The rules and the charges ride back because the caller has
+    to publish both and this is the one place either is read; see
+    `models.evaluate_rules` and `kit_fee_rows`. The member lines are
     ordinary: nothing downstream needs to know a kit made them, and a shopper who
     deletes one is left with the others at their own prices, which is exactly
     what the "kits are never a Saleor object beyond the Collection" ruling asks
@@ -257,6 +359,7 @@ def add_kit_to_checkout(
     from ...graphql.checkout.mutations.utils import CheckoutLineData
     from ...plugins.manager import get_plugins_manager
     from ..checkout import check_addable
+    from ..compose.lines import META_CID, fee_line, private_stamps
     from ..dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
     from ..dealer.no_stacking import PRICE_OVERRIDE_REASON as DEALER_REASON
     from .models import KitRulesRefused, evaluate_rules
@@ -282,10 +385,21 @@ def add_kit_to_checkout(
 
     group_id = str(uuid.uuid4())
     collection_slug = kit.collection.slug
+    # The stamp MP3 re-derives every line of this add from, member and charge
+    # alike. Written once because it is the same string on every one of them.
+    kit_stamp = json.dumps(
+        {"collection": collection_slug, "group": group_id, "quantity": quantity},
+        sort_keys=True,
+    )
     variants = []
     lines_data = []
+    cid_by_variant = {}
     for line in priced.lines:
         variants.append(line.member.variant)
+        # One id per MEMBER line, not one per kit: a charge hangs under the part
+        # that owes it, and a single kit-wide id would hang a core deposit under
+        # every part in the cart.
+        cid_by_variant[line.member.variant.pk] = cid = str(uuid.uuid4())
         metadata = [
             MetadataItem(META_GROUP, group_id),
             MetadataItem(
@@ -295,6 +409,7 @@ def add_kit_to_checkout(
                     sort_keys=True,
                 ),
             ),
+            MetadataItem(META_CID, cid),
         ]
         reason = PRICE_OVERRIDE_REASON
         if line.on_tier:
@@ -313,6 +428,43 @@ def add_kit_to_checkout(
                 custom_price_reason=reason,
                 custom_price_reason_to_update=True,
                 metadata_list=metadata,
+            )
+        )
+
+    # A kit member carrying a required charge owes it exactly as the same
+    # product does through the PDP: measured 2026-09-09, this path never looked
+    # at Fee, so a core deposit the configured line charges was simply not taken.
+    # The charge is its own line, at its own price, under the member that owes
+    # it, and the kit discount above never touched it.
+    fees = []
+    fee_stamps = {}
+    for fee, row, fee_quantity, parent_variant_id in kit_fee_rows(
+        priced, member_fees(priced)
+    ):
+        fee_variant, fee_line_data = fee_line(
+            fee,
+            row,
+            checkout.channel,
+            cid=cid_by_variant[parent_variant_id],
+            quantity=fee_quantity,
+            # The charge rides with the kit that brought it: the cart groups on
+            # the group id, and MP3 re-derives it with the kit rather than
+            # hunting for a configured line that was never there.
+            extra_metadata=(MetadataItem(META_GROUP, group_id),),
+        )
+        variants.append(fee_variant)
+        lines_data.append(fee_line_data)
+        fee_stamps[fee_variant.pk] = private_stamps(
+            fee_line_data, {META_KIT: kit_stamp}
+        )
+        fees.append(
+            KitFee(
+                variant=fee_variant,
+                parent_variant_id=parent_variant_id,
+                label=row["label"],
+                unit_cents=row["amount"],
+                quantity=fee_quantity,
+                apply_to=row["apply_to"],
             )
         )
 
@@ -370,16 +522,7 @@ def add_kit_to_checkout(
         # own quantity is the kit's times the member's, and dividing it back out
         # is a guess the moment a shopper edits it.
         row.store_value_in_private_metadata(
-            {
-                META_KIT: json.dumps(
-                    {
-                        "collection": collection_slug,
-                        "group": group_id,
-                        "quantity": quantity,
-                    },
-                    sort_keys=True,
-                )
-            }
+            {META_KIT: kit_stamp, META_CID: cid_by_variant[line.member.variant.pk]}
         )
         stamped.append(row)
         if not line.on_tier:
@@ -395,7 +538,13 @@ def add_kit_to_checkout(
         row.store_value_in_private_metadata(
             {DEALER_KEY: json.dumps({"group": tier_group} if tier_group else {})}
         )
+    for variant_pk, values in fee_stamps.items():
+        row = ours.get(variant_pk)
+        if row is None:
+            continue
+        row.store_value_in_private_metadata(values)
+        stamped.append(row)
     if stamped:
         CheckoutLine.objects.bulk_update(stamped, ["private_metadata"])
 
-    return group_id, priced, ours, rules
+    return group_id, priced, ours, rules, tuple(fees)

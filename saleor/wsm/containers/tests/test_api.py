@@ -597,3 +597,138 @@ def test_a_kit_with_no_rules_is_unchanged(client, checkout, kit):
     assert response.status_code == 200
     assert response.json()["rules"] == []
     assert checkout.lines.count() == 3
+
+
+# --- charges on a kit member --------------------------------------------------
+#
+# A fee is attached to a PRODUCT, so a kit that contains that product owes it
+# exactly as the configured-line path does. Demo 4, measured 2026-09-09: the kit
+# route never looked at Fee, so a core deposit that the same product charges
+# through the PDP was simply not taken.
+
+
+@pytest.fixture
+def fee_kit(collection, product_list, channel_USD):
+    """3,680.85 of parts, 10 percent off, one part carrying a 100.00 deposit.
+
+    The demo-4 arithmetic: 368.09 off the MEMBERS (10 percent, half-up), the
+    deposit whole, 3,412.76 to pay.
+    """
+    from saleor.wsm.compose import pricing as compose_pricing
+    from saleor.wsm.compose.models import Fee
+
+    body, core = product_list[0], product_list[1]
+    collection.products.add(body, core)
+    for product, price in ((body, "3180.85"), (core, "500.00")):
+        product.variants.first().channel_listings.filter(channel=channel_USD).update(
+            price_amount=Decimal(price)
+        )
+    kit = KitConfig.objects.create(
+        collection=collection,
+        discount_kind=pricing.PERCENT,
+        discount_amount=Decimal(10),
+    )
+    for order, product in enumerate((body, core)):
+        KitMember.objects.create(
+            kit=kit, variant=product.variants.first(), quantity=1, sort_order=order
+        )
+    Fee.objects.create(
+        product=core,
+        label="Core deposit, refundable",
+        sku="170-0565A-CORE",
+        basis=compose_pricing.FIXED,
+        amount=Decimal("100.00"),
+        apply_to=compose_pricing.PER_UNIT,
+        required=True,
+    )
+    return kit
+
+
+def test_a_kit_member_carrying_a_fee_lands_with_its_own_deposit_line(
+    client, checkout, fee_kit, product_list
+):
+    response = post_kit(client, checkout, fee_kit.collection_id)
+
+    assert response.status_code == 200, response.content
+    payload = response.json()
+    # The kit total is the MEMBERS. The deposit is not part of what the kit
+    # discount was computed on and is not discounted by it.
+    assert payload["kitTotal"] == "3312.76"
+    assert payload["feeTotal"] == "100.00"
+    assert [line["unitPrice"] for line in payload["lines"]] == ["2862.76", "450.00"]
+
+    core = product_list[1].variants.first()
+    assert len(payload["fees"]) == 1
+    charge = payload["fees"][0]
+    assert charge["label"] == "Core deposit, refundable"
+    assert charge["unitPrice"] == "100.00"
+    assert charge["quantity"] == 1
+    assert charge["parentVariantId"] == gid("ProductVariant", core.pk)
+    assert charge["lineId"]
+
+    lines = list(checkout.lines.all())
+    assert len(lines) == 3
+    assert sum(line.price_override * line.quantity for line in lines) == Decimal(
+        "3412.76"
+    )
+    deposit = checkout.lines.get(variant__sku__startswith="wsm-fee-")
+    assert deposit.price_override == Decimal("100.00")
+    assert deposit.quantity == 1
+
+
+def test_the_deposit_line_says_what_it_belongs_to(client, checkout, fee_kit, product_list):
+    """The pairing the storefront cart draws the charge under its part with."""
+    from saleor.wsm.compose.lines import META_CID, META_FEE, META_PARENT
+
+    assert post_kit(client, checkout, fee_kit.collection_id).status_code == 200
+
+    core = product_list[1].variants.first()
+    member = checkout.lines.get(variant_id=core.pk)
+    deposit = checkout.lines.get(variant__sku__startswith="wsm-fee-")
+
+    assert deposit.metadata[META_PARENT] == member.metadata[META_CID]
+    assert json.loads(deposit.metadata[META_FEE]) == {
+        "label": "Core deposit, refundable",
+        "apply_to": "unit",
+    }
+    # Ours to price from, so the copy that decides money is private.
+    assert deposit.private_metadata[META_PARENT] == member.private_metadata[META_CID]
+    # The charge rides with the kit it came from, so a cart groups it with the kit.
+    assert deposit.metadata[pricing.META_GROUP] == member.metadata[pricing.META_GROUP]
+
+
+def test_a_per_unit_deposit_follows_the_kit_quantity(client, checkout, fee_kit):
+    response = post_kit(client, checkout, fee_kit.collection_id, quantity=2)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kitTotal"] == "6625.52"
+    assert payload["feeTotal"] == "200.00"
+    deposit = checkout.lines.get(variant__sku__startswith="wsm-fee-")
+    assert deposit.quantity == 2
+    assert deposit.price_override == Decimal("100.00")
+
+
+def test_the_deposit_survives_the_next_cart_read(client, checkout, fee_kit):
+    """Every cart read re-derives the kit. The charge is re-derived with it."""
+    assert post_kit(client, checkout, fee_kit.collection_id).status_code == 200
+
+    after = recalculate(checkout)
+
+    deposit = checkout.lines.get(variant__sku__startswith="wsm-fee-")
+    assert after[deposit.variant_id] == Decimal("100.00")
+    assert checkout.lines.count() == 3
+    assert sum(
+        line.price_override * line.quantity for line in checkout.lines.all()
+    ) == Decimal("3412.76")
+
+
+def test_a_kit_with_no_fees_gains_no_lines(client, checkout, kit):
+    """The whole feature is invisible to a kit whose parts carry no charges."""
+    response = post_kit(client, checkout, kit.collection_id)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["feeTotal"] == "0.00"
+    assert payload["fees"] == []
+    assert checkout.lines.count() == 3

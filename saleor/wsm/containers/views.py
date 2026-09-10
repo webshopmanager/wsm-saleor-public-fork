@@ -188,7 +188,7 @@ def kit_line(request):
     )
 
     try:
-        group_id, priced, lines_by_variant, rules = pricing.add_kit_to_checkout(
+        group_id, priced, lines_by_variant, rules, fees = pricing.add_kit_to_checkout(
             checkout,
             kit,
             quantity,
@@ -241,6 +241,28 @@ def kit_line(request):
                 for priced_line in priced.lines
             ],
             "kitTotal": _money(priced.total_cents),
+            # The kit total is the MEMBERS. A charge is money on top of them, it
+            # is not what the kit discount was computed on, and folding it into
+            # the same number would quietly discount a core deposit.
+            "feeTotal": _money(sum(fee.total_cents for fee in fees)),
+            "fees": [
+                {
+                    "lineId": (
+                        _to_gid("CheckoutLine", line.pk)
+                        if (line := lines_by_variant.get(fee.variant.pk))
+                        else None
+                    ),
+                    "variantId": _to_gid("ProductVariant", fee.variant.pk),
+                    "parentVariantId": _to_gid(
+                        "ProductVariant", fee.parent_variant_id
+                    ),
+                    "label": fee.label,
+                    "unitPrice": _money(fee.unit_cents),
+                    "quantity": fee.quantity,
+                    "applyTo": fee.apply_to,
+                }
+                for fee in fees
+            ],
             # Read off the rows the add already had to load, so a kit that
             # carries no rules pays nothing for the key being here.
             #

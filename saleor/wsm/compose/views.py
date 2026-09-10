@@ -40,24 +40,16 @@ from ..dealer.tax import bind_tax_exemption
 from ..checkout import LineRefused, check_addable, whole_number
 from ..http import storefront_key_required
 from . import pricing
+from .lines import (
+    META_ACCEPTED,
+    META_CID,
+    META_OPTIONS,
+    META_SKU,
+    PRICE_OVERRIDE_REASON,
+    fee_line,
+    private_stamps,
+)
 from .models import Fee, OptionSet, ProductCompliance, to_cents
-
-# Line metadata keys. The storefront reads these; they are contract, not detail.
-META_OPTIONS = "wsm.options"
-META_SKU = "wsm.options.sku"
-META_CID = "wsm.options.cid"
-META_ACCEPTED = "wsm.options.acc"
-META_FEE = "compose.fee"
-META_PARENT = "compose.parent_line"
-
-PRICE_OVERRIDE_REASON = "wsm.compose"
-
-# The keys MP3 prices from. Their authority copy is written to PRIVATE metadata
-# (stock Saleor lets any unauthenticated caller write PUBLIC line metadata:
-# saleor/graphql/meta/permissions.py maps CheckoutLine to `no_permissions`), and
-# the public copies above stay because the storefront cart and order screens
-# read them for display and B6 is "no storefront code".
-PRICED_FROM = (META_OPTIONS, META_CID, META_ACCEPTED, META_FEE, META_PARENT)
 
 
 def _money(cents: int) -> str:
@@ -336,11 +328,7 @@ def configured_line(request):
             ],
         )
     ]
-    stamps_by_variant[variant.pk] = {
-        item.key: item.value
-        for item in lines_data[0].metadata_list
-        if item.key in PRICED_FROM
-    }
+    stamps_by_variant[variant.pk] = private_stamps(lines_data[0])
     if priced.snapshot.get("tier_applied"):
         # A configured line that took a tier IS a dealer line. MP1 and MP2 find
         # one by the presence of this key and nothing else, so without it a
@@ -351,47 +339,19 @@ def configured_line(request):
         )
 
     for fee_id, row in sorted(charged.items()):
-        fee = fees_by_id[fee_id]
-        fee_variant = fee.ensure_variant(checkout.channel)
-        variants.append(fee_variant)
-        lines_data.append(
-            CheckoutLineData(
-                variant_id=str(fee_variant.pk),
-                # A per-unit fee is one fee line of `quantity`, a per-line fee is
-                # one of 1. The fee's own unit price is the same either way, so
-                # the line total is the fee total the pricing engine reported.
-                quantity=quantity if row["apply_to"] == pricing.PER_UNIT else 1,
-                quantity_to_update=True,
-                custom_price=Decimal(row["amount"]) / 100,
-                custom_price_to_update=True,
-                custom_price_reason=PRICE_OVERRIDE_REASON,
-                custom_price_reason_to_update=True,
-                metadata_list=[
-                    MetadataItem(
-                        META_FEE,
-                        json.dumps({"label": row["label"], "apply_to": row["apply_to"]}),
-                    ),
-                    MetadataItem(META_CID, cid),
-                    # The PARENT is named by its cid, not its line pk: the
-                    # storefront pairs a fee to its product on
-                    # `compose.parent_line == the parent's wsm.options.cid`
-                    # (composeFee.ts feeLinesFor) and on nothing else. A pk
-                    # here orphaned every fee in the cart ("the item this
-                    # charge applies to is no longer in your cart") AND left
-                    # it out of withChildLines, so a per-unit crate charge
-                    # stayed at one unit's money when the shopper bought two.
-                    # Writing the cid also makes the pairing knowable BEFORE
-                    # the insert, which is why the post-write lookup below is
-                    # gone.
-                    MetadataItem(META_PARENT, cid),
-                ],
-            )
+        fee_variant, fee_line_data = fee_line(
+            fees_by_id[fee_id],
+            row,
+            checkout.channel,
+            cid=cid,
+            # A per-unit fee is one fee line of `quantity`, a per-line fee is one
+            # of 1. The fee's own unit price is the same either way, so the line
+            # total is the fee total the pricing engine reported.
+            quantity=quantity if row["apply_to"] == pricing.PER_UNIT else 1,
         )
-        stamps_by_variant[fee_variant.pk] = {
-            item.key: item.value
-            for item in lines_data[-1].metadata_list
-            if item.key in PRICED_FROM
-        }
+        variants.append(fee_variant)
+        lines_data.append(fee_line_data)
+        stamps_by_variant[fee_variant.pk] = private_stamps(fee_line_data)
 
     manager = get_plugins_manager(allow_replica=False)
     checkout_info = fetch_checkout_info(checkout, [], manager)

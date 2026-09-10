@@ -297,8 +297,12 @@ def _validate(sets_by_id, picked, fees_by_id, accepted):
             )
 
 
-def _apply_fees(fees, accepted, subtotal_cents: int, quantity: int):
+def apply_fees(fees, accepted, subtotal_cents: int, quantity: int):
     """Charge the required fees plus the declinable ones the shopper accepted.
+
+    Public because a kit member owes its product's charges through this same
+    formula (`containers.pricing.kit_fee_rows`). A second copy of it is how a
+    quoted fee and a charged fee start disagreeing by a cent.
 
     Every percent fee computes on the CONFIGURED subtotal (base plus option
     deltas) and never on another fee, so fees do not compound and their order
@@ -421,7 +425,7 @@ def price_configured(
     if unit_cents <= 0:
         raise NegativeTotalError(unit_cents)
 
-    quoted_fees, fee_total = _apply_fees(fees, accepted, unit_cents, quantity)
+    quoted_fees, fee_total = apply_fees(fees, accepted, unit_cents, quantity)
 
     line_total = unit_cents * quantity + fee_total
     if line_total <= 0:
@@ -497,7 +501,7 @@ def minimum_line_cents(base_unit_cents: int, option_sets, fees=()) -> int:
     Declinable fees add nothing, for the same reason an optional option set adds
     nothing: the shopper can say no, so the lowest price anyone pays excludes
     them. A percent fee computes on the cheapest subtotal through the SAME
-    `_apply_fees` that checkout charges through, never a second formula, so the
+    `apply_fees` that checkout charges through, never a second formula, so the
     quoted floor and the charged line can never round apart.
 
     Quantity one, because a floor is a "from" price on one item, and at
@@ -509,5 +513,5 @@ def minimum_line_cents(base_unit_cents: int, option_sets, fees=()) -> int:
     to do with a floor at or below zero.
     """
     unit = minimum_configured_cents(base_unit_cents, option_sets)
-    _, fee_total = _apply_fees(fees, (), unit, 1)
+    _, fee_total = apply_fees(fees, (), unit, 1)
     return unit + fee_total

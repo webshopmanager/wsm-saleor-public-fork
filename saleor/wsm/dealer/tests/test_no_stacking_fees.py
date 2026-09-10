@@ -79,7 +79,7 @@ def test_the_fee_marker_is_the_one_compose_writes():
     module cannot import it back for the fee key. If the two ever drift, every
     fee line in the fleet becomes discountable again, silently.
     """
-    from ...compose.views import META_FEE
+    from ...compose.lines import META_FEE
 
     assert FEE_METADATA_KEY == META_FEE
 

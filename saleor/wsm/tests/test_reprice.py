@@ -44,7 +44,7 @@ from saleor.wsm.dealer.tests.test_views import (  # noqa: F401
     post,
     tiers,
 )
-from saleor.wsm.compose.views import META_OPTIONS as OPTIONS_KEY
+from saleor.wsm.compose.lines import META_OPTIONS as OPTIONS_KEY
 from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from saleor.wsm.reprice import reprice
 

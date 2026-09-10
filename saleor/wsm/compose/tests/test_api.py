@@ -16,7 +16,7 @@ import pytest
 
 from saleor.wsm.compose.models import Fee, OptionSet, OptionValue
 from saleor.wsm.tests import COMPOSE_HEADERS
-from saleor.wsm.compose.views import (
+from saleor.wsm.compose.lines import (
     META_CID,
     META_FEE,
     META_OPTIONS,

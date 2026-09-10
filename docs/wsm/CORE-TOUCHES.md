@@ -11,11 +11,19 @@ nothing else:
 
 ```
 git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py, urls.py, section 7's list, saleor/wsm/**
+git diff --name-only a1ab3a2..HEAD -- CHANGELOG.md
 ```
+
+The second line is not decoration. The first is scoped to `saleor/`, so it
+cannot see `CHANGELOG.md`, which this branch also edits and which
+`make vendor-delta` counts. One file, outside the only command this ledger
+offered to find it (Wild West finding 12).
 
 Monkey patches: **three** (MP1, added by U3; MP2, added by U7; MP3, added by
 H1; the design doc budgeted zero, see those entries for why the stock levers do
-not exist), plus
+not exist). Three, not four: the compliance PLUGIN in section 9 is a native
+hook, argued there, and it is deliberately not a fourth patch. Read this line
+with section 9 and the two counts agree. Plus
 one resolver swap Bill's secondary-categories patch performs from
 `saleor/wsm/apps.py` (section 7). Core table edits: **zero.** Our tables carry
 FKs into core tables; core migrations are untouched, and the one migration
@@ -25,6 +33,28 @@ Sections 1 to 6 and section 8 are this branch's own work and touch two core
 files. Section 7 is the six WSM patches that already existed before the fork,
 merged in from `wsm/bakeoff-rebase-probe`; they are the reason the guard test's
 allow-list is longer than two entries.
+
+Since 2026-09-10 every patch also pins a **sha256 of the wrapped function's
+own source** (`SOURCE` in `saleor/wsm/patches.py`), and `install_guard` refuses
+to boot when a body has moved under a wrapper. `PINNED` says WHERE a function is
+bound and cannot see that its contents changed, which is exactly the class that
+bit this branch once already (the catalogue-promotion double-take fixed at
+08b221ec). To re-pin after a deliberate upstream bump, read the upstream diff
+for the function FIRST, then print the digests:
+
+```
+./run.sh shell -c "
+import inspect, hashlib, importlib
+from saleor.wsm import patches
+for name in patches.PINNED:
+    definer, _, attr = name.rpartition('.')
+    fn = getattr(importlib.import_module(definer), attr)
+    print(name, hashlib.sha256(inspect.getsource(fn).encode()).hexdigest())
+"
+```
+
+`inspect.getsource` unwraps, so this answers about the ORIGINAL even after the
+wrappers are installed.
 
 Every patch this fork installs is named, once, in `saleor/wsm/patches.py` as
 `PINNED`, by the defining module and qualname of the function it wraps, together
@@ -205,6 +235,11 @@ Containers.
 this line their own way. U2's shape is the one kept: U3's `path("wsm/", ...)`
 prefixes every fork route with `/wsm/`, which the dealer and compose endpoints
 want but `/admin/` and `/static/` do not, and those two are U2's merchant UI.
+Since 2026-09-10 the `/static/` route is OFF unless `WSM_SERVE_STATIC` is set
+(`saleor/wsm/urls.py::static_routes`, Wild West finding 11): the target
+deployment is ECS behind a CDN, where Django serving static files is a
+production defect, and a bake-off box behind SSH says so for itself. A box
+whose merchant screens render unstyled is missing that variable.
 An empty `re_path` prefix mounts the list at the root and lets
 `saleor/wsm/urls.py` spell out each app's own prefix, so all three shapes fit
 behind one core line. The dealer routes keep their exact paths
@@ -282,6 +317,12 @@ already carried on `webshopmanager/saleor` rebased onto 3.23.31. Unlike sections
 1 to 6 these edit core `.py` files directly, which is precisely what "own our
 Saleor" has to price. **662 lines of core code across 13 files**, plus test files
 and the generated `schema.graphql`.
+
+That 662 is THIS SECTION's six patches, not the branch. Measured at 23d393e3 the
+whole non-test core footprint outside `saleor/wsm` is **749 added / 28 removed
+across 15 files** (`git diff --numstat a1ab3a23a3f5 HEAD -- saleor/ | grep -v
+saleor/wsm | grep -v /tests/`); the gap is sections 11 and 12, which are ours and
+landed later (Wild West finding 12).
 
 | Patch | Core files it edits | Lines |
 |---|---|---|

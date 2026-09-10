@@ -18,14 +18,20 @@ Acceptance bar (each checkable on the live bake-off box):
 - B4 A dealer on a container kit pays better-of per member line, never both.
 - B5 Series = Collection with a side table; collection page renders members; engine never emits a series URL.
 - B6 wsm-storefront develop renders PDP, collection, cart and checkout against the bake-off box with ONLY a tenant block change. No storefront code.
-- B7 Per-request work is counted and stays inside the budget in section 5.
+- B7 Per-request work is counted and stays inside the budget in section 5 (re-asserted 2026-09-10 against the restated, measured section 5).
 - B8 Every core touch is listed in CORE-TOUCHES.md in the branch, with its reason. Zero core table edits.
 
 ## 2. Delete the part
 
 Disappears when pricing is in-process (each had a live consumer only because pricing was out of process):
 - wsm.dealer stamp + compose.fee.sig/base/qty/chk, and the shared payment gate that re-derives them.
-- X-Compose-Key, X-Dealer-Pricing-Key, X-Saleor-Domain headers and the COMPOSE_KEYS env map.
+- X-Saleor-Domain and the COMPOSE_KEYS env map.
+  (Corrected 2026-09-10. X-Compose-Key and X-Dealer-Pricing-Key came BACK in
+  review wave A and are now the fork's whole authentication story: one
+  per-process secret, `saleor/wsm/http.py` `KEY_HEADERS`, and every money
+  endpoint is refused without it. Read this list alone and you would conclude
+  the money endpoints are unauthenticated by design, which is the opposite of
+  the truth.)
 - The reprice-on-sign-in and reprice-on-quantity-change loop (price is recomputed on every fetch).
 - The Go Compose service, the dealer_pricing external app, their manifests, installs, and hourly link cron.
 Stays (has a live consumer): the storefront REST contract (5 endpoints) for the bake-off only, so B6 holds with zero storefront code;
@@ -60,10 +66,29 @@ Core touches expected (counted, each one line): INSTALLED_APPS += 3 apps and dja
 
 ## 5. Budget (design for the millionth run)
 
-- PDP read: 1 query for sets+values+fees (prefetch), served with a 300 s revalidate as today.
+Restated 2026-09-10 from measurement (Wild West finding 12b). The numbers below
+were written before MP3 existed, so B7 was grading against a budget the funnel
+had already overtaken. Every figure here was taken with `CaptureQueriesContext`
+on a fresh test database, and each has a test holding it.
+
+- PDP read (`option-sets`): **5 queries**, flat. One to prove the product is
+  published somewhere (an anonymous endpoint says nothing about an unreleased
+  product), a prefetched sets-and-values read (2), the fees read, and the
+  Prop 65 row. Measured flat at 1 set / 2 values and at 5 sets / 50 values.
+  Served with a 300 s revalidate as today.
 - Configured add: 1 pricing computation, 1 checkout line write, 0 webhooks, 0 network hops, 0 signatures.
 - Dealer display batch: 1 query for up to 100 variants.
-- Checkout recalculation: 0 extra queries from us (price_override is already on the line).
+- Checkout recalculation, per price recalculation:
+  - retail baseline, no fork line: **26**, and the fork adds nothing to it.
+  - dealer lines: **26** at one line and at five. Slope 0.
+  - compose configured lines: **27** at one line, **29** from two lines up to
+    ten. The step is the `bulk_update` of `price_override` and the checkout
+    total, which do not fire when nothing moved. Slope 0 after it.
+  - kits: **flat in the number of kits** since 2026-09-10, three reads for the
+    whole cart (the configs, their members, their channel listings). It was
+    +3 per distinct kit. A DEALER buyer still pays one `ladders` read per
+    distinct kit, and that is the one place left where a count follows the
+    cart's contents.
 - Processes added to the box: 0 (everything runs inside the Saleor worker).
 
 ## 6. Open, with defaults

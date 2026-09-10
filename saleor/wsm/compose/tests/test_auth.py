@@ -186,3 +186,99 @@ def test_a_wsm_permission_is_still_read_from_the_grant(staff_user):
 
     assert answer == [False]
     assert reads == 1
+
+
+# --- /admin/ sign-in runs through Saleor's own throttle ---------------------
+
+LOGIN_URL = "/admin/login/"
+
+
+def _sign_in(client, email, password):
+    return client.post(LOGIN_URL, {"username": email, "password": password})
+
+
+@pytest.fixture
+def clean_throttle_cache():
+    """The throttle counts in the process cache, which outlives one test."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
+def test_a_failed_admin_sign_in_blocks_the_next_attempt_from_the_same_address(
+    client, staff_user, site_settings, clean_throttle_cache
+):
+    """The fork's password door is limited by the limiter Saleor already owns.
+
+    Without this the door costs a full PBKDF2 hash per POST, hit or miss (the
+    miss hashes on purpose, so timing does not say which addresses exist), with
+    nothing counting the attempts. Measured at ~2.1s of CPU each on the bake-off
+    box, against one 256-CPU task in prod.
+    """
+    from django.core.cache import cache
+    from ....account.throttling import get_cache_key_blocked_ip
+
+    _with_password(staff_user)
+    _mode(site_settings, PasswordLoginMode.ENABLED)
+
+    first = _sign_in(client, staff_user.email, "wrong-password")
+    assert first.status_code == 200
+    assert cache.get(get_cache_key_blocked_ip("127.0.0.1")) is not None, (
+        "a failed admin sign-in was not counted by the throttle"
+    )
+
+    second = _sign_in(client, staff_user.email, "wrong-password")
+    assert second.status_code == 200
+    assert b"suspended" in second.content, (
+        "the second attempt was answered rather than refused"
+    )
+    # And the refusal is a refusal, not a slow yes: the right password inside
+    # the block does not get in either.
+    third = _sign_in(client, staff_user.email, PASSWORD)
+    assert b"suspended" in third.content
+    assert third.wsgi_request.user.is_anonymous
+
+
+def test_a_correct_password_still_gets_the_merchant_in(
+    rf, staff_user, site_settings, clean_throttle_cache
+):
+    """The form, not the round trip.
+
+    A successful POST to /admin/login/ cannot be asserted end to end under the
+    test harness: the fork's /admin/-scoped session middleware saves the session
+    in `process_response`, outside the `allow_writer` the admin site wraps its
+    VIEWS in, so `restrict_writer` refuses it. That is true at 23d393e3 as well,
+    with this form and without it, and `restrict_writer_middleware` is not in
+    the running app's MIDDLEWARE, so it is a harness artifact today and a real
+    one the day it is turned on. Filed, not fixed here.
+    """
+    from ..auth import ThrottledAdminAuthenticationForm
+
+    _with_password(staff_user)
+    _mode(site_settings, PasswordLoginMode.ENABLED)
+    request = rf.post("/admin/login/")
+
+    form = ThrottledAdminAuthenticationForm(
+        request, data={"username": staff_user.email, "password": PASSWORD}
+    )
+
+    assert form.is_valid(), form.errors
+    assert form.get_user() == staff_user
+    # `authenticate()` normally records which backend answered, and
+    # `django.contrib.auth.login` refuses a user without it.
+    assert form.get_user().backend.endswith("AdminPasswordBackend")
+
+
+def test_the_admin_door_still_honours_the_shops_password_login_switch(
+    client, staff_user, site_settings, clean_throttle_cache
+):
+    """The throttle knows nothing about the merchant's switch; the door still does."""
+    _with_password(staff_user)
+    _mode(site_settings, PasswordLoginMode.DISABLED)
+
+    response = _sign_in(client, staff_user.email, PASSWORD)
+
+    assert response.status_code == 200
+    assert response.wsgi_request.user.is_anonymous

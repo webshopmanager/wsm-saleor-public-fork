@@ -29,10 +29,14 @@ switch would have re-opened password login shop-wide for anyone with a Saleor
 account, through /admin/, after the merchant turned it off.
 """
 
+from django import forms
 from django.conf import settings
+from django.contrib.admin.forms import AdminAuthenticationForm
+from django.core.exceptions import ValidationError
 from django.db.models import Q
 
 from ...account.models import User
+from ...account.throttling import authenticate_with_throttling
 from ...core.auth_backend import BaseBackend
 from ...core.db.connection import allow_writer
 from ...permission.models import Permission
@@ -75,6 +79,24 @@ def _password_login_mode():
         )
 
 
+def password_login_allowed(user) -> bool:
+    """Is this user allowed to sign in with a password, on a password already proved right?
+
+    Named on its own because two callers ask it: the backend below, and the
+    throttled admin form, which gets its answer about the PASSWORD from Saleor's
+    own throttle and still owes the merchant their switch. One place, so a shop
+    that turns password login off turns it off on both doors.
+    """
+    if not user.is_active:
+        return False
+    mode = _password_login_mode()
+    if mode is None or mode == PasswordLoginMode.DISABLED:
+        return False
+    if mode == PasswordLoginMode.CUSTOMERS_ONLY and user.is_staff:
+        return False
+    return True
+
+
 class AdminPasswordBackend(BaseBackend):
     def authenticate(self, request=None, username=None, password=None, **kwargs):
         email = username or kwargs.get("email")
@@ -90,18 +112,13 @@ class AdminPasswordBackend(BaseBackend):
             # attacker which addresses have accounts.
             User().set_password(password)
             return None
-        if not user.check_password(password) or not user.is_active:
+        if not user.check_password(password):
             return None
         # The merchant's own switch, read only once a password has already been
         # proved right, so a wrong password costs no extra query and the answer
         # tells an attacker nothing new. `AUTHENTICATION_BACKENDS` is app-wide:
         # a shop that turned password login off turned it off here too.
-        mode = _password_login_mode()
-        if mode is None or mode == PasswordLoginMode.DISABLED:
-            return None
-        if mode == PasswordLoginMode.CUSTOMERS_ONLY and user.is_staff:
-            return None
-        return user
+        return user if password_login_allowed(user) else None
 
     def get_user(self, user_id):
         return User.objects.using(REPLICA).filter(pk=user_id, is_active=True).first()
@@ -160,3 +177,49 @@ class AdminPasswordBackend(BaseBackend):
         # One query covers direct and group grants, so both callers get the same
         # set rather than paying twice for half of it each.
         return self.get_user_permissions(user_obj, obj=obj)
+
+
+class ThrottledAdminAuthenticationForm(AdminAuthenticationForm):
+    """/admin/ sign-in, through Saleor's own login throttle rather than beside it.
+
+    Django's `AuthenticationForm` calls `authenticate()`, which reaches the
+    backend above and pays a full PBKDF2 hash on every attempt, hit or miss: the
+    miss path hashes on purpose so response time does not say which addresses
+    have accounts. Measured on the bake-off box that is ~2.1 seconds of CPU per
+    unauthenticated POST, against a runtime of one 256-CPU Fargate task.
+
+    Saleor's own password login has a limiter for exactly this
+    (`saleor.account.throttling`): it blocks the requesting IP before the next
+    attempt and escalates the block from there. The fork added a second password
+    door and did not carry the limiter across. So this asks Saleor's function
+    instead of `authenticate()`, and no second counter is invented here.
+
+    What the throttle does not know about is the merchant's own
+    `password_login_mode` switch, so that answer is still taken from
+    `password_login_allowed` above, after the password has proved out.
+    """
+
+    def clean(self):
+        email = self.cleaned_data.get("username")
+        password = self.cleaned_data.get("password")
+        if email and password:
+            try:
+                user = authenticate_with_throttling(self.request, email, password)
+            except ValidationError as blocked:
+                # Too many attempts from this address, or no address at all.
+                # The message carries the time the next one is allowed.
+                raise forms.ValidationError(
+                    " ".join(blocked.messages), code="throttled"
+                ) from blocked
+            if user is not None and password_login_allowed(user):
+                # `authenticate()` is what normally records which backend
+                # answered, and `django.contrib.auth.login` refuses a user
+                # carrying no `backend` while more than one is configured.
+                user.backend = (
+                    f"{AdminPasswordBackend.__module__}.AdminPasswordBackend"
+                )
+                self.confirm_login_allowed(user)
+                self.user_cache = user
+            else:
+                raise self.get_invalid_login_error()
+        return self.cleaned_data

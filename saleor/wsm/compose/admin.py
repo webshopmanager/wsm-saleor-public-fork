@@ -48,6 +48,7 @@ from .forms import (
     money,
 )
 from . import pricing
+from .auth import ThrottledAdminAuthenticationForm
 from .models import (
     DealerTierOptionPrice,
     Fee,
@@ -226,6 +227,12 @@ class ProductFilteredMixin:
 
 
 class ComposeAdminSite(admin.AdminSite):
+
+    # Sign-in goes through Saleor's own login throttle. See
+    # saleor/wsm/compose/auth.py: the fork added a password door beside the
+    # one Saleor rate-limits, and an unlimited PBKDF2 hash per POST is the
+    # cost of leaving it un-limited.
+    login_form = ThrottledAdminAuthenticationForm
     site_header = "WSM Compose"
     site_title = "WSM Compose"
     index_title = "Product configuration"

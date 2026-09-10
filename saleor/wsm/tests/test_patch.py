@@ -183,3 +183,61 @@ def test_the_fork_touches_exactly_the_allowed_upstream_files():
     assert {
         path for path in changed if not path.startswith("saleor/wsm/")
     } == ALLOWED_CORE_FILES
+
+
+# --- the OTHER half of the pin: what the wrapped body looked like ----------
+
+
+def test_every_patched_function_still_has_the_body_its_wrapper_was_written_around():
+    """A body that moved under a wrapper is the failure the site sweep cannot see.
+
+    `PINNED` says where each function is bound, and `install_guard` refuses to
+    boot when that set drifts. It says nothing about the function's contents:
+    MP3 re-derives prices around `_fetch_checkout_prices_if_expired`, MP1 and MP2
+    wrap functions whose internals decide how a discount is split, and an
+    upstream release can rewrite any of those bodies without moving an import.
+    """
+    import importlib
+
+    from .. import patches
+
+    for name, digest in patches.SOURCE.items():
+        definer, _, attribute = name.rpartition(".")
+        function = getattr(importlib.import_module(definer), attribute)
+        assert patches.source_digest(function) == digest, (
+            f"{name} is not the function the wrapper was written around. Read "
+            "the upstream diff for it, decide whether the wrapper still holds, "
+            "then re-pin the digest."
+        )
+
+
+def test_every_pinned_patch_carries_a_source_digest():
+    from .. import patches
+
+    assert set(patches.SOURCE) == set(patches.PINNED)
+
+
+def test_a_body_that_moved_is_a_boot_error_not_a_mispriced_checkout(monkeypatch):
+    import pytest as _pytest
+    from django.core.exceptions import ImproperlyConfigured
+
+    from .. import patches
+
+    name = "saleor.checkout.calculations._fetch_checkout_prices_if_expired"
+    monkeypatch.setitem(patches.SOURCE, name, "0" * 64)
+
+    with _pytest.raises(ImproperlyConfigured, match="written against"):
+        patches.install_guard(name, lambda original: original)
+
+
+def test_a_patch_with_no_digest_at_all_is_a_boot_error(monkeypatch):
+    import pytest as _pytest
+    from django.core.exceptions import ImproperlyConfigured
+
+    from .. import patches
+
+    name = "saleor.checkout.calculations._fetch_checkout_prices_if_expired"
+    monkeypatch.delitem(patches.SOURCE, name)
+
+    with _pytest.raises(ImproperlyConfigured, match="no source digest"):
+        patches.install_guard(name, lambda original: original)

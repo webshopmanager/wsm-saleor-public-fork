@@ -993,3 +993,112 @@ def test_a_member_on_sale_is_priced_at_the_sale_price(
     # And a cart read re-derives it from the same listing, so it cannot drift
     # back up to list on the next page the shopper loads.
     assert recalculate(checkout)[dearest.pk] == Decimal("21.60")
+
+
+# --- malformed ids are refused, and the checkout's own user is evidence -----
+
+
+def post_kit_raw(client, body):
+    return client.post(
+        KIT_LINE_URL, data=json.dumps(body), content_type="application/json", **HEADERS
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"checkoutId": "garbage", "collectionId": gid("Collection", 1)},
+        {
+            "checkoutId": gid("Checkout", "not-a-uuid"),
+            "collectionId": gid("Collection", 1),
+        },
+        {
+            "checkoutId": gid("Checkout", "11111111-1111-1111-1111-111111111111"),
+            "collectionId": gid("Collection", "not-a-number"),
+        },
+    ],
+)
+def test_an_id_that_is_not_an_id_is_refused_rather_than_raised(client, body):
+    response = post_kit_raw(client, body)
+
+    assert response.status_code == 400, response.content
+    assert "malformed" in response.json()["violations"][0]
+
+
+def test_the_kit_add_refuses_a_buyer_the_checkout_does_not_belong_to(
+    client, checkout, kit, customer_user, staff_user, channel_USD
+):
+    checkout.user = staff_user
+    checkout.save(update_fields=["user"])
+
+    response = post_kit_raw(
+        client,
+        {
+            "checkoutId": gid("Checkout", checkout.token),
+            "collectionId": gid("Collection", kit.collection_id),
+            "quantity": 1,
+            "customerId": gid("User", customer_user.pk),
+        },
+    )
+
+    assert response.status_code == 409, response.content
+    assert checkout.lines.count() == 0
+
+
+# --- a cart read does not pay per kit --------------------------------------
+
+
+@pytest.fixture
+def three_kits(product_list, channel_USD):
+    """Three distinct kits, one member each, so the only variable is kit COUNT."""
+    from saleor.product.models import Collection
+
+    kits = []
+    for index, product in enumerate(product_list):
+        collection = Collection.objects.create(
+            name=f"Kit {index}", slug=f"kit-count-{index}"
+        )
+        collection.products.add(product)
+        kit = KitConfig.objects.create(
+            collection=collection,
+            discount_kind=pricing.PERCENT,
+            discount_amount=Decimal(10),
+        )
+        KitMember.objects.create(
+            kit=kit, variant=product.variants.first(), quantity=1, sort_order=0
+        )
+        kits.append(kit)
+    return kits
+
+
+def test_a_cart_read_does_not_buy_three_queries_per_kit(client, checkout, three_kits):
+    """MP3 runs on every price recalculation, so this is a CART READ cost.
+
+    Keyed by kit it was the config, its members and their channel listings, once
+    per distinct kit on the checkout: measured +3.00 queries per kit, 26 at k=1
+    and 32 at k=3. Flat now, three for the whole cart, so the count is the same
+    whatever the shopper put in it.
+    """
+    from django.db import connections
+    from django.test.utils import CaptureQueriesContext
+
+    from saleor.checkout.fetch import fetch_checkout_info, fetch_checkout_lines
+    from saleor.plugins.manager import get_plugins_manager
+    from saleor.wsm.reprice import reprice
+
+    counted = {}
+    for k in (1, 2, 3):
+        checkout.lines.all().delete()
+        for kit in three_kits[:k]:
+            assert post_kit(client, checkout, kit.collection_id).status_code == 200
+
+        lines, _ = fetch_checkout_lines(checkout)
+        manager = get_plugins_manager(allow_replica=False)
+        checkout_info = fetch_checkout_info(checkout, lines, manager)
+        # The replica alias proxies `default` in tests and SHARES its
+        # queries_log, so capturing both would double every count.
+        with CaptureQueriesContext(connections["default"]) as captured:
+            reprice(checkout_info, lines)
+        counted[k] = len(captured.captured_queries)
+
+    assert counted[1] == counted[2] == counted[3], counted

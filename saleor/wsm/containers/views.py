@@ -119,7 +119,10 @@ def resolve_tier_lookup(kit, checkout, user, group_code=None):
     breaks = dealer_pricing.ladders(
         user,
         checkout.channel,
-        list(kit.members.values_list("variant_id", flat=True)),
+        # `.all()` rather than `.values_list`, so a caller that prefetched
+        # the members (MP3 does, for every kit on the cart at once) does not
+        # buy a second read of rows it is already holding.
+        [member.variant_id for member in kit.members.all()],
         group_codes=[group_code] if user is None else None,
         database_connection_name=settings.DATABASE_CONNECTION_DEFAULT_NAME,
     )

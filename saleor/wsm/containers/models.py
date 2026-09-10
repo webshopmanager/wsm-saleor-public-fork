@@ -390,7 +390,19 @@ class KitConfig(models.Model):
             return f"{self.collection.name} bundle discount"
         return f"{self.collection.name} bundle discount ({percent}%)"
 
-    def pricing_members(self, channel, variant_ids=None):
+    def _members_in_order(self):
+        """This kit's members with their variants, from a prefetch when there is one.
+
+        `select_related` on a related manager builds a NEW queryset, so it
+        ignores a `prefetch_related` that already fetched exactly these rows.
+        That is how MP3 paid one member read per kit on every cart read. With
+        nothing prefetched this is what it always was: one query, variant joined.
+        """
+        if "members" in getattr(self, "_prefetched_objects_cache", {}):
+            return list(self.members.all())
+        return list(self.members.select_related("variant"))
+
+    def pricing_members(self, channel, variant_ids=None, prices=None):
         """Price this kit's members in one channel, in two queries, in member order.
 
         Two rather than one because a channel listing per member is a second
@@ -414,7 +426,7 @@ class KitConfig(models.Model):
         """
         from ...product.models import ProductVariantChannelListing
 
-        members = list(self.members.select_related("variant"))
+        members = self._members_in_order()
         if variant_ids is not None:
             picked = {int(variant_id) for variant_id in variant_ids}
             unknown = picked - {member.variant_id for member in members}
@@ -424,14 +436,18 @@ class KitConfig(models.Model):
         if not members:
             raise pricing.KitRefusal("a kit with no members has no price")
 
-        prices = {
-            listing.variant_id: unit_amount(listing)
-            for listing in ProductVariantChannelListing.objects.filter(
-                variant_id__in=[m.variant_id for m in members],
-                channel_id=channel.pk,
-                price_amount__isnull=False,
-            ).only("variant_id", "price_amount", "discounted_price_amount")
-        }
+        # `prices` is a caller that already read them, for every kit on a
+        # checkout at once rather than one query per kit. Absent, this reads its
+        # own, which is what the single-kit endpoint wants.
+        if prices is None:
+            prices = {
+                listing.variant_id: unit_amount(listing)
+                for listing in ProductVariantChannelListing.objects.filter(
+                    variant_id__in=[m.variant_id for m in members],
+                    channel_id=channel.pk,
+                    price_amount__isnull=False,
+                ).only("variant_id", "price_amount", "discounted_price_amount")
+            }
         missing = [m.variant_id for m in members if m.variant_id not in prices]
         if missing:
             raise pricing.KitRefusal(

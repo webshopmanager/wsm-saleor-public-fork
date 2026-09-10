@@ -55,6 +55,7 @@ from decimal import Decimal
 from functools import wraps
 
 from django.conf import settings
+from django.db.models import Prefetch
 from django.utils import timezone
 
 from ..checkout.models import CheckoutLine
@@ -267,6 +268,43 @@ def _drop(dropped):
     CheckoutLine.objects.filter(pk__in={info.line.pk for info in dropped}).delete()
 
 
+def _kits_on_the_checkout(slugs, channel):
+    """Every kit named on this checkout, and one price map for all their members.
+
+    Three queries for the whole cart instead of three per distinct kit: the
+    configs, their members (prefetched WITH the variant, which is why
+    `KitConfig._members_in_order` reads the prefetch rather than building a new
+    `select_related` queryset), and one channel-listing read across every member
+    of every kit.
+
+    A member with no listing in this channel is simply absent from the map, and
+    `pricing_members` still refuses the kit by name, exactly as when it made the
+    read itself.
+    """
+    from .containers.models import KitConfig, KitMember
+    from ..product.models import ProductVariantChannelListing
+
+    kits = {
+        kit.collection.slug: kit
+        for kit in KitConfig.objects.filter(collection__slug__in=slugs)
+        .select_related("collection")
+        .prefetch_related(
+            Prefetch("members", queryset=KitMember.objects.select_related("variant"))
+        )
+    }
+    variant_ids = {
+        member.variant_id for kit in kits.values() for member in kit.members.all()
+    }
+    prices = {
+        listing.variant_id: unit_amount(listing)
+        for listing in ProductVariantChannelListing.objects.filter(
+            variant_id__in=variant_ids,
+            channel_id=channel.pk,
+            price_amount__isnull=False,
+        ).only("variant_id", "price_amount", "discounted_price_amount")
+    }
+    return kits, prices
+
 def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
     """Re-derive every kit member line through the kit's own money.
 
@@ -323,13 +361,24 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
             continue
         groups[key].append(line_info)
 
+    # Every kit on this checkout in ONE read, with its members and their
+    # channel listings. This runs on every checkout price RECALCULATION, so it
+    # is a cart-read cost, and keyed by kit it was three queries per distinct
+    # kit: the config, its members, their listings (measured +3.00 per kit,
+    # 26 -> 32 from k=1 to k=3). Flat now: three for the whole cart.
+    kits, member_prices = _kits_on_the_checkout(
+        {slug for slug, _, _ in groups}, checkout_info.channel
+    )
+
     for (slug, quantity, picks), infos in groups.items():
         try:
-            kit = KitConfig.objects.filter(collection__slug=slug).first()
+            kit = kits.get(slug)
             if kit is None:
                 raise kit_pricing.KitRefusal(f"the kit {slug} no longer exists")
             priced = kit_pricing.price_kit(
-                kit.pricing_members(checkout_info.channel, picks or None),
+                kit.pricing_members(
+                    checkout_info.channel, picks or None, prices=member_prices
+                ),
                 kit.discount_kind,
                 kit.discount_amount,
                 kit_quantity=quantity,

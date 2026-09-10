@@ -46,7 +46,9 @@ is reimplemented: the original functions do all the work, on fewer lines.
 
 Cost: zero. A checkout with no dealer line takes the original path with no extra
 call and no settings query; the toggle is read only once a dealer line is
-present, and cached per process until the row changes.
+present. That read is NOT cached, deliberately: `stacking_enabled` below says
+why the per-process cache was removed. Measured at one query per guard fire, so
+a dealer cart pays two per price recalculation.
 
 Upstream change that would delete this file: a documented exclusion hook on the
 checkout line-discount path, e.g. a `CheckoutLine.discounts_excluded` flag (or a

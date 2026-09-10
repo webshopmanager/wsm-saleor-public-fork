@@ -26,6 +26,7 @@ from saleor.checkout.complete_checkout import create_order_from_checkout
 from saleor.checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from saleor.checkout.models import CheckoutLine
 from saleor.plugins.manager import get_plugins_manager
+from saleor.wsm.compose.lines import META_OPTIONS as OPTIONS_KEY
 from saleor.wsm.compose.models import OptionValue
 from saleor.wsm.compose.tests.test_api import (  # noqa: F401
     CONFIGURED_UNIT,
@@ -39,15 +40,16 @@ from saleor.wsm.compose.tests.test_api import (  # noqa: F401
     post_line,
     stage_2_kit,
 )
+from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from saleor.wsm.dealer.tests.test_views import (  # noqa: F401
     LINE_URL as DEALER_LINE_URL,
+)
+from saleor.wsm.dealer.tests.test_views import (  # noqa: F401
     dealer_group,
     line_body,
     post,
     tiers,
 )
-from saleor.wsm.compose.lines import META_OPTIONS as OPTIONS_KEY
-from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from saleor.wsm.reprice import reprice
 
 pytestmark = pytest.mark.django_db
@@ -109,8 +111,16 @@ def checkout_info_for(checkout):
 
 
 def test_a_tier_price_does_not_survive_the_quantity_drop_that_ends_it(
-    client, checkout, variant, customer_user, tiers, channel_USD, stock,
-    address, checkout_delivery, app,
+    client,
+    checkout,
+    variant,
+    customer_user,
+    tiers,
+    channel_USD,
+    stock,
+    address,
+    checkout_delivery,
+    app,
 ):
     """Add 10 at the 10-break, drop to 1, complete: the order says retail.
 
@@ -123,7 +133,9 @@ def test_a_tier_price_does_not_survive_the_quantity_drop_that_ends_it(
     checkout.save(update_fields=["user", "email"])
 
     response = post(
-        client, DEALER_LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 10)
+        client,
+        DEALER_LINE_URL,
+        line_body(checkout, customer_user, variant, channel_USD, 10),
     )
     assert response.status_code == 200
     assert response.json()["dealerPrice"] == "7.00"
@@ -148,7 +160,13 @@ def test_a_tier_price_does_not_survive_the_quantity_drop_that_ends_it(
 
 
 def test_a_tier_price_falls_to_the_lower_break_on_an_anonymous_checkout(
-    client, checkout, variant, customer_user, tiers, channel_USD, stock,
+    client,
+    checkout,
+    variant,
+    customer_user,
+    tiers,
+    channel_USD,
+    stock,
 ):
     """10 to 6 is still a dealer quantity: 7.00 becomes 8.00, not retail.
 
@@ -156,7 +174,11 @@ def test_a_tier_price_falls_to_the_lower_break_on_an_anonymous_checkout(
     endpoints: the group comes off the line's own stamp. The BREAK still moves.
     """
     assert checkout.user is None
-    post(client, DEALER_LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 10))
+    post(
+        client,
+        DEALER_LINE_URL,
+        line_body(checkout, customer_user, variant, channel_USD, 10),
+    )
     line = CheckoutLine.objects.get(checkout_id=checkout.pk)
 
     drop_quantity(client, checkout, line, 6)
@@ -169,8 +191,14 @@ def test_a_tier_price_falls_to_the_lower_break_on_an_anonymous_checkout(
 
 
 def test_a_per_unit_fee_line_follows_its_parent_quantity_into_the_order(
-    client, checkout, stage_2_kit, omit_parts, crating_fee,
-    address, checkout_delivery, app,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    crating_fee,
+    address,
+    checkout_delivery,
+    app,
 ):
     """Configure 2, drop the parent to 1, complete: one crate, not two."""
     option_set, values = omit_parts
@@ -207,7 +235,11 @@ def test_a_per_unit_fee_line_follows_its_parent_quantity_into_the_order(
 
 
 def test_a_per_unit_fee_line_follows_its_parent_upwards_too(
-    client, checkout, stage_2_kit, omit_parts, crating_fee,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    crating_fee,
 ):
     option_set, values = omit_parts
     post_line(
@@ -275,7 +307,12 @@ def graphql(client, query, variables):
 
 
 def test_a_dealer_stamp_a_shopper_wrote_for_themselves_buys_nothing(
-    client, checkout, variant, tiers, channel_USD, stock,
+    client,
+    checkout,
+    variant,
+    tiers,
+    channel_USD,
+    stock,
 ):
     """Anonymous shopper stamps their own line with a dealer group code.
 
@@ -338,7 +375,11 @@ DEALER_CONFIGURED = Decimal("3394.00")
 
 
 def test_a_configured_dealer_line_keeps_its_group_on_an_anonymous_checkout(
-    client, checkout, stage_2_kit, omit_parts, dealer_credit,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    dealer_credit,
 ):
     """The storefront's normal shape: a dealer priced, no user on the checkout.
 
@@ -370,7 +411,12 @@ def test_a_configured_dealer_line_keeps_its_group_on_an_anonymous_checkout(
 
 
 def test_a_signed_in_retail_shopper_cannot_inherit_a_stamped_group(
-    client, checkout, stage_2_kit, omit_parts, dealer_credit, staff_user,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    dealer_credit,
+    staff_user,
 ):
     """The fallback is for a checkout with NO buyer, never for the wrong one.
 
@@ -399,7 +445,12 @@ def test_a_signed_in_retail_shopper_cannot_inherit_a_stamped_group(
 
 
 def test_a_voucher_does_not_stack_on_a_configured_line_that_took_a_tier(
-    client, checkout, stage_2_kit, omit_parts, dealer_credit, voucher_percentage,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    dealer_credit,
+    voucher_percentage,
 ):
     """Better of, never both, on a configured line as much as a plain one.
 
@@ -428,7 +479,10 @@ def test_a_voucher_does_not_stack_on_a_configured_line_that_took_a_tier(
     payload = graphql(
         client,
         ADD_PROMO_CODE,
-        {"id": gid("Checkout", checkout.token), "code": voucher_percentage.codes.first().code},
+        {
+            "id": gid("Checkout", checkout.token),
+            "code": voucher_percentage.codes.first().code,
+        },
     )["checkoutAddPromoCode"]
     assert payload["errors"] == [], payload["errors"]
 
@@ -454,7 +508,12 @@ def test_a_checkout_this_fork_does_not_own_costs_no_queries(checkout_with_items)
 
 
 def test_a_configured_checkout_costs_the_queries_the_doc_says_it_does(
-    client, checkout, stage_2_kit, omit_parts, crating_fee, customer_user,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    crating_fee,
+    customer_user,
 ):
     """The claim in CORE-TOUCHES MP3, asserted rather than asserted-in-prose.
 
@@ -469,7 +528,9 @@ def test_a_configured_checkout_costs_the_queries_the_doc_says_it_does(
         moved = reprice(checkout_info, lines)
 
     assert moved == [], "nothing moved, so nothing is written"
-    tables = [q["sql"].split(" FROM ")[-1].split()[0] for q in captured.captured_queries]
+    tables = [
+        q["sql"].split(" FROM ")[-1].split()[0] for q in captured.captured_queries
+    ]
     assert tables == [
         # The option sets on the configured products, with their values and the
         # dealer deltas on those values: one prefetch, three queries.
@@ -496,7 +557,11 @@ def test_a_configured_checkout_costs_the_queries_the_doc_says_it_does(
 
 
 def test_a_dealer_priced_checkout_costs_one_more_query_for_the_whole_cart(
-    client, checkout, stage_2_kit, buckle, jobber,
+    client,
+    checkout,
+    stage_2_kit,
+    buckle,
+    jobber,
 ):
     """The ladder that decides a dealer's base is read ONCE, not once per line.
 
@@ -519,7 +584,9 @@ def test_a_dealer_priced_checkout_costs_one_more_query_for_the_whole_cart(
         moved = reprice(checkout_info, lines)
 
     assert moved == [], "nothing moved, so nothing is written"
-    tables = [q["sql"].split(" FROM ")[-1].split()[0] for q in captured.captured_queries]
+    tables = [
+        q["sql"].split(" FROM ")[-1].split()[0] for q in captured.captured_queries
+    ]
     assert tables == [
         '"wsm_compose_optionset"',
         '"wsm_compose_optionvalue"',
@@ -531,9 +598,13 @@ def test_a_dealer_priced_checkout_costs_one_more_query_for_the_whole_cart(
 
 
 def test_a_price_correction_does_not_write_back_a_stale_quantity(
-    client, checkout, stage_2_kit, omit_parts, crating_fee,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    crating_fee,
 ):
-    """This funnel owns the price on a line. It does not own the quantity.
+    """The funnel owns the price on a line. It does not own the quantity.
 
     Core loads the line objects it hands us on the REPLICA, so their `quantity`
     is whatever that replica last saw. Writing the whole set of fields back
@@ -622,7 +693,11 @@ def configure(client, checkout, stage_2_kit, omit_parts, accepted=()):
 
 
 def test_deleting_an_optional_fee_line_declines_it_and_keeps_the_item(
-    client, checkout, stage_2_kit, omit_parts, handling_fee,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    handling_fee,
 ):
     """The wedge, and the shape of the answer.
 
@@ -648,7 +723,11 @@ def test_deleting_an_optional_fee_line_declines_it_and_keeps_the_item(
 
 
 def test_deleting_a_required_fee_line_takes_the_item_with_it(
-    client, checkout, stage_2_kit, omit_parts, crating_fee,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    crating_fee,
 ):
     """A required charge cannot be declined, so the item it belongs to goes.
 
@@ -671,7 +750,11 @@ def test_deleting_a_required_fee_line_takes_the_item_with_it(
 
 
 def test_deleting_the_configured_parent_takes_its_charges_with_it(
-    client, checkout, stage_2_kit, omit_parts, crating_fee,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    crating_fee,
 ):
     """A crate with nothing to crate is not a thing anyone owes money for."""
     parent, fees = configure(client, checkout, stage_2_kit, omit_parts)
@@ -685,7 +768,11 @@ def test_deleting_the_configured_parent_takes_its_charges_with_it(
 
 
 def test_a_configured_line_whose_option_vanished_leaves_the_cart_readable(
-    client, checkout, stage_2_kit, omit_parts, crating_fee,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    crating_fee,
 ):
     """No correction can invent the right price, so the line stops existing.
 
@@ -703,7 +790,11 @@ def test_a_configured_line_whose_option_vanished_leaves_the_cart_readable(
 
 
 def test_a_promotion_that_starts_after_the_add_moves_the_line_down(
-    client, checkout, stage_2_kit, omit_parts, crating_fee,
+    client,
+    checkout,
+    stage_2_kit,
+    omit_parts,
+    crating_fee,
 ):
     """A sale the merchant starts mid-cart reaches the line on the next read.
 
@@ -731,7 +822,11 @@ def test_a_promotion_that_starts_after_the_add_moves_the_line_down(
 
 
 def test_a_dealers_configured_base_survives_the_stock_quantity_stepper(
-    client, checkout, stage_2_kit, buckle, jobber,
+    client,
+    checkout,
+    stage_2_kit,
+    buckle,
+    jobber,
 ):
     """The storefront's real shape: priced for a dealer, no user on the checkout.
 

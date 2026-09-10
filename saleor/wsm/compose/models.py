@@ -204,7 +204,7 @@ def _floor_value(value, tier_group=None, pending_tiers=()) -> pricing.Value:
 
 
 def _tier_delta(value, tier_group, pending_tiers):
-    """This group's delta for this value: the row being saved, or the stored one."""
+    """The group's delta for this value: the row being saved, or the stored one."""
     for row in pending_tiers:
         if row.tier_group == tier_group and row.option_value_id == value.pk:
             return row.price_delta
@@ -400,7 +400,7 @@ class OptionValue(models.Model):
     price_delta = models.DecimalField(
         max_digits=12,
         decimal_places=2,
-        default=Decimal("0"),
+        default=Decimal(0),
         help_text=(
             "Added to the product price when this choice is picked. A negative "
             "amount is a credit that subtracts; 0 is free. The credits on one "
@@ -683,7 +683,7 @@ def _channel_bases(product_id):
 
 
 def _floor_option_sets(product_id):
-    """This product's questions as the pricing engine reads them, at RETAIL.
+    """The product's questions as the pricing engine reads them, at RETAIL.
 
     Two queries. Deliberately not `OptionSet.to_pricing()`, which reads each
     value's tier rows: a retail floor never looks at one, and reading them would
@@ -964,9 +964,7 @@ class DealerTierOptionPrice(models.Model):
                 pending_tiers=[self],
             )
             if floor is not None and floor <= 0:
-                errors["price_delta"] = dealer_floor_error(
-                    self.tier_group, floor, base
-                )
+                errors["price_delta"] = dealer_floor_error(self.tier_group, floor, base)
 
         if errors:
             raise ValidationError(errors)
@@ -1202,7 +1200,7 @@ def _ensure_fee_variant(fee, channel):
             "visible_in_listings": False,
             "available_for_purchase_at": now,
             "currency": channel.currency_code,
-            "discounted_price_amount": Decimal("0"),
+            "discounted_price_amount": Decimal(0),
         },
     )
     # Both amounts, always. Stock `get_variant_availability` guards a NULL
@@ -1216,8 +1214,8 @@ def _ensure_fee_variant(fee, channel):
         channel=channel,
         defaults={
             "currency": channel.currency_code,
-            "price_amount": Decimal("0"),
-            "discounted_price_amount": Decimal("0"),
+            "price_amount": Decimal(0),
+            "discounted_price_amount": Decimal(0),
         },
     )
     # The rows minted before that line existed repair themselves the next time
@@ -1226,7 +1224,7 @@ def _ensure_fee_variant(fee, channel):
     # holds the row, so a correct listing costs nothing and a broken one costs
     # one UPDATE, once.
     if not created and listing.discounted_price_amount is None:
-        listing.discounted_price_amount = listing.price_amount or Decimal("0")
+        listing.discounted_price_amount = listing.price_amount or Decimal(0)
         listing.save(update_fields=["discounted_price_amount"])
     _ENSURED_FEE_VARIANTS.add((fee.pk, channel.pk))
     return variant

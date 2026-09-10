@@ -77,8 +77,7 @@ def _rule_json(rule):
     a storefront pairs a rule to a line it already holds without a second call.
     """
     targets = [
-        _to_gid("ProductVariant", variant_id)
-        for variant_id in rule.target_variant_ids
+        _to_gid("ProductVariant", variant_id) for variant_id in rule.target_variant_ids
     ]
     subject = _to_gid("ProductVariant", rule.subject.variant_id)
     return {
@@ -314,9 +313,7 @@ def kit_line(request):
                         else None
                     ),
                     "variantId": _to_gid("ProductVariant", fee.variant.pk),
-                    "parentVariantId": _to_gid(
-                        "ProductVariant", fee.parent_variant_id
-                    ),
+                    "parentVariantId": _to_gid("ProductVariant", fee.parent_variant_id),
                     "label": fee.label,
                     "sku": fee.sku,
                     # The whole charge on this line, which is what a cart row

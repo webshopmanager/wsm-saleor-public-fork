@@ -294,3 +294,9 @@ target-version = "py312"
 
     [tool.ruff.lint.isort]
     known-first-party = [ "saleor" ]
+
+    [tool.ruff.lint.per-file-ignores]
+    # pytest fixtures are imported by name in these test files; ruff reads the unused-name pattern as a redefinition (F811), a false positive for fixture wiring.
+    "saleor/wsm/**/tests/*.py" = [ "F811" ]
+    # this layer's docstrings are deliberately written as prose stating what a thing IS and why, not as imperative commands; forcing D401 would degrade the only documentation the layer has.
+    "saleor/wsm/**" = [ "D401" ]

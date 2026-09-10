@@ -74,7 +74,7 @@ class DealerGroupAdmin(WsmAdminMixin, admin.ModelAdmin):
         currency = currency_for(None)
         noun = "tier price" if totals["count"] == 1 else "tier prices"
         return format_html(
-            '{} {}, lowest {}, highest {}<br>'
+            "{} {}, lowest {}, highest {}<br>"
             '<a href="{}?group__id__exact={}">See this group\'s tier prices</a>',
             totals["count"],
             noun,
@@ -209,8 +209,7 @@ class DealerSettingsAdmin(WsmAdminMixin, admin.ModelAdmin):
         return False
 
     def _may_create(self, request):
-        """The add permission, asked directly, because `has_add_permission` is
-        now answering a different question (may a merchant open an Add FORM)."""
+        """The add permission, asked directly, because `has_add_permission` is now answering a different question (may a merchant open an Add FORM)."""
         user = request.user
         return user.is_superuser or user.has_perm("wsm_dealer.add_dealersettings")
 

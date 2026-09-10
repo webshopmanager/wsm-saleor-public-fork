@@ -159,20 +159,28 @@ def placed(order, channel_USD, on_sale):
 
     lines = {
         KIT: line(
-            KIT, SALE_UNIT, KIT_REASON,
+            KIT,
+            SALE_UNIT,
+            KIT_REASON,
             {META_KIT: json.dumps({"collection": 3, "quantity": 1})},
         ),
         CONFIGURED: line(
-            CONFIGURED, SALE_UNIT, COMPOSE_REASON,
+            CONFIGURED,
+            SALE_UNIT,
+            COMPOSE_REASON,
             {META_OPTIONS: json.dumps({"1": "2"})},
         ),
         PLAIN: line(PLAIN, LIST_UNIT, None, {}),
         DEALER: line(
-            DEALER, DEALER_UNIT, DEALER_REASON,
+            DEALER,
+            DEALER_UNIT,
+            DEALER_REASON,
             {META_DEALER: json.dumps({"group": 1, "break": 1})},
         ),
         FEE: line(
-            FEE, FEE_LIST, COMPOSE_REASON,
+            FEE,
+            FEE_LIST,
+            COMPOSE_REASON,
             {META_FEE: json.dumps({"fee": 1}), META_OPTIONS: json.dumps({})},
         ),
     }

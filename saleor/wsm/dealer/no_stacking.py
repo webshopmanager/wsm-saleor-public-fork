@@ -61,13 +61,13 @@ already is.
 from __future__ import annotations
 
 from functools import wraps
+from typing import Any
 
 from .. import patches
 
 # The generic patch machinery lives with the pin it enforces. Re-exported here
 # because this module was its first caller and its tests still name it.
 from ..patches import binding_sites, install_guard  # noqa: F401
-
 
 # Presence of this key on a checkout or order line means the line is priced at a
 # dealer tier. The value carries the group and the break for support; nothing
@@ -181,7 +181,8 @@ def split_discountable(objs, line_of=lambda obj: obj, also_excluded=None):
     argument rather than a third clause in the loop so that the caller, and the
     caller alone, says which rule it is under.
     """
-    eligible, excluded = [], []
+    eligible: list[Any] = []
+    excluded: list[Any] = []
     dealer_excluded = None
     for obj in objs:
         line = line_of(obj)

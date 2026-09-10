@@ -125,9 +125,7 @@ class FeeForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        currency = currency_for(
-            self.instance.product_id or self.initial.get("product")
-        )
+        currency = currency_for(self.instance.product_id or self.initial.get("product"))
         if currency:
             self.fields["amount"].label = f"Amount ({currency}, or a percentage)"
 
@@ -250,7 +248,7 @@ class OptionValueInlineFormSet(BaseInlineFormSet):
                 continue
             pending.append(form)
 
-        seen = {}
+        seen: dict[str, str] = {}
         for form in pending:
             fragment = form.cleaned_data.get("sku_fragment")
             if not fragment:

@@ -12,7 +12,6 @@ from django.db import connections
 from django.test.utils import CaptureQueriesContext
 
 from ....core.db.connection import restrict_writer
-
 from ....site import PasswordLoginMode
 from ..auth import AdminPasswordBackend
 
@@ -86,15 +85,11 @@ def test_staff_are_refused_in_customers_only_mode(staff_user, site_settings):
     )
 
 
-
 # --- finding 16: every read in this backend goes to the replica --------------
 
 
 def test_the_backend_never_reads_the_writer(staff_user, site_settings):
-    """`AUTHENTICATION_BACKENDS` is app-wide, so a read left on the writer here
-    is not this app's problem: it raises `UnsafeWriterAccessError` inside every
-    request that authenticates a session or asks Django for a permission, which
-    is how one unrouted queryset took down a whole tenant's run.
+    """`AUTHENTICATION_BACKENDS` is app-wide, so a read left on the writer here is not this app's problem: it raises `UnsafeWriterAccessError` inside every request that authenticates a session or asks Django for a permission, which is how one unrouted queryset took down a whole tenant's run.
 
     `execute_wrapper(restrict_writer)` is exactly what `restrict_writer_middleware`
     installs around a request, so this is the production guard, not a stand-in.
@@ -153,10 +148,7 @@ def _reads_while(call) -> int:
 
 
 def test_a_saleor_permission_is_refused_without_a_query(staff_user):
-    """`AUTHENTICATION_BACKENDS` is app-wide and this backend is last in it, so
-    every Saleor permission Saleor itself denied is asked of us next. Loading the
-    `wsm_` grant set to answer for `product.manage_products` was one join per
-    request on the API's hot path, and the string already carries the answer.
+    """`AUTHENTICATION_BACKENDS` is app-wide and this backend is last in it, so every Saleor permission Saleor itself denied is asked of us next. Loading the `wsm_` grant set to answer for `product.manage_products` was one join per request on the API's hot path, and the string already carries the answer.
 
     That one query is the whole gap between this fork and upstream on
     `test_retrieve_channel_listings` (17 vs 16) and
@@ -174,9 +166,7 @@ def test_a_saleor_permission_is_refused_without_a_query(staff_user):
 
 
 def test_a_wsm_permission_is_still_read_from_the_grant(staff_user):
-    """The other half: the permissions this backend DOES own still cost their one
-    read, so the short-circuit above cannot be widened into refusing everything.
-    """
+    """The other half: the permissions this backend DOES own still cost their one read, so the short-circuit above cannot be widened into refusing everything."""
     backend = AdminPasswordBackend()
     answer = []
 
@@ -218,6 +208,7 @@ def test_a_failed_admin_sign_in_blocks_the_next_attempt_from_the_same_address(
     box, against one 256-CPU task in prod.
     """
     from django.core.cache import cache
+
     from ....account.throttling import get_cache_key_blocked_ip
 
     _with_password(staff_user)

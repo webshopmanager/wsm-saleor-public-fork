@@ -82,9 +82,7 @@ def checkout_with_a_dealer_line_and_a_retail_line(
 
 def totals(checkout):
     lines_info, _ = fetch_checkout_lines(checkout)
-    return {
-        info.line.pk: calculate_base_line_total_price(info) for info in lines_info
-    }
+    return {info.line.pk: calculate_base_line_total_price(info) for info in lines_info}
 
 
 def test_a_voucher_skips_the_dealer_line_when_stacking_is_off(
@@ -239,11 +237,7 @@ def entire_order_checkout(
             price_override_reason=PRICE_OVERRIDE_REASON,
             undiscounted_unit_price_amount=DEALER_UNIT,
             private_metadata=(
-                {
-                    LINE_METADATA_KEY: json.dumps(
-                        {"group": "dealer-1", "minQuantity": 1}
-                    )
-                }
+                {LINE_METADATA_KEY: json.dumps({"group": "dealer-1", "minQuantity": 1})}
                 if dealer
                 else {}
             ),
@@ -285,8 +279,8 @@ def propagated(checkout_info, lines_info):
 
 
 def test_an_entire_order_voucher_leaves_the_dealer_line_whole(entire_order_checkout):
-    manager, checkout_info, lines_info, dealer_line, retail_line = entire_order_checkout(
-        dealer=True
+    manager, checkout_info, lines_info, dealer_line, retail_line = (
+        entire_order_checkout(dealer=True)
     )
 
     # Sized on the retail line alone: 10 percent of 6399.00, not of 9799.00.
@@ -295,9 +289,7 @@ def test_an_entire_order_voucher_leaves_the_dealer_line_whole(entire_order_check
     by_line = propagated(checkout_info, lines_info)
     assert by_line[dealer_line.pk] == Money(DEALER_UNIT, USD)
     assert by_line[retail_line.pk] == Money(Decimal("5759.10"), USD)
-    assert checkout_total(checkout_info, lines_info) == Money(
-        Decimal("9159.10"), USD
-    )
+    assert checkout_total(checkout_info, lines_info) == Money(Decimal("9159.10"), USD)
 
 
 def test_the_same_checkout_without_a_dealer_line_takes_the_stock_split(
@@ -313,9 +305,7 @@ def test_the_same_checkout_without_a_dealer_line_takes_the_stock_split(
     by_line = propagated(checkout_info, lines_info)
     assert by_line[first_line.pk] == Money(Decimal("3060.00"), USD)
     assert by_line[retail_line.pk] == Money(Decimal("5759.10"), USD)
-    assert checkout_total(checkout_info, lines_info) == Money(
-        Decimal("8819.10"), USD
-    )
+    assert checkout_total(checkout_info, lines_info) == Money(Decimal("8819.10"), USD)
 
 
 def test_the_merchant_can_turn_the_entire_order_stacking_back_on(
@@ -323,8 +313,8 @@ def test_the_merchant_can_turn_the_entire_order_stacking_back_on(
 ):
     DealerSettings.objects.create(discount_stacking=True)
 
-    manager, checkout_info, lines_info, dealer_line, retail_line = entire_order_checkout(
-        dealer=True
+    manager, checkout_info, lines_info, dealer_line, retail_line = (
+        entire_order_checkout(dealer=True)
     )
 
     by_line = propagated(checkout_info, lines_info)
@@ -341,8 +331,8 @@ def test_the_order_carries_the_same_numbers(entire_order_checkout, app):
     This is the number the merchant sees in the dashboard and the customer sees on
     the invoice.
     """
-    manager, checkout_info, lines_info, dealer_line, retail_line = entire_order_checkout(
-        dealer=True
+    manager, checkout_info, lines_info, dealer_line, retail_line = (
+        entire_order_checkout(dealer=True)
     )
 
     order = create_order_from_checkout(
@@ -371,7 +361,6 @@ def test_the_order_carries_the_same_numbers(entire_order_checkout, app):
     retail_order_line.refresh_from_db()
     assert dealer_order_line.total_price_net == Money(DEALER_UNIT, USD)
     assert retail_order_line.total_price_net == Money(Decimal("5759.10"), USD)
-
 
 
 # --- finding 12: the binding sites are discovered, not hoped for -------------

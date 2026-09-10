@@ -80,7 +80,7 @@ def _password_login_mode():
 
 
 def password_login_allowed(user) -> bool:
-    """Is this user allowed to sign in with a password, on a password already proved right?
+    """Whether this user is allowed to sign in with a password, on a password already proved right.
 
     Named on its own because two callers ask it: the backend below, and the
     throttled admin form, which gets its answer about the PASSWORD from Saleor's
@@ -215,7 +215,8 @@ class ThrottledAdminAuthenticationForm(AdminAuthenticationForm):
                 # `authenticate()` is what normally records which backend
                 # answered, and `django.contrib.auth.login` refuses a user
                 # carrying no `backend` while more than one is configured.
-                user.backend = (
+                # Django sets `.backend` dynamically; it is not on the User stub.
+                user.backend = (  # type: ignore[attr-defined]
                     f"{AdminPasswordBackend.__module__}.AdminPasswordBackend"
                 )
                 self.confirm_login_allowed(user)

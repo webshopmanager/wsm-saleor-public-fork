@@ -53,6 +53,7 @@ import logging
 from collections import defaultdict
 from decimal import Decimal
 from functools import wraps
+from typing import Any, cast
 
 from django.conf import settings
 from django.db.models import Prefetch
@@ -60,10 +61,9 @@ from django.utils import timezone
 
 from ..checkout.models import CheckoutLine
 from ..core.db.connection import allow_writer
+from ..product.models import ProductVariant
 from . import patches
 from .compose import pricing as compose_pricing
-from .containers import pricing as kit_pricing
-from .compose.models import Fee, OptionSet, to_cents
 from .compose.lines import (
     META_ACCEPTED,
     META_CID,
@@ -71,18 +71,26 @@ from .compose.lines import (
     META_OPTIONS,
     META_PARENT,
     META_SKU,
+)
+from .compose.lines import (
     PRICE_OVERRIDE_REASON as COMPOSE_REASON,
 )
+from .compose.models import Fee, OptionSet, to_cents
+from .containers import pricing as kit_pricing
 from .containers.pricing import (
     META_KIT,
+)
+from .containers.pricing import (
     PRICE_OVERRIDE_REASON as KIT_REASON,
 )
-from .money import unit_amount
 from .dealer import pricing as dealer_pricing
 from .dealer.no_stacking import (
     LINE_METADATA_KEY as DEALER_META,
+)
+from .dealer.no_stacking import (
     PRICE_OVERRIDE_REASON as DEALER_REASON,
 )
+from .money import unit_amount
 
 TARGET = "saleor.checkout.calculations._fetch_checkout_prices_if_expired"
 
@@ -281,8 +289,8 @@ def _kits_on_the_checkout(slugs, channel):
     `pricing_members` still refuses the kit by name, exactly as when it made the
     read itself.
     """
-    from .containers.models import KitConfig, KitMember
     from ..product.models import ProductVariantChannelListing
+    from .containers.models import KitConfig, KitMember
 
     kits = {
         kit.collection.slug: kit
@@ -304,6 +312,7 @@ def _kits_on_the_checkout(slugs, channel):
         ).only("variant_id", "price_amount", "discounted_price_amount")
     }
     return kits, prices
+
 
 def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
     """Re-derive every kit member line through the kit's own money.
@@ -328,7 +337,6 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
     their channel prices, and one ladder read covering every member), and zero
     on a checkout carrying none.
     """
-    from .containers.models import KitConfig
     from .containers.views import resolve_tier_lookup
 
     token = checkout_info.checkout.token
@@ -423,7 +431,9 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
             for line_info in kit_charges:
                 stamps = line_info.line.private_metadata or {}
                 if stamps.get(META_PARENT) not in parents:
-                    _log_drop(token, line_info, "the part this charge belongs to is gone")
+                    _log_drop(
+                        token, line_info, "the part this charge belongs to is gone"
+                    )
                     dropped.append(line_info)
                     continue
                 owed = expected.get(line_info.line.variant_id)
@@ -434,7 +444,9 @@ def _reprice_kits(checkout_info, kit_lines, database_connection_name, mark):
                 row, fee_quantity = owed
                 _write_fee_line(line_info, row, fee_quantity, mark)
 
-        by_variant = {row.member.variant.pk: row for row in priced.lines}
+        by_variant = {
+            cast(ProductVariant, row.member.variant).pk: row for row in priced.lines
+        }
         for line_info in infos:
             line = line_info.line
             row = by_variant.get(line.variant_id)
@@ -680,7 +692,9 @@ def _reprice_configured(
     # The group each line is priced at, decided once. It picks the option
     # deltas AND the base the line starts from, so it is read before either.
     groups = {
-        info.line.pk: (_stamped_group(info.line) if stamped_group_stands else tier_group)
+        info.line.pk: (
+            _stamped_group(info.line) if stamped_group_stands else tier_group
+        )
         for info in configured
     }
     codes = sorted({code for code in groups.values() if code})
@@ -703,7 +717,7 @@ def _reprice_configured(
     token = checkout_info.checkout.token
     dropped = []
 
-    fee_lines_by_parent = defaultdict(dict)
+    fee_lines_by_parent: dict[str, dict[int, Any]] = defaultdict(dict)
     for line_info in fee_lines:
         parent = (line_info.line.private_metadata or {}).get(META_PARENT)
         if not parent:
@@ -739,7 +753,7 @@ def _reprice_configured(
             # nothing to crate is not a thing anyone owes money for.
             _log_drop(token, line_info, str(problem))
             dropped.append(line_info)
-            dropped.extend(fee_lines_by_parent.pop(cid, {}).values())
+            dropped.extend(fee_lines_by_parent.pop(cid or "", {}).values())
 
     for orphaned in set(fee_lines_by_parent) - claimed:
         for line_info in fee_lines_by_parent[orphaned].values():
@@ -791,7 +805,10 @@ def _reprice_one_configured(
     cid = stamps.get(META_CID)
     if not cid:
         raise Unrepriceable("a configured line on this checkout has no identifier")
-    if line_info.channel_listing is None or line_info.channel_listing.price_amount is None:
+    if (
+        line_info.channel_listing is None
+        or line_info.channel_listing.price_amount is None
+    ):
         raise Unrepriceable("a configured item on this checkout is no longer for sale")
 
     try:

@@ -59,9 +59,7 @@ def priced(product):
 
 
 def _required_finish(product, cheapest="-10", dearest="25"):
-    option_set = OptionSet.objects.create(
-        product=product, name="Finish", required=True
-    )
+    option_set = OptionSet.objects.create(product=product, name="Finish", required=True)
     OptionValue.objects.create(
         option_set=option_set, name="Raw", price_delta=Decimal(cheapest)
     )
@@ -94,18 +92,16 @@ def test_a_question_the_shopper_can_skip_leaves_the_floor_at_the_base(
         product=priced, name="Engraving", required=False
     )
     OptionValue.objects.create(
-        option_set=option_set, name="Engraved", price_delta=Decimal("25")
+        option_set=option_set, name="Engraved", price_delta=Decimal(25)
     )
 
     assert floor_of(priced)[channel_USD.slug]["amount"] == "100.00"
 
 
-def test_a_required_charge_is_part_of_the_lowest_price_anyone_pays(
-    priced, channel_USD
-):
+def test_a_required_charge_is_part_of_the_lowest_price_anyone_pays(priced, channel_USD):
     """A crating charge that is always on is part of the price, not an extra."""
     Fee.objects.create(
-        product=priced, label="Crating", basis=pricing.FIXED, amount=Decimal("149")
+        product=priced, label="Crating", basis=pricing.FIXED, amount=Decimal(149)
     )
 
     assert floor_of(priced)[channel_USD.slug]["amount"] == "249.00"
@@ -122,7 +118,7 @@ def test_a_declinable_charge_is_not_part_of_the_floor(priced):
         product=priced,
         label="Crating",
         basis=pricing.FIXED,
-        amount=Decimal("149"),
+        amount=Decimal(149),
         required=False,
         decline_label="No crate, I will collect",
     )
@@ -134,7 +130,7 @@ def test_a_percentage_charge_computes_on_the_cheapest_subtotal(priced, channel_U
     """10% of the 90.00 the cheapest answer produces, never 10% of the base."""
     _required_finish(priced, dearest=None)
     Fee.objects.create(
-        product=priced, label="Handling", basis=pricing.PERCENT, amount=Decimal("10")
+        product=priced, label="Handling", basis=pricing.PERCENT, amount=Decimal(10)
     )
 
     assert floor_of(priced)[channel_USD.slug]["amount"] == "99.00"
@@ -176,7 +172,7 @@ def test_editing_one_answer_restamps_the_floor(priced, channel_USD):
     assert floor_of(priced)[channel_USD.slug]["amount"] == "90.00"
 
     value = OptionValue.objects.get(option_set__product=priced, name="Raw")
-    value.price_delta = Decimal("-30")
+    value.price_delta = Decimal(-30)
     value.save()
 
     assert floor_of(priced)[channel_USD.slug]["amount"] == "70.00"
@@ -213,7 +209,7 @@ def test_a_floor_below_zero_stamps_zero_and_says_so(priced, channel_USD, caplog)
     broken tile, and logged with the product id so it can be found.
     """
     ProductVariantChannelListing.objects.filter(variant__product=priced).update(
-        price_amount=Decimal("0")
+        price_amount=Decimal(0)
     )
     caplog.set_level(logging.WARNING, logger="saleor.wsm.compose.models")
 
@@ -233,9 +229,7 @@ def test_a_product_with_no_priced_listing_stamps_nothing(product):
     assert floor_of(product) is None
 
 
-def test_the_command_restamps_a_base_price_the_signals_never_saw(
-    priced, channel_USD
-):
+def test_the_command_restamps_a_base_price_the_signals_never_saw(priced, channel_USD):
     """The known gap, and its answer.
 
     A base price lives on a core table Saleor writes through `bulk_update` on
@@ -290,13 +284,11 @@ def test_one_answer_saved_costs_eight_queries_on_top_of_the_write(
     UPDATE of `metadata`. Zero of them are on any shopper path, which is the
     entire point of stamping.
     """
-    option_set = OptionSet.objects.create(
-        product=priced, name="Finish", required=True
-    )
+    option_set = OptionSet.objects.create(product=priced, name="Finish", required=True)
     value = OptionValue.objects.create(
-        option_set=option_set, name="Raw", price_delta=Decimal("-10")
+        option_set=option_set, name="Raw", price_delta=Decimal(-10)
     )
 
-    value.price_delta = Decimal("-12")
+    value.price_delta = Decimal(-12)
     with django_assert_num_queries(9):
         value.save()

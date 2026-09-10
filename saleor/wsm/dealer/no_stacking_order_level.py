@@ -159,9 +159,7 @@ def order_spread_guard(original):
         from ...order.base_calculations import base_order_line_total
 
         excluded_total = _order_lines_total(excluded, base_subtotal.currency)
-        yield from original(
-            eligible, base_subtotal - excluded_total, subtotal_discount
-        )
+        yield from original(eligible, base_subtotal - excluded_total, subtotal_discount)
         for line in excluded:
             yield line, base_order_line_total(line).price_with_discounts.net
 
@@ -231,12 +229,10 @@ def install() -> None:
         order_amount_guard,
     )
     install_guard(
-        "saleor.order.base_calculations."
-        "propagate_order_discount_on_order_lines_prices",
+        "saleor.order.base_calculations.propagate_order_discount_on_order_lines_prices",
         order_spread_guard,
     )
     install_guard(
-        "saleor.discount.utils.promotion."
-        "create_discount_objects_for_order_promotions",
+        "saleor.discount.utils.promotion.create_discount_objects_for_order_promotions",
         order_promotion_amount_guard,
     )

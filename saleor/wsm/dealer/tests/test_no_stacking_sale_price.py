@@ -185,9 +185,9 @@ def test_a_kit_member_line_is_charged_the_sale_price_once(cart, checkout, channe
     info = _unit(_priced(checkout), kit_line)
 
     assert calculate_base_line_unit_price(info) == Money(SALE_UNIT, USD)
-    assert calculate_undiscounted_base_line_unit_price(
-        info, channel_USD
-    ) == Money(SALE_UNIT, USD)
+    assert calculate_undiscounted_base_line_unit_price(info, channel_USD) == Money(
+        SALE_UNIT, USD
+    )
     assert not CheckoutLineDiscount.objects.filter(
         line=kit_line, type=DiscountType.PROMOTION
     ).exists()
@@ -200,9 +200,9 @@ def test_a_configured_line_is_charged_the_sale_price_once(cart, checkout, channe
     info = _unit(_priced(checkout), configured_line)
 
     assert calculate_base_line_unit_price(info) == Money(SALE_UNIT, USD)
-    assert calculate_undiscounted_base_line_unit_price(
-        info, channel_USD
-    ) == Money(SALE_UNIT, USD)
+    assert calculate_undiscounted_base_line_unit_price(info, channel_USD) == Money(
+        SALE_UNIT, USD
+    )
     assert not CheckoutLineDiscount.objects.filter(
         line=configured_line, type=DiscountType.PROMOTION
     ).exists()
@@ -220,9 +220,9 @@ def test_a_plain_line_beside_them_still_gets_the_promotion(cart, checkout, chann
     lines_info = _priced(checkout)
     info = _unit(lines_info, plain_line)
 
-    assert calculate_undiscounted_base_line_unit_price(
-        info, channel_USD
-    ) == Money(LIST_UNIT, USD)
+    assert calculate_undiscounted_base_line_unit_price(info, channel_USD) == Money(
+        LIST_UNIT, USD
+    )
     assert calculate_base_line_unit_price(info) == Money(SALE_UNIT, USD)
     assert (
         CheckoutLineDiscount.objects.filter(

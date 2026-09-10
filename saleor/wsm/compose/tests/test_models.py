@@ -9,7 +9,6 @@ answer. Without it a Decimal-to-cents slip would pass every test above.
 from decimal import Decimal
 
 import pytest
-
 from django.core.exceptions import ValidationError
 
 from saleor.product import ProductTypeKind
@@ -56,14 +55,18 @@ def credit_sets(dd_product):
             product=dd_product, name=name, sort_order=order
         )
         OptionValue.objects.create(
-            option_set=option_set, name="Delete", sku_fragment=fragment, price_delta=delta
+            option_set=option_set,
+            name="Delete",
+            sku_fragment=fragment,
+            price_delta=delta,
         )
         sets.append(option_set)
     return sets
 
 
 @pytest.mark.parametrize(
-    ("base", "expected_cents"), [(Decimal("3998.99"), 349400), (Decimal("6399.00"), 589401)]
+    ("base", "expected_cents"),
+    [(Decimal("3998.99"), 349400), (Decimal("6399.00"), 589401)],
 )
 def test_stored_rows_reach_the_fixture_number(credit_sets, base, expected_cents):
     result = price_configured(
@@ -125,7 +128,7 @@ def test_stored_percent_fee_reads_amount_as_hundredths_of_a_percent(dd_product):
     ("amount", "expected"),
     [
         (Decimal("-29.99"), -2999),
-        (Decimal("0"), 0),
+        (Decimal(0), 0),
         (Decimal("3998.99"), 399899),
         (Decimal("8.25"), 825),
     ],
@@ -324,7 +327,7 @@ def test_a_fee_variant_listing_minted_before_the_fix_is_repaired_in_place(
     compose_models._ensure_fee_variant(Fee.objects.get(pk=crating_fee.pk), channel_USD)
 
     listing.refresh_from_db()
-    assert listing.discounted_price_amount == Decimal("0")
+    assert listing.discounted_price_amount == Decimal(0)
 
 
 def test_fee_products_are_excludable_by_product_type(crating_fee, channel_USD):
@@ -369,7 +372,7 @@ def test_a_question_added_by_hand_turns_the_configurator_on(product):
 def test_a_charge_alone_makes_a_product_configurable(product):
     """A declinable crating charge is something the PDP has to ask about."""
     Fee.objects.create(
-        product=product, label="Crating", basis=pricing.FIXED, amount=Decimal("149")
+        product=product, label="Crating", basis=pricing.FIXED, amount=Decimal(149)
     )
 
     product.refresh_from_db()
@@ -381,7 +384,7 @@ def test_removing_the_last_one_turns_it_off_again(product):
     """The mirror defect: a configurator on a product with nothing to configure."""
     option_set = OptionSet.objects.create(product=product, name="Color")
     fee = Fee.objects.create(
-        product=product, label="Crating", basis=pricing.FIXED, amount=Decimal("149")
+        product=product, label="Crating", basis=pricing.FIXED, amount=Decimal(149)
     )
 
     option_set.delete()

@@ -48,9 +48,7 @@ def test_it_grants_nothing_outside_the_fork():
     make_role()
 
     group = Group.objects.get(name="Merchant")
-    granted = set(
-        group.permissions.values_list("content_type__app_label", flat=True)
-    )
+    granted = set(group.permissions.values_list("content_type__app_label", flat=True))
     assert not granted - set(FORK_APP_LABELS)
 
 
@@ -63,9 +61,10 @@ def test_running_it_again_is_a_no_op():
     make_role()
 
     assert Group.objects.filter(name="Merchant").count() == 1
-    assert set(
-        Group.objects.get(name="Merchant").permissions.values_list("pk", flat=True)
-    ) == before
+    assert (
+        set(Group.objects.get(name="Merchant").permissions.values_list("pk", flat=True))
+        == before
+    )
 
 
 def test_it_takes_back_a_permission_that_is_not_ours():
@@ -84,9 +83,7 @@ def test_it_takes_back_a_permission_that_is_not_ours():
     assert stray.pk not in set(group.permissions.values_list("pk", flat=True))
 
 
-def test_the_whole_console_is_one_group_in_the_order_a_merchant_works(
-    staff_user, rf
-):
+def test_the_whole_console_is_one_group_in_the_order_a_merchant_works(staff_user, rf):
     """One heading, and the screens under it in task order.
 
     The stock index groups by app: WSM COMPOSE, WSM CONTAINERS and WSM DEALER

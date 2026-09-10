@@ -35,7 +35,13 @@ def ladder(variant, group, rows):
     [(1, "9.00", 1), (4, "9.00", 1), (5, "8.00", 5), (9, "8.00", 5), (12, "7.00", 10)],
 )
 def test_highest_reachable_break_wins(
-    variant, customer_user, dealer_group, channel_USD, quantity, expected_amount, expected_break
+    variant,
+    customer_user,
+    dealer_group,
+    channel_USD,
+    quantity,
+    expected_amount,
+    expected_break,
 ):
     ladder(variant, dealer_group, [(1, "9.00"), (5, "8.00"), (10, "7.00")])
 
@@ -64,7 +70,9 @@ def test_a_tier_above_retail_is_never_offered(
     ladder(variant, dealer_group, [(1, "12.00"), (5, "8.00")])
 
     assert dealer_price_for(variant, customer_user, 1, channel=channel_USD) is None
-    assert dealer_price_for(variant, customer_user, 5, channel=channel_USD).amount == Decimal(8)
+    assert dealer_price_for(
+        variant, customer_user, 5, channel=channel_USD
+    ).amount == Decimal(8)
 
     gid = graphene.Node.to_global_id("ProductVariant", variant.pk)
     assert prices_for_variants(customer_user, channel_USD, [variant.pk]) == {
@@ -150,7 +158,7 @@ def test_the_table_refuses_a_negative_tier_whatever_wrote_it(variant, dealer_gro
     """`objects.create` never calls full_clean, and neither does the importer."""
     with pytest.raises(IntegrityError), transaction.atomic():
         TierPrice.objects.create(
-            variant=variant, group=dealer_group, min_quantity=1, amount=Decimal("-50")
+            variant=variant, group=dealer_group, min_quantity=1, amount=Decimal(-50)
         )
 
 

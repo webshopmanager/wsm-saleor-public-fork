@@ -32,10 +32,10 @@ from ...core.utils.metadata_manager import MetadataItem
 from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...plugins.manager import get_plugins_manager
 from ...product.models import Product, ProductVariant, ProductVariantChannelListing
+from ..checkout import LineRefused, check_addable, whole_number
 from ..dealer import pricing as dealer_pricing
 from ..dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from ..dealer.tax import bind_tax_exemption
-from ..checkout import LineRefused, check_addable, whole_number
 from ..http import (
     buyer_mismatch,
     global_pk,
@@ -215,7 +215,9 @@ def _selections(raw):
         if isinstance(set_id, str) and set_id.isdigit():
             set_id = int(set_id)
         if not isinstance(set_id, int) or isinstance(set_id, bool):
-            raise pricing.UnknownValueError(f"selection has no option set id: {entry!r}")
+            raise pricing.UnknownValueError(
+                f"selection has no option set id: {entry!r}"
+            )
         out.append(
             pricing.Selection(
                 set_id=set_id,
@@ -357,9 +359,7 @@ def configured_line(request):
                 MetadataItem(META_OPTIONS, json.dumps(priced.snapshot)),
                 MetadataItem(META_SKU, priced.composite_sku),
                 MetadataItem(META_CID, cid),
-                MetadataItem(
-                    META_ACCEPTED, json.dumps(sorted(requested_fee_ids))
-                ),
+                MetadataItem(META_ACCEPTED, json.dumps(sorted(requested_fee_ids))),
             ],
         )
     ]
@@ -412,7 +412,9 @@ def configured_line(request):
     # that were not there a moment ago. One small query, and it is what keeps the
     # stamp below off a line this request did not create.
     before = set(
-        CheckoutLine.objects.filter(checkout_id=checkout.pk).values_list("pk", flat=True)
+        CheckoutLine.objects.filter(checkout_id=checkout.pk).values_list(
+            "pk", flat=True
+        )
     )
     add_variants_to_checkout(
         checkout,

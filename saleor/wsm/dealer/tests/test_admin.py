@@ -1,5 +1,5 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
-"""Can a merchant FIND the row and read the screen?
+"""Whether a merchant can find the row and read the screen.
 
 Every assertion here is a finding from the merchant walk of 2026-09-08, which
 rated these screens BLOCKED: 626 tier prices all reading "Base" with no search
@@ -34,9 +34,7 @@ def grant(user, *dotted_permissions):
     for dotted in dotted_permissions:
         app_label, codename = dotted.split(".")
         user.user_permissions.add(
-            Permission.objects.get(
-                content_type__app_label=app_label, codename=codename
-            )
+            Permission.objects.get(content_type__app_label=app_label, codename=codename)
         )
 
 
@@ -59,9 +57,11 @@ def deployed_middleware(settings):
         if "restrict_writer" not in middleware
     ]
 
+
 @pytest.fixture
 def merchant(client, staff_user):
-    assert staff_user.is_staff and not staff_user.is_superuser
+    assert staff_user.is_staff
+    assert not staff_user.is_superuser
     grant(
         staff_user,
         "wsm_dealer.view_dealergroup",
@@ -112,7 +112,7 @@ def price(variant, group, amount="9.000"):
 
 
 def test_tier_price_list_names_the_product_and_the_sku(merchant, variant, group):
-    """"Base" is the variant name on every single-variant product in the fleet."""
+    """The variant name "Base" appears on every single-variant product in the fleet."""
     price(variant, group)
 
     response = merchant.get(TIER_PRICES)
@@ -148,7 +148,7 @@ def test_tier_price_search_by_product_name_returns_only_that_row(
 
 
 def test_tier_price_list_shows_two_places_and_the_currency(merchant, variant, group):
-    """"228.000" reads as a bug and "0.000" reads as free. Storage keeps 3 places."""
+    """Storage keeps 3 places: "228.000" reads as a bug, "0.000" reads as free."""
     price(variant, group, amount="228.000")
 
     body = merchant.get(TIER_PRICES).content.decode()
@@ -198,7 +198,9 @@ def test_dealer_customer_list_names_the_shopper(merchant, customer_user, group):
     assert str(customer_user.uuid) not in body
 
 
-def test_dealer_customer_search_by_email(merchant, customer_user, customer_user2, group):
+def test_dealer_customer_search_by_email(
+    merchant, customer_user, customer_user2, group
+):
     """The decoy is another shopper: the signed-in staff email is in the header."""
     DealerCustomer.objects.create(user=customer_user, group=group)
     DealerCustomer.objects.create(user=customer_user2, group=group)
@@ -295,7 +297,8 @@ def test_dealer_settings_opens_the_one_row_and_states_the_default(merchant):
     assert row.discount_stacking is False
     assert response["Location"].endswith(f"{DEALER_SETTINGS}{row.pk}/change/")
     page = merchant.get(response["Location"]).content.decode()
-    assert "takes no" in page and "voucher" in page
+    assert "takes no" in page
+    assert "voucher" in page
 
 
 def test_dealer_settings_does_not_make_a_second_row(merchant):

@@ -13,8 +13,8 @@ from decimal import Decimal
 import pytest
 
 from saleor.wsm.containers import pricing
-from saleor.wsm.tests import DEALER_HEADERS
 from saleor.wsm.containers.models import KitConfig, KitMember
+from saleor.wsm.tests import DEALER_HEADERS
 
 pytestmark = pytest.mark.django_db
 
@@ -171,7 +171,9 @@ def test_a_dealer_tier_reaches_the_written_line(client, checkout, kit, monkeypat
     assert response.json()["kitTotal"] == "50.00"
 
 
-def test_a_real_dealer_tier_beats_the_kit_discount(client, checkout, kit, customer_user):
+def test_a_real_dealer_tier_beats_the_kit_discount(
+    client, checkout, kit, customer_user
+):
     """The wired seam, with no injection: wsm.dealer answers, better-of decides.
 
     The 30.00 member is tiered at 25.00, which beats its kit-discounted 27.00,
@@ -343,7 +345,12 @@ def test_a_member_that_loses_its_tier_falls_back_to_the_kit_price_not_to_list(
     TierPrice.objects.create(
         variant=dear, group=group, min_quantity=1, amount=Decimal("25.00")
     )
-    assert post_kit(client, checkout, kit.collection_id, customer=customer_user).status_code == 200
+    assert (
+        post_kit(
+            client, checkout, kit.collection_id, customer=customer_user
+        ).status_code
+        == 200
+    )
     on_tier = checkout.lines.get(variant_id=dear.pk).price_override
     assert on_tier == Decimal("25.00")
 
@@ -361,9 +368,7 @@ def test_a_member_that_loses_its_tier_falls_back_to_the_kit_price_not_to_list(
 
 
 def test_the_kit_money_is_re_derived_on_every_read(client, checkout, kit):
-    """Nothing re-derived a member that took no tier, so a stale cart kept a
-    discount the merchant had already changed, for the life of that cart.
-    """
+    """Nothing re-derived a member that took no tier, so a stale cart kept a discount the merchant had already changed, for the life of that cart."""
     assert post_kit(client, checkout, kit.collection_id).status_code == 200
     before = {line.variant_id: line.price_override for line in checkout.lines.all()}
 
@@ -408,15 +413,15 @@ def bakeoff_kit(collection, product_list, channel_USD):
     return kit
 
 
-def test_the_acceptance_kit_is_9358_19_at_retail(client, checkout, bakeoff_kit, product_list):
+def test_the_acceptance_kit_is_9358_19_at_retail(
+    client, checkout, bakeoff_kit, product_list
+):
     """B4, retail half: the number the bake-off walk pins."""
     response = post_kit(client, checkout, bakeoff_kit.collection_id)
 
     assert response.status_code == 200
     assert response.json()["kitTotal"] == "9358.19"
-    units = {
-        line.variant_id: line.price_override for line in checkout.lines.all()
-    }
+    units = {line.variant_id: line.price_override for line in checkout.lines.all()}
     assert units[product_list[0].variants.first().pk] == Decimal("3599.09")
     assert units[product_list[1].variants.first().pk] == Decimal("5759.10")
 
@@ -440,14 +445,11 @@ def test_the_acceptance_kit_is_9159_10_for_a_dealer_on_a_3400_break(
 
     assert response.status_code == 200
     assert response.json()["kitTotal"] == "9159.10"
-    units = {
-        line.variant_id: line.price_override for line in checkout.lines.all()
-    }
+    units = {line.variant_id: line.price_override for line in checkout.lines.all()}
     # The tier beats the kit-discounted 3599.09, so the member pays the break.
     assert units[stage_2.pk] == Decimal("3400.00")
     # The member with no break keeps its kit price. Never both.
     assert units[product_list[1].variants.first().pk] == Decimal("5759.10")
-
 
 
 # --- finding 8: the same two holes on the kit write path ---------------------
@@ -593,9 +595,7 @@ def test_a_satisfied_rule_lets_the_kit_through_and_says_what_it_was(
     ]
 
 
-def test_a_rule_about_a_part_that_is_not_in_the_kit_says_nothing(
-    client, checkout, kit
-):
+def test_a_rule_about_a_part_that_is_not_in_the_kit_says_nothing(client, checkout, kit):
     """The subject decides whether a rule is even asked. No subject, no rule."""
     from saleor.wsm.containers.models import EXCLUDES, evaluate_rules
 
@@ -701,7 +701,9 @@ def test_a_kit_member_carrying_a_fee_lands_with_its_own_deposit_line(
     assert deposit.quantity == 1
 
 
-def test_the_deposit_line_says_what_it_belongs_to(client, checkout, fee_kit, product_list):
+def test_the_deposit_line_says_what_it_belongs_to(
+    client, checkout, fee_kit, product_list
+):
     """The pairing the storefront cart draws the charge under its part with."""
     from saleor.wsm.compose.lines import META_CID, META_FEE, META_PARENT
 
@@ -767,7 +769,9 @@ def test_a_kit_with_no_fees_gains_no_lines(client, checkout, kit):
 # and priced the collection's own members, so a substitution was never priced.
 
 
-def test_the_picked_parts_are_the_kit_that_is_priced(client, checkout, kit, product_list):
+def test_the_picked_parts_are_the_kit_that_is_priced(
+    client, checkout, kit, product_list
+):
     """The discount prorates over what is being bought, and over nothing else."""
     picked = [product_list[0].variants.first().pk, product_list[2].variants.first().pk]
 
@@ -782,7 +786,9 @@ def test_the_picked_parts_are_the_kit_that_is_priced(client, checkout, kit, prod
     assert {line.variant_id for line in checkout.lines.all()} == set(picked)
 
 
-def test_a_pick_that_is_not_in_the_kit_is_refused(client, checkout, kit, product_list, variant):
+def test_a_pick_that_is_not_in_the_kit_is_refused(
+    client, checkout, kit, product_list, variant
+):
     """Never quietly dropped: pricing a different kit is the whole defect."""
     stranger = variant
     assert stranger.pk not in set(kit.members.values_list("variant_id", flat=True))
@@ -921,9 +927,7 @@ def test_a_charge_on_a_part_nobody_picked_is_not_taken(
     """The deposit belongs to the core, so a kit bought without it owes nothing."""
     body = product_list[0].variants.first()
 
-    response = post_kit(
-        client, checkout, fee_kit.collection_id, variant_ids=[body.pk]
-    )
+    response = post_kit(client, checkout, fee_kit.collection_id, variant_ids=[body.pk])
 
     assert response.status_code == 200
     payload = response.json()

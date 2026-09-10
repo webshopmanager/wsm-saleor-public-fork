@@ -100,7 +100,9 @@ class AboveRetailError(ComposeRefusal):
     dealer at retail forever and nobody would ever find the row.
     """
 
-    def __init__(self, *, value_id: int, name: str, tier_group: str, amount: int, retail: int):
+    def __init__(
+        self, *, value_id: int, name: str, tier_group: str, amount: int, retail: int
+    ):
         self.value_id = value_id
         self.tier_group = tier_group
         super().__init__(
@@ -224,7 +226,7 @@ def delta_for(value: Value, tier_group: str | None) -> tuple[int, bool]:
 
 
 def _percent_of(base_cents: int, rate: int) -> int:
-    """rate hundredths-of-a-percent of base, rounded HALF-UP away from zero.
+    """Rate hundredths-of-a-percent of base, rounded HALF-UP away from zero.
 
     Integer arithmetic throughout: base and rate are both hundredths, so their
     product is scaled by 10,000 and one division carries the rounding. A float
@@ -318,7 +320,11 @@ def apply_fees(fees, accepted, subtotal_cents: int, quantity: int):
         amount = fee.amount
         if fee.basis == PERCENT:
             rate = fee.amount
-            base = subtotal_cents * quantity if fee.apply_to == PER_LINE else subtotal_cents
+            base = (
+                subtotal_cents * quantity
+                if fee.apply_to == PER_LINE
+                else subtotal_cents
+            )
             amount = _percent_of(base, rate)
         extended = amount if fee.apply_to == PER_LINE else amount * quantity
         total += extended
@@ -381,15 +387,15 @@ def price_configured(
     picked = {}
     for selection in selections:
         if selection.set_id in picked:
-            raise ComposeRefusal(f"duplicate selection for option set {selection.set_id}")
+            raise ComposeRefusal(
+                f"duplicate selection for option set {selection.set_id}"
+            )
         picked[selection.set_id] = selection
 
     fees = list(fees)
     _validate(sets_by_id, picked, {f.id: f for f in fees}, accepted)
 
-    chosen = sorted(
-        (sets_by_id[i] for i in picked), key=lambda s: (s.sort_order, s.id)
-    )
+    chosen = sorted((sets_by_id[i] for i in picked), key=lambda s: (s.sort_order, s.id))
     unit_cents = base_unit_cents
     sku_parts = [base_sku] if base_sku else []
     lines, tier_applied = [], base_tiered

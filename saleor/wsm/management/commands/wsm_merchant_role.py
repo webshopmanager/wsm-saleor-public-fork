@@ -75,4 +75,4 @@ class Command(BaseCommand):
                 f"  added {len(after - before)}, removed {len(before - after)}"
             )
         self.stdout.write(str(group.pk))
-        return None
+        return

@@ -15,6 +15,7 @@ whatever a future app drops on the default one.
 
 import re
 from functools import wraps
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from django.contrib import admin
 from django.db.models import (
@@ -29,13 +30,26 @@ from django.db.models import (
     Value,
     When,
 )
+from django.forms import ModelForm
+from django.http import HttpRequest
+from django.template.response import TemplateResponse
 from django.urls import URLResolver, reverse
 from django.utils.html import format_html, format_html_join
-from django.utils.text import capfirst
 from django.utils.safestring import mark_safe
+from django.utils.text import capfirst
 
 from ...core.db.connection import allow_writer
+
+# The mixins below are combined with `admin.ModelAdmin` at every real use
+# site; this fake base exists only so mypy resolves their `super()` calls
+# and attribute lookups. Runtime inheritance is untouched: `object`.
+if TYPE_CHECKING:
+    _ModelAdminBase = admin.ModelAdmin
+else:
+    _ModelAdminBase = object
 from ...product.models import Product, ProductChannelListing, ProductVariant
+from . import pricing
+from .auth import ThrottledAdminAuthenticationForm
 from .forms import (
     DealerTierOptionPriceForm,
     DealerTierOptionPriceFormSet,
@@ -47,8 +61,6 @@ from .forms import (
     label_money_field,
     money,
 )
-from . import pricing
-from .auth import ThrottledAdminAuthenticationForm
 from .models import (
     DealerTierOptionPrice,
     Fee,
@@ -56,7 +68,6 @@ from .models import (
     OptionValue,
     ProductCompliance,
 )
-
 
 # The merchant console mounts on the same host as the public API, so
 # `/admin/login/` is a crawlable 200. One header on the way out keeps the whole
@@ -155,7 +166,7 @@ def whole_token(term):
     return r"(^|[^0-9A-Za-z])" + re.escape(term) + r"([^0-9A-Za-z]|$)"
 
 
-class SkuRankedSearchMixin:
+class SkuRankedSearchMixin(_ModelAdminBase):
     """The row a merchant typed comes first, not the one that sorts first.
 
     Measured on the live Fuel Lab catalog: typing `71801`, a manufacturer part
@@ -204,7 +215,7 @@ class SkuRankedSearchMixin:
         return ranked.order_by("wsm_match_rank", *ordering), may_have_duplicates
 
 
-class ProductFilteredMixin:
+class ProductFilteredMixin(_ModelAdminBase):
     """A changelist that can be opened for ONE product, from the product itself.
 
     Django refuses a changelist query parameter that no `list_filter` declares,
@@ -227,7 +238,6 @@ class ProductFilteredMixin:
 
 
 class ComposeAdminSite(admin.AdminSite):
-
     # Sign-in goes through Saleor's own login throttle. See
     # saleor/wsm/compose/auth.py: the fork added a password door beside the
     # one Saleor rate-limits, and an unlimited PBKDF2 hash per POST is the
@@ -313,7 +323,7 @@ class ComposeAdminSite(admin.AdminSite):
 site = ComposeAdminSite(name="wsm")
 
 
-class EmptyStateMixin:
+class EmptyStateMixin(_ModelAdminBase):
     """A list with nothing in it says what the thing IS and how to make one.
 
     The merchant walk of 2026-09-08 opened Fees and Kits on a store that has
@@ -328,7 +338,10 @@ class EmptyStateMixin:
     already words it.
     """
 
-    change_list_template = "wsm/admin/change_list_empty_state.html"
+    # Any: shared with ModelAdmin.change_list_template, which is typed
+    # against a stub-only alias that is not importable at runtime; the two
+    # unrelated base classes just need a compatible common type here.
+    change_list_template: ClassVar[Any] = "wsm/admin/change_list_empty_state.html"
     # (what is missing, what the thing is, the label on the one link)
     empty_state: tuple[str, ...] = ()
 
@@ -342,13 +355,17 @@ class EmptyStateMixin:
             and not changelist.query
             and not changelist.get_filters_params()
         ):
-            response.context_data["wsm_empty_state"] = self.empty_state
+            # Reached only once `context_data` already answered `.get("cl")`
+            # above, so this is really the TemplateResponse admin renders.
+            templated = cast(TemplateResponse, response)
+            assert templated.context_data is not None
+            templated.context_data["wsm_empty_state"] = self.empty_state
             # Django's "Select kit to change" contradicts "No kits yet."
-            response.context_data["title"] = capfirst(self.opts.verbose_name_plural)
+            templated.context_data["title"] = capfirst(self.opts.verbose_name_plural)
         return response
 
 
-class WsmAdminMixin:
+class WsmAdminMixin(_ModelAdminBase):
     """Saleor's User has no `has_module_perms`, so the admin cannot ask for one.
 
     `PermissionsMixin` in saleor/permission/models.py implements `has_perm` and
@@ -394,9 +411,9 @@ def _dealer_delta_prefetch():
         "tier_deltas",
         queryset=DealerTierOptionPrice.objects.annotate(
             wsm_group_name=Subquery(
-                DealerGroup.objects.filter(code=OuterRef("tier_group")).values(
-                    "name"
-                )[:1]
+                DealerGroup.objects.filter(code=OuterRef("tier_group")).values("name")[
+                    :1
+                ]
             )
         ).order_by("tier_group"),
     )
@@ -479,9 +496,7 @@ class OptionValueInline(admin.TabularInline):
 
     def get_formset(self, request, obj=None, **kwargs):
         formset = super().get_formset(request, obj, **kwargs)
-        label_money_field(
-            formset, "price_delta", obj.product_id if obj else None
-        )
+        label_money_field(formset, "price_delta", obj.product_id if obj else None)
         return formset
 
 
@@ -533,7 +548,13 @@ class OptionSetAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
         # One annotated query, not one COUNT per row.
         return super().get_queryset(request).annotate(_values=Count("values"))
 
-    def get_form(self, request, obj=None, **kwargs):
+    def get_form(
+        self,
+        request: HttpRequest,
+        obj: Any | None = None,
+        change: bool = False,
+        **kwargs: Any,
+    ) -> type[ModelForm]:
         """Say what the markup in the help field DOES, without touching the data.
 
         The stored text is not rewritten and not sanitised: a merchant who wrote
@@ -551,7 +572,9 @@ class OptionSetAdmin(ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
     @admin.display(description="Product", ordering="product__name")
     def product_name(self, obj):
         return format_html(
-            '<a href="{}">{}</a>', self.product_url(obj.product), _cell(obj.product.name)
+            '<a href="{}">{}</a>',
+            self.product_url(obj.product),
+            _cell(obj.product.name),
         )
 
     @admin.display(description="Question", ordering="name")
@@ -600,9 +623,7 @@ class OptionValueAdmin(WsmAdminMixin, admin.ModelAdmin):
 
 
 @admin.register(Fee, site=site)
-class FeeAdmin(
-    EmptyStateMixin, ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin
-):
+class FeeAdmin(EmptyStateMixin, ProductFilteredMixin, WsmAdminMixin, admin.ModelAdmin):
     """A charge, in a merchant's words. See FeeForm for the labels.
 
     The hidden variant is created by the first configured add, never by hand, so
@@ -667,7 +688,9 @@ class FeeAdmin(
     @admin.display(description="Product", ordering="product__name")
     def product_name(self, obj):
         return format_html(
-            '<a href="{}">{}</a>', self.product_url(obj.product), _cell(obj.product.name)
+            '<a href="{}">{}</a>',
+            self.product_url(obj.product),
+            _cell(obj.product.name),
         )
 
     @admin.display(description="Charged as", ordering="basis")
@@ -782,9 +805,7 @@ FEE_CARRIER_PRODUCT_TYPE_SLUG = "wsm-fee"
 
 
 @admin.register(Product, site=site)
-class ComposeProductPickerAdmin(
-    SkuRankedSearchMixin, WsmAdminMixin, admin.ModelAdmin
-):
+class ComposeProductPickerAdmin(SkuRankedSearchMixin, WsmAdminMixin, admin.ModelAdmin):
     """Read-only product list, so the option-set lookup popup resolves.
 
     Registered because `autocomplete_fields` needs a changelist to search,
@@ -818,9 +839,7 @@ class ComposeProductPickerAdmin(
         # annotation is NULL rather than 0.
         if not count:
             return "-"
-        url = reverse(
-            f"{self.admin_site.name}:wsm_compose_{model_name}_changelist"
-        )
+        url = reverse(f"{self.admin_site.name}:wsm_compose_{model_name}_changelist")
         return format_html(
             '<a href="{}?product__id__exact={}">{}</a>', url, obj.pk, count
         )

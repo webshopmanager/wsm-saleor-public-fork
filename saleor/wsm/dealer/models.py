@@ -138,9 +138,7 @@ class TierPrice(models.Model):
         "product.ProductVariant",
         related_name="wsm_tier_prices",
         on_delete=models.CASCADE,
-        help_text=(
-            "The exact SKU this price is for. Search by product name or SKU."
-        ),
+        help_text=("The exact SKU this price is for. Search by product name or SKU."),
     )
     group = models.ForeignKey(
         DealerGroup,

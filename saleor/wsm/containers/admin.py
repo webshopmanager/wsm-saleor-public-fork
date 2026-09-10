@@ -17,6 +17,8 @@ slugs up in a DIFFERENT application first. The form below offers the store's own
 product attributes, by name, and writes the same JSON list back.
 """
 
+from typing import cast
+
 from django import forms
 from django.contrib import admin
 from django.db.models import Count, Q
@@ -88,12 +90,15 @@ class SeriesConfigForm(forms.ModelForm):
         if self.instance.pk and self.instance.partitioning_axis:
             held.append(self.instance.partitioning_axis)
         choices = axis_choices(held)
-        self.fields["axes"].choices = choices
+        cast(forms.MultipleChoiceField, self.fields["axes"]).choices = choices
         # Never a pre-selected first attribute: an empty choice is what makes
         # "required" mean the merchant chose, rather than the merchant not
         # noticing. The model's own rules still decide whether the choice is a
         # legal one for a published series.
-        self.fields["partitioning_axis"].choices = [("", "---------"), *choices]
+        cast(forms.ChoiceField, self.fields["partitioning_axis"]).choices = [
+            ("", "---------"),
+            *choices,
+        ]
         self.fields["partitioning_axis"].help_text = SeriesConfig._meta.get_field(
             "partitioning_axis"
         ).help_text
@@ -103,7 +108,9 @@ class SeriesConfigForm(forms.ModelForm):
     def clean_axes(self):
         """Back to a JSON list, in the order the merchant was shown."""
         chosen = set(self.cleaned_data["axes"])
-        return [slug for slug, _ in self.fields["axes"].choices if slug in chosen]
+        axes_field = cast(forms.MultipleChoiceField, self.fields["axes"])
+        choices = cast(list[tuple[str, str]], axes_field.choices)
+        return [slug for slug, _ in choices if slug in chosen]
 
 
 SERIES_DERIVED_NOTE = (
@@ -136,7 +143,13 @@ class SeriesConfigAdmin(PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin):
             },
         )
     ]
-    list_display = ("collection_name", "brand", "axes_display", "partitioning_axis", "published")
+    list_display = (
+        "collection_name",
+        "brand",
+        "axes_display",
+        "partitioning_axis",
+        "published",
+    )
     list_filter = ("published",)
     list_select_related = ("collection",)
     search_fields = ("brand", "collection__slug", "collection__name")
@@ -211,9 +224,9 @@ class KitMemberRuleInline(WsmAdminMixin, admin.TabularInline):
         request._wsm_kit = obj
         formset = super().get_formset(request, obj, **kwargs)
         if obj is None or not obj.members.exists():
-            formset.form.base_fields["subject"].help_text = (
-                "Add the parts below first, save, then write the rules."
-            )
+            formset.form.base_fields[
+                "subject"
+            ].help_text = "Add the parts below first, save, then write the rules."
         return formset
 
     def _members(self, request):

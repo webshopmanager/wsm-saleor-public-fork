@@ -23,6 +23,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
+from typing import cast
 
 from .. import money
 from ..compose import pricing as compose_pricing
@@ -285,9 +286,7 @@ def kit_fee_rows(priced, fees_by_variant):
         by_id = {fee.pk: fee for fee in fees}
         for row in rows:
             quantity = (
-                line.line_quantity
-                if row["apply_to"] == compose_pricing.PER_UNIT
-                else 1
+                line.line_quantity if row["apply_to"] == compose_pricing.PER_UNIT else 1
             )
             held = charged.get(row["id"])
             if held is None:
@@ -323,7 +322,7 @@ def member_fees(priced, database_connection_name=None):
     """
     from ..compose.models import Fee
 
-    by_product = {}
+    by_product: dict[int, list[Fee]] = {}
     fees = Fee.objects.filter(
         product_id__in={line.member.variant.product_id for line in priced.lines},
         required=True,
@@ -370,11 +369,17 @@ def add_kit_to_checkout(
     from ...core.utils.metadata_manager import MetadataItem
     from ...graphql.checkout.mutations.utils import CheckoutLineData
     from ...plugins.manager import get_plugins_manager
+    from ...product.models import ProductVariant
     from ..checkout import check_addable
     from ..compose.lines import META_CID, fee_line, private_stamps
     from ..dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
     from ..dealer.no_stacking import PRICE_OVERRIDE_REASON as DEALER_REASON
     from .models import KitRulesRefused, evaluate_rules
+
+    def _variant(line):
+        # `Member.variant` is deliberately typed `object` (see the class
+        # docstring); in this function it is always a real ProductVariant.
+        return cast(ProductVariant, line.member.variant)
 
     priced = price_kit(
         kit.pricing_members(checkout.channel, variant_ids),
@@ -389,9 +394,7 @@ def add_kit_to_checkout(
     # before a single line is written. A kit that breaks one is refused WHOLE,
     # in the merchant's words: a combination they said cannot be sold is never
     # quietly re-priced into one that can, and half a kit is worse than none.
-    rules, broken = evaluate_rules(
-        kit, [line.member.variant.pk for line in priced.lines]
-    )
+    rules, broken = evaluate_rules(kit, [_variant(line).pk for line in priced.lines])
     if broken:
         raise KitRulesRefused(broken)
 
@@ -408,7 +411,7 @@ def add_kit_to_checkout(
             "collection": collection_slug,
             "group": group_id,
             "quantity": quantity,
-            "variants": sorted(line.member.variant.pk for line in priced.lines),
+            "variants": sorted(_variant(line).pk for line in priced.lines),
         },
         sort_keys=True,
     )
@@ -420,7 +423,7 @@ def add_kit_to_checkout(
         # One id per MEMBER line, not one per kit: a charge hangs under the part
         # that owes it, and a single kit-wide id would hang a core deposit under
         # every part in the cart.
-        cid_by_variant[line.member.variant.pk] = cid = str(uuid.uuid4())
+        cid_by_variant[_variant(line).pk] = cid = str(uuid.uuid4())
         metadata = [
             MetadataItem(META_GROUP, group_id),
             MetadataItem(
@@ -441,7 +444,7 @@ def add_kit_to_checkout(
             reason = DEALER_REASON
         lines_data.append(
             CheckoutLineData(
-                variant_id=str(line.member.variant.pk),
+                variant_id=str(_variant(line).pk),
                 quantity=line.line_quantity,
                 quantity_to_update=True,
                 custom_price=Decimal(line.unit_cents) / 100,
@@ -534,7 +537,7 @@ def add_kit_to_checkout(
 
     stamped = []
     for line in priced.lines:
-        row = ours.get(line.member.variant.pk)
+        row = ours.get(_variant(line).pk)
         if row is None:
             continue
         # What MP3 re-derives this line from on every later recalculation. It is
@@ -546,7 +549,7 @@ def add_kit_to_checkout(
         # own quantity is the kit's times the member's, and dividing it back out
         # is a guess the moment a shopper edits it.
         row.store_value_in_private_metadata(
-            {META_KIT: kit_stamp, META_CID: cid_by_variant[line.member.variant.pk]}
+            {META_KIT: kit_stamp, META_CID: cid_by_variant[_variant(line).pk]}
         )
         stamped.append(row)
         if not line.on_tier:

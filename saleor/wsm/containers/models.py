@@ -96,7 +96,9 @@ class SeriesConfigQuerySet(models.QuerySet):
         join to, and the clear rides in the same transaction as the delete so a
         failed delete cannot leave a live series with no row behind it.
         """
-        collections = [config.collection for config in self.select_related("collection")]
+        collections = [
+            config.collection for config in self.select_related("collection")
+        ]
         with transaction.atomic():
             deleted = super().delete(*args, **kwargs)
             for collection in collections:
@@ -144,17 +146,14 @@ class SeriesConfig(models.Model):
     # A series spans many categories and exactly ONE brand (ruled 2026-09-08).
     brand = models.CharField(
         max_length=250,
-        help_text=(
-            "The one brand this series covers. A series is never mixed-brand."
-        ),
+        help_text=("The one brand this series covers. A series is never mixed-brand."),
     )
     # Attribute slugs, in the order the configurator asks them.
     axes = models.JSONField(
         default=list,
         blank=True,
         help_text=(
-            "The questions the configurator asks, in order, as product "
-            "attribute slugs."
+            "The questions the configurator asks, in order, as product attribute slugs."
         ),
     )
     partitioning_axis = models.CharField(
@@ -391,7 +390,7 @@ class KitConfig(models.Model):
         return f"{self.collection.name} bundle discount ({percent}%)"
 
     def _members_in_order(self):
-        """This kit's members with their variants, from a prefetch when there is one.
+        """The kit's members with their variants, from a prefetch when there is one.
 
         `select_related` on a related manager builds a NEW queryset, so it
         ignores a `prefetch_related` that already fetched exactly these rows.
@@ -497,10 +496,7 @@ class KitMember(models.Model):
         # `ProductVariant.__str__` is the variant name, which is the string
         # "Base" on every single-variant product in the fleet.
         variant = self.variant
-        return (
-            f"{self.quantity} x {variant.product.name} "
-            f"[{variant.sku or 'no SKU'}]"
-        )
+        return f"{self.quantity} x {variant.product.name} [{variant.sku or 'no SKU'}]"
 
 
 # --- cross-member rules -------------------------------------------------------
@@ -594,9 +590,7 @@ class KitMemberRule(models.Model):
         """Refuse a rule reaching outside its own kit: nobody could satisfy it."""
         super().clean()
         if self.subject_id and self.kit_id and self.subject.kit_id != self.kit_id:
-            raise ValidationError(
-                {"subject": "that part is not in this kit"}
-            )
+            raise ValidationError({"subject": "that part is not in this kit"})
 
     @property
     def target_variant_ids(self):

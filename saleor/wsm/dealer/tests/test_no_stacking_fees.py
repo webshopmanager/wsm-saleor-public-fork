@@ -130,9 +130,7 @@ def fee_variant(product_type, category, channel_USD):
 @pytest.fixture
 def hundred_off(channel_USD):
     """100.00 off the whole order, the shape probe P10 used."""
-    voucher = Voucher.objects.create(
-        name="100 off", type=VoucherType.ENTIRE_ORDER
-    )
+    voucher = Voucher.objects.create(name="100 off", type=VoucherType.ENTIRE_ORDER)
     VoucherCode.objects.create(voucher=voucher, code="HUNDRED")
     VoucherChannelListing.objects.create(
         voucher=voucher, channel=channel_USD, discount=Money(Decimal(100), USD)
@@ -175,9 +173,7 @@ def cart(checkout, merch_variant, fee_variant, channel_USD, address):
                 Decimal("400.00") if dealer else MERCH_UNIT
             ),
             private_metadata=(
-                {LINE_METADATA_KEY: json.dumps({"group": "dealer-1"})}
-                if dealer
-                else {}
+                {LINE_METADATA_KEY: json.dumps({"group": "dealer-1"})} if dealer else {}
             ),
         )
         fee_line = CheckoutLine.objects.create(
@@ -246,9 +242,7 @@ def test_a_voucher_finds_nothing_to_discount_on_a_dealer_line_and_its_charge(
     by_line = propagated(checkout_info, lines_info)
     assert by_line[merch_line.pk] == Money(Decimal("400.00"), USD)
     assert by_line[fee_line.pk] == Money(FEE_UNIT, USD)
-    assert checkout_total(checkout_info, lines_info) == Money(
-        Decimal("549.00"), USD
-    )
+    assert checkout_total(checkout_info, lines_info) == Money(Decimal("549.00"), USD)
 
 
 def test_a_fixed_voucher_lands_entirely_on_the_retail_line_not_the_charge(
@@ -268,14 +262,10 @@ def test_a_fixed_voucher_lands_entirely_on_the_retail_line_not_the_charge(
     by_line = propagated(checkout_info, lines_info)
     assert by_line[merch_line.pk] == Money(Decimal("400.00"), USD)
     assert by_line[fee_line.pk] == Money(FEE_UNIT, USD)
-    assert checkout_total(checkout_info, lines_info) == Money(
-        Decimal("549.00"), USD
-    )
+    assert checkout_total(checkout_info, lines_info) == Money(Decimal("549.00"), USD)
 
 
-def test_a_percentage_voucher_is_sized_on_the_merchandise_alone(
-    cart, ten_percent_off
-):
+def test_a_percentage_voucher_is_sized_on_the_merchandise_alone(cart, ten_percent_off):
     """Ten percent of 500.00, not of 649.00: the charge is not in the base.
 
     This is the AMOUNT half. Sizing on the whole cart and then spreading only

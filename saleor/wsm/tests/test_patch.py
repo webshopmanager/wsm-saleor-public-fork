@@ -153,6 +153,7 @@ def test_the_fork_touches_exactly_the_allowed_upstream_files():
     the two tests cannot drift apart. Diffed against the working tree rather than
     HEAD so an uncommitted stray edit fails too.
     """
+
     # given / when. Skip only when there is no git at all (a wheel, a tarball).
     # A git checkout that cannot see the base object is a shallow clone, and a
     # shallow clone silently skipping the one test that enforces the footprint
@@ -218,7 +219,6 @@ def test_every_pinned_patch_carries_a_source_digest():
 
 
 def test_a_body_that_moved_is_a_boot_error_not_a_mispriced_checkout(monkeypatch):
-    import pytest as _pytest
     from django.core.exceptions import ImproperlyConfigured
 
     from .. import patches
@@ -226,12 +226,11 @@ def test_a_body_that_moved_is_a_boot_error_not_a_mispriced_checkout(monkeypatch)
     name = "saleor.checkout.calculations._fetch_checkout_prices_if_expired"
     monkeypatch.setitem(patches.SOURCE, name, "0" * 64)
 
-    with _pytest.raises(ImproperlyConfigured, match="written against"):
+    with pytest.raises(ImproperlyConfigured, match="written against"):
         patches.install_guard(name, lambda original: original)
 
 
 def test_a_patch_with_no_digest_at_all_is_a_boot_error(monkeypatch):
-    import pytest as _pytest
     from django.core.exceptions import ImproperlyConfigured
 
     from .. import patches
@@ -239,5 +238,5 @@ def test_a_patch_with_no_digest_at_all_is_a_boot_error(monkeypatch):
     name = "saleor.checkout.calculations._fetch_checkout_prices_if_expired"
     monkeypatch.delitem(patches.SOURCE, name)
 
-    with _pytest.raises(ImproperlyConfigured, match="no source digest"):
+    with pytest.raises(ImproperlyConfigured, match="no source digest"):
         patches.install_guard(name, lambda original: original)

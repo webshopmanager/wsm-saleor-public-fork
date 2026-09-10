@@ -79,7 +79,9 @@ def survey(channel_slug):
     ids = set(rows)
 
     ordered = set(
-        OrderLine.objects.filter(variant_id__in=ids).values_list("variant_id", flat=True)
+        OrderLine.objects.filter(variant_id__in=ids).values_list(
+            "variant_id", flat=True
+        )
     )
     reasons = {
         "in a checkout": set(
@@ -117,9 +119,9 @@ def survey(channel_slug):
     ambiguous = set().union(*reasons.values()) - ordered
     deletable = ids - ordered - ambiguous
 
-    why = Counter()
+    why: Counter[str] = Counter()
     for reason, hit in reasons.items():
-        for variant_id in hit - ordered:
+        for _variant_id in hit - ordered:
             why[reason] += 1
 
     return {
@@ -140,7 +142,9 @@ def purge(channel_slug):
     doomed = report["deletable_ids"]
 
     with transaction.atomic():
-        found = list(ProductVariant.objects.filter(id__in=doomed).values("id", "sku", "metadata"))
+        found = list(
+            ProductVariant.objects.filter(id__in=doomed).values("id", "sku", "metadata")
+        )
         missing = len(doomed) - len(found)
         if missing:
             raise CommandError(
@@ -202,7 +206,9 @@ class Command(BaseCommand):
             if isinstance(value, list):
                 shown = ", ".join(value[:10])
                 more = f" (+{len(value) - 10} more)" if len(value) > 10 else ""
-                self.stdout.write(f"  {key}: {len(value)}" + (f" [{shown}{more}]" if value else ""))
+                self.stdout.write(
+                    f"  {key}: {len(value)}" + (f" [{shown}{more}]" if value else "")
+                )
             else:
                 self.stdout.write(f"  {key}: {value}")
         if not options["apply"]:

@@ -40,19 +40,27 @@ def credit_sets():
             id=1,
             name="Cam bearings",
             sort_order=1,
-            values=(Value(id=11, name="Delete", sku_fragment="NCB", price_delta=CAM_BEARINGS),),
+            values=(
+                Value(
+                    id=11, name="Delete", sku_fragment="NCB", price_delta=CAM_BEARINGS
+                ),
+            ),
         ),
         OptionSet(
             id=2,
             name="Plug kit",
             sort_order=2,
-            values=(Value(id=22, name="Delete", sku_fragment="NPK", price_delta=PLUG_KIT),),
+            values=(
+                Value(id=22, name="Delete", sku_fragment="NPK", price_delta=PLUG_KIT),
+            ),
         ),
         OptionSet(
             id=3,
             name="Gasket set",
             sort_order=3,
-            values=(Value(id=33, name="Delete", sku_fragment="NGS", price_delta=GASKET_SET),),
+            values=(
+                Value(id=33, name="Delete", sku_fragment="NGS", price_delta=GASKET_SET),
+            ),
         ),
     ]
 
@@ -91,7 +99,9 @@ def test_fixture_table(sku, base, chosen, expected_cents):
 
 def test_all_three_credits_sum_they_do_not_replace():
     """The multi-credit summation the dd60 report was filed about."""
-    result = price_configured(STAGE_2_BASE, credit_sets(), pick(1, 2, 3), base_sku="L600084")
+    result = price_configured(
+        STAGE_2_BASE, credit_sets(), pick(1, 2, 3), base_sku="L600084"
+    )
     assert result.unit_cents == 349400
     assert [line["price_delta"] for line in result.snapshot["lines"]] == [
         CAM_BEARINGS,
@@ -151,7 +161,10 @@ def test_a_shallower_dealer_credit_never_costs_the_dealer_more_than_retail():
     result = price_configured(STAGE_2_BASE, gasket_sets(-30000), pick(3), "dealer-1")
 
     assert result.unit_cents == 355399
-    assert price_configured(STAGE_2_BASE, gasket_sets(-30000), pick(3)).unit_cents == 355399
+    assert (
+        price_configured(STAGE_2_BASE, gasket_sets(-30000), pick(3)).unit_cents
+        == 355399
+    )
     assert result.snapshot["tier_applied"] is False
 
 
@@ -170,7 +183,9 @@ def test_tier_row_on_a_credit_is_verbatim_larger_credit():
             ),
         )
     ]
-    assert price_configured(STAGE_2_BASE, sets, pick(3), "dealer-1").unit_cents == 349899
+    assert (
+        price_configured(STAGE_2_BASE, sets, pick(3), "dealer-1").unit_cents == 349899
+    )
 
 
 def positive_value_sets(tier_cents):
@@ -183,7 +198,9 @@ def positive_value_sets(tier_cents):
                     id=33,
                     name="Titanium",
                     price_delta=10000,
-                    tier_deltas=(TierDelta(tier_group="dealer-1", price_delta=tier_cents),),
+                    tier_deltas=(
+                        TierDelta(tier_group="dealer-1", price_delta=tier_cents),
+                    ),
                 ),
             ),
         )
@@ -226,12 +243,16 @@ def test_a_tier_row_above_a_zero_retail_delta_is_refused():
 
 
 def test_a_credit_on_a_free_value_still_stands():
-    result = price_configured(STAGE_2_BASE, free_value_sets(-5000), FREE_PICK, "dealer-1")
+    result = price_configured(
+        STAGE_2_BASE, free_value_sets(-5000), FREE_PICK, "dealer-1"
+    )
     assert result.unit_cents == 399899 - 5000
 
 
 def test_below_retail_tier_on_a_positive_delta_is_charged():
-    result = price_configured(STAGE_2_BASE, positive_value_sets(6000), pick(3), "dealer-1")
+    result = price_configured(
+        STAGE_2_BASE, positive_value_sets(6000), pick(3), "dealer-1"
+    )
     assert result.unit_cents == 399899 + 6000
 
 
@@ -242,7 +263,9 @@ def test_no_tier_group_never_consults_tier_rows():
 
 
 def test_tier_group_that_matches_nothing_prices_at_retail_and_says_so():
-    result = price_configured(STAGE_2_BASE, positive_value_sets(6000), pick(3), "dealer-9")
+    result = price_configured(
+        STAGE_2_BASE, positive_value_sets(6000), pick(3), "dealer-9"
+    )
     assert result.unit_cents == 399899 + 10000
     assert result.snapshot["tier_applied"] is False
 
@@ -270,12 +293,16 @@ def test_required_image_prompt_left_empty_refuses():
 
 def test_unknown_value_refuses():
     with pytest.raises(UnknownValueError):
-        price_configured(STAGE_2_BASE, credit_sets(), [Selection(set_id=1, value_ids=(999,))])
+        price_configured(
+            STAGE_2_BASE, credit_sets(), [Selection(set_id=1, value_ids=(999,))]
+        )
 
 
 def test_unknown_option_set_refuses():
     with pytest.raises(UnknownValueError):
-        price_configured(STAGE_2_BASE, credit_sets(), [Selection(set_id=99, value_ids=(11,))])
+        price_configured(
+            STAGE_2_BASE, credit_sets(), [Selection(set_id=99, value_ids=(11,))]
+        )
 
 
 def test_choice_one_takes_exactly_one_value():
@@ -298,17 +325,22 @@ def test_choice_one_takes_exactly_one_value():
     [(pricing.PER_UNIT, 2478), (pricing.PER_LINE, 2477)],
 )
 def test_percent_fee_unit_versus_line(apply_to, expected_fee_total):
-    fee = Fee(id=1, label="Handling", basis=pricing.PERCENT, amount=825, apply_to=apply_to)
+    fee = Fee(
+        id=1, label="Handling", basis=pricing.PERCENT, amount=825, apply_to=apply_to
+    )
     result = price_configured(10010, [], [], fees=[fee], quantity=3)
     assert result.unit_cents == 10010
     assert result.fee_total_cents == expected_fee_total
 
 
 @pytest.mark.parametrize(
-    ("apply_to", "expected_fee_total"), [(pricing.PER_UNIT, 7500), (pricing.PER_LINE, 2500)]
+    ("apply_to", "expected_fee_total"),
+    [(pricing.PER_UNIT, 7500), (pricing.PER_LINE, 2500)],
 )
 def test_fixed_fee_unit_versus_line(apply_to, expected_fee_total):
-    fee = Fee(id=1, label="Crating", basis=pricing.FIXED, amount=2500, apply_to=apply_to)
+    fee = Fee(
+        id=1, label="Crating", basis=pricing.FIXED, amount=2500, apply_to=apply_to
+    )
     result = price_configured(10000, [], [], fees=[fee], quantity=3)
     assert result.fee_total_cents == expected_fee_total
 
@@ -323,7 +355,9 @@ def test_percent_fees_never_compound_on_each_other():
 
 
 def test_declinable_fee_is_not_charged_unless_accepted():
-    fee = Fee(id=7, label="Liftgate", amount=5000, required=False, decline_label="No liftgate")
+    fee = Fee(
+        id=7, label="Liftgate", amount=5000, required=False, decline_label="No liftgate"
+    )
     assert price_configured(10000, [], [], fees=[fee]).fee_total_cents == 0
     accepted = price_configured(10000, [], [], fees=[fee], accepted_fee_ids=[7])
     assert accepted.fee_total_cents == 5000

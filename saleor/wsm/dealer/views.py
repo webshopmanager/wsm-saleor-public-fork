@@ -42,11 +42,15 @@ from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...plugins.manager import get_plugins_manager
 from ...product.models import ProductVariant, ProductVariantChannelListing
 from ..checkout import LineRefused, check_addable, whole_number
-from ..http import buyer_mismatch, global_pk, refuses_malformed_ids, storefront_key_required
+from ..http import (
+    buyer_mismatch,
+    global_pk,
+    refuses_malformed_ids,
+    storefront_key_required,
+)
 from . import pricing
 from .no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
 from .tax import bind_tax_exemption
-
 
 # Saleor routes every read it can to the replica and guards the writer, so a
 # view that reads the writer without saying so raises (`UnsafeWriterAccessError`,
@@ -398,7 +402,8 @@ def dealer_line_reprice(request):
         {
             "lineId": graphene.Node.to_global_id("CheckoutLine", line.pk),
             "unitPrice": _money(
-                line.price_override if line.price_override is not None else base, channel
+                line.price_override if line.price_override is not None else base,
+                channel,
             ),
             "basePrice": _money(base, channel),
             "dealerPrice": _money(winner.amount, channel) if winner else None,

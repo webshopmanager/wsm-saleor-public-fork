@@ -75,12 +75,10 @@ PINNED = {
         "saleor.order.base_calculations",
         "saleor.plugins.manager",
     ),
-    "saleor.order.base_calculations."
-    "propagate_order_discount_on_order_lines_prices": (
+    "saleor.order.base_calculations.propagate_order_discount_on_order_lines_prices": (
         "saleor.order.base_calculations",
     ),
-    "saleor.discount.utils.promotion."
-    "create_discount_objects_for_order_promotions": (
+    "saleor.discount.utils.promotion.create_discount_objects_for_order_promotions": (
         "saleor.discount.utils.promotion",
         "saleor.discount.utils.checkout",
         "saleor.discount.utils.order",

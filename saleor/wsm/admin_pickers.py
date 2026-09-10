@@ -24,9 +24,11 @@ the things a merchant does edit.
 """
 
 from types import MethodType
+from typing import TYPE_CHECKING
 
 from django.contrib import admin
 from django.contrib.admin.exceptions import NotRegistered
+from django.contrib.admin.options import BaseModelAdmin
 from django.contrib.admin.views.autocomplete import AutocompleteJsonView
 
 from ..account.models import User
@@ -96,7 +98,16 @@ class PickerAdmin(admin.ModelAdmin):
         return False
 
 
-class PickerLabelMixin:
+# Mixed with both ModelAdmin and TabularInline subclasses below, so the
+# fake base for mypy is their real common ancestor. Runtime base stays
+# `object`.
+if TYPE_CHECKING:
+    _BaseModelAdminBase = BaseModelAdmin
+else:
+    _BaseModelAdminBase = object
+
+
+class PickerLabelMixin(_BaseModelAdminBase):
     """Name core objects the merchant's way in every FK widget on this screen.
 
     The widget renders the ALREADY CHOSEN row from `label_from_instance`, which
@@ -113,7 +124,8 @@ class PickerLabelMixin:
         except NotRegistered:
             return formfield
         if isinstance(target, PickerAdmin):
-            formfield.label_from_instance = target.picker_label
+            # Documented Django hook; the stub types it as a plain method.
+            formfield.label_from_instance = target.picker_label  # type: ignore[method-assign]
         return formfield
 
 
@@ -125,7 +137,9 @@ class LabelledAutocompleteJsonView(AutocompleteJsonView):
     """
 
     def serialize_result(self, obj, to_field_name):
-        result = super().serialize_result(obj, to_field_name)
+        # django-stubs' AutocompleteJsonView stub has not caught up with
+        # this Django 5.2 method; it exists at runtime.
+        result = super().serialize_result(obj, to_field_name)  # type: ignore[misc]
         label = getattr(self.model_admin, "picker_label", None)
         if label is not None:
             result["text"] = label(obj)

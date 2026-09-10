@@ -22,12 +22,13 @@ from ....checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from ....checkout.models import CheckoutLine
 from ....plugins.manager import get_plugins_manager
 from ...reprice import reprice
+
 # The one definition of "place the order this checkout is holding", already
 # written for the MP3 suite. A second copy here would be a second thing to keep
 # in step with `create_order_from_checkout`.
 from ...tests.test_reprice import complete
-from ..no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
 from ..models import DealerCustomer
+from ..no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
 from .test_views import (  # noqa: F401
     LINE_URL,
     REPRICE_URL,

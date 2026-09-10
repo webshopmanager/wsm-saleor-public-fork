@@ -101,7 +101,10 @@ def test_the_fee_list_shows_money_with_its_currency(client, merchant, product):
     """A charge with no currency on it is a number a merchant has to guess at."""
     client.force_login(merchant, backend=BACKEND)
     Fee.objects.create(
-        product=product, label="Freight crating", basis=pricing.FIXED, amount=Decimal("149")
+        product=product,
+        label="Freight crating",
+        basis=pricing.FIXED,
+        amount=Decimal(149),
     )
 
     body = client.get("/admin/wsm_compose/fee/").content.decode()
@@ -129,7 +132,7 @@ def test_the_option_value_list_signs_the_price_change(client, merchant, product)
     client.force_login(merchant, backend=BACKEND)
     option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
     OptionValue.objects.create(
-        option_set=option_set, name="Black", price_delta=Decimal("25")
+        option_set=option_set, name="Black", price_delta=Decimal(25)
     )
     OptionValue.objects.create(
         option_set=option_set, name="Omit filter", price_delta=Decimal("-29.99")
@@ -152,7 +155,9 @@ def test_no_lookup_shows_a_bare_row_id(client, merchant):
 
     offenders = {}
     for model, model_admin in merchant_site._registry.items():
-        holders = [model_admin] + [inline(model, merchant_site) for inline in model_admin.inlines]
+        holders = [model_admin] + [
+            inline(model, merchant_site) for inline in model_admin.inlines
+        ]
         for holder in holders:
             if getattr(holder, "raw_id_fields", ()):
                 offenders[type(holder).__name__] = holder.raw_id_fields
@@ -180,12 +185,10 @@ def test_a_list_opens_for_one_product(client, merchant, product_list):
     OptionSet.objects.create(product=first, name="Tank size", label="Tank size")
     OptionSet.objects.create(product=second, name="Pump", label="Pump wiring")
     Fee.objects.create(
-        product=first, label="Crating", basis=pricing.FIXED, amount=Decimal("149")
+        product=first, label="Crating", basis=pricing.FIXED, amount=Decimal(149)
     )
 
-    sets = client.get(
-        f"/admin/wsm_compose/optionset/?product__id__exact={first.pk}"
-    )
+    sets = client.get(f"/admin/wsm_compose/optionset/?product__id__exact={first.pk}")
     fees = client.get(f"/admin/wsm_compose/fee/?product__id__exact={second.pk}")
 
     assert sets.status_code == 200
@@ -201,7 +204,7 @@ def test_a_product_row_counts_its_questions_and_charges(client, merchant, produc
     client.force_login(merchant, backend=BACKEND)
     OptionSet.objects.create(product=product, name="Color", label="Colour")
     Fee.objects.create(
-        product=product, label="Crating", basis=pricing.FIXED, amount=Decimal("149")
+        product=product, label="Crating", basis=pricing.FIXED, amount=Decimal(149)
     )
 
     body = client.get("/admin/product/product/").content.decode()
@@ -221,7 +224,7 @@ def test_pricing_the_same_dealer_group_twice_says_so_in_english(
     DealerGroup.objects.create(code="dealer-1", name="Dealer 1")
     option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
     value = OptionValue.objects.create(
-        option_set=option_set, name="Black", price_delta=Decimal("25")
+        option_set=option_set, name="Black", price_delta=Decimal(25)
     )
 
     response = client.post(
@@ -265,7 +268,7 @@ def test_the_fee_carriers_are_not_in_the_product_lookup(
         product=product,
         label="Crating",
         basis=pricing.FIXED,
-        amount=Decimal("149"),
+        amount=Decimal(149),
     )
     carrier = fee.ensure_variant(channel_USD).product
 
@@ -318,7 +321,9 @@ def test_the_question_screen_reports_each_choices_dealer_prices(
     )
     bare = _priced_choice(option_set, "Silver", "0")
 
-    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+    body = client.get(
+        f"/admin/wsm_compose/optionset/{option_set.pk}/change/"
+    ).content.decode()
 
     assert "Dealer 1 -50.00 USD" in body
     assert "Dealer 2 -75.00 USD" in body
@@ -336,7 +341,9 @@ def test_the_dealer_price_column_names_the_group_not_its_code(
     option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
     _priced_choice(option_set, "Black", "25", ("dealer-1", "-50"))
 
-    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+    body = client.get(
+        f"/admin/wsm_compose/optionset/{option_set.pk}/change/"
+    ).content.decode()
 
     assert "Dealer 1 -50.00 USD" in body
 
@@ -360,9 +367,7 @@ def test_the_dealer_price_column_costs_no_query_per_choice(
         assert client.get(url).status_code == 200
 
     for name in ("Silver", "Red", "Gunmetal"):
-        _priced_choice(
-            option_set, name, "25", ("dealer-1", "-50"), ("dealer-2", "-75")
-        )
+        _priced_choice(option_set, name, "25", ("dealer-1", "-50"), ("dealer-2", "-75"))
 
     with CaptureQueriesContext(connection) as four_choices:
         assert client.get(url).status_code == 200
@@ -374,7 +379,7 @@ def test_the_dealer_price_column_costs_no_query_per_choice(
 
 # --- the shopper-facing help field, which holds markup on purpose ------------
 
-MARKUP_NOTE = "Pick a <strong>Color</strong>. See the <a href=\"/sizing\">chart</a>."
+MARKUP_NOTE = 'Pick a <strong>Color</strong>. See the <a href="/sizing">chart</a>.'
 
 
 @pytest.mark.django_db
@@ -391,7 +396,9 @@ def test_the_help_field_says_that_its_markup_is_rendered(client, merchant, produ
         product=product, name="Color", label="Colour", note=MARKUP_NOTE
     )
 
-    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+    body = client.get(
+        f"/admin/wsm_compose/optionset/{option_set.pk}/change/"
+    ).content.decode()
 
     assert "HTML is allowed here and is shown to the shopper as formatted text" in body
     assert "&lt;strong&gt;Color&lt;/strong&gt; reads as a bold Color" in body
@@ -405,7 +412,9 @@ def test_the_help_field_keeps_the_markup_the_merchant_wrote(client, merchant, pr
         product=product, name="Color", label="Colour", note=MARKUP_NOTE
     )
 
-    body = client.get(f"/admin/wsm_compose/optionset/{option_set.pk}/change/").content.decode()
+    body = client.get(
+        f"/admin/wsm_compose/optionset/{option_set.pk}/change/"
+    ).content.decode()
     option_set.refresh_from_db()
 
     assert option_set.note == MARKUP_NOTE
@@ -455,9 +464,7 @@ def _catalog_row(twin_of, name, slug, sku):
 
 
 @pytest.mark.django_db
-def test_the_product_picker_puts_the_typed_part_number_first(
-    client, merchant, product
-):
+def test_the_product_picker_puts_the_typed_part_number_first(client, merchant, product):
     """Measured on Fuel Lab: typing 71801 put the product carrying it fifth.
 
     Four Truxedo covers whose SKUs merely CONTAIN those digits came first,
@@ -515,9 +522,7 @@ FEES = "/admin/wsm_compose/fee/"
 
 @pytest.mark.django_db
 def test_an_empty_fee_list_says_what_a_fee_is(client, merchant):
-    """"0 fees" over a search box and a filter sidebar teaches a merchant
-    nothing about whether the feature is empty or missing.
-    """
+    """Zero fees over a search box and a filter sidebar teaches a merchant nothing about whether the feature is empty or missing."""
     client.force_login(merchant, backend=BACKEND)
 
     body = client.get(FEES).content.decode()
@@ -548,11 +553,9 @@ def test_the_empty_fee_list_is_not_headed_select_fee_to_change(client, merchant)
 
 
 @pytest.mark.django_db
-def test_a_fee_list_with_a_fee_in_it_is_the_ordinary_list(
-    client, merchant, product
-):
+def test_a_fee_list_with_a_fee_in_it_is_the_ordinary_list(client, merchant, product):
     client.force_login(merchant, backend=BACKEND)
-    Fee.objects.create(product=product, label="Freight crating", amount=Decimal("149"))
+    Fee.objects.create(product=product, label="Freight crating", amount=Decimal(149))
 
     body = client.get(FEES).content.decode()
 
@@ -562,12 +565,10 @@ def test_a_fee_list_with_a_fee_in_it_is_the_ordinary_list(
 
 
 @pytest.mark.django_db
-def test_a_search_that_found_nothing_is_not_an_empty_list(
-    client, merchant, product
-):
+def test_a_search_that_found_nothing_is_not_an_empty_list(client, merchant, product):
     """Django already words this one, and it is a different sentence."""
     client.force_login(merchant, backend=BACKEND)
-    Fee.objects.create(product=product, label="Freight crating", amount=Decimal("149"))
+    Fee.objects.create(product=product, label="Freight crating", amount=Decimal(149))
 
     body = client.get(FEES, {"q": "nothing matches this"}).content.decode()
 

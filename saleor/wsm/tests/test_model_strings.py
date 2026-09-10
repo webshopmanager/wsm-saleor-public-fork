@@ -14,7 +14,13 @@ import pytest
 
 from ..compose import pricing
 from ..compose.models import Fee, OptionSet, OptionValue
-from ..containers.models import EXCLUDES, KitConfig, KitMember, KitMemberRule, SeriesConfig
+from ..containers.models import (
+    EXCLUDES,
+    KitConfig,
+    KitMember,
+    KitMemberRule,
+    SeriesConfig,
+)
 from ..dealer.models import DealerCustomer, DealerGroup, TierPrice
 
 pytestmark = pytest.mark.django_db
@@ -39,7 +45,7 @@ def rows(product, variant, collection, customer_user):
             product=product,
             label="Freight crating",
             basis=pricing.FIXED,
-            amount=Decimal("149"),
+            amount=Decimal(149),
         ),
         "series": SeriesConfig.objects.create(collection=collection),
         "kit": kit,
@@ -62,9 +68,7 @@ def test_each_row_says_what_it_is(rows, product, variant, collection, customer_u
     assert str(rows["series"]) == f"Series: {collection.name}"
     assert str(rows["kit"]) == f"Kit: {collection.name}"
     assert str(rows["member"]) == f"2 x {product.name} [{variant.sku}]"
-    assert str(rows["rule"]) == (
-        f"{product.name} [{variant.sku}] cannot be sold with"
-    )
+    assert str(rows["rule"]) == (f"{product.name} [{variant.sku}] cannot be sold with")
 
 
 def test_no_row_introduces_itself_by_a_number(rows):

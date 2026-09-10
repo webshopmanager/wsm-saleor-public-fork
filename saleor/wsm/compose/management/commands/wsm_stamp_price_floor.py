@@ -47,6 +47,4 @@ class Command(BaseCommand):
         for product_id in product_ids:
             if sync_product_stamps(product_id):
                 restamped += 1
-        self.stdout.write(
-            f"{len(product_ids)} products checked, {restamped} restamped"
-        )
+        self.stdout.write(f"{len(product_ids)} products checked, {restamped} restamped")

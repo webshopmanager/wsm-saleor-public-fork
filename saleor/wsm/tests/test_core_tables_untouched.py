@@ -90,7 +90,9 @@ def _statements(sql):
         return [
             statement
             for item in sql
-            for statement in _statements(item[0] if isinstance(item, list | tuple) and item else item)
+            for statement in _statements(
+                item[0] if isinstance(item, list | tuple) and item else item
+            )
         ]
     return [str(sql)]
 
@@ -108,14 +110,22 @@ def _tables(operation, app_label):
         # a managed model still has to be `wsm_`-prefixed.
         if operation.options.get("managed") is False:
             return []
-        return [operation.options.get("db_table") or f"{app_label}_{operation.name.lower()}"]
+        return [
+            operation.options.get("db_table") or f"{app_label}_{operation.name.lower()}"
+        ]
     if isinstance(operation, migrations.AlterModelTable):
         return [operation.table or f"{app_label}_{operation.name.lower()}"]
     if isinstance(operation, migrations.RunSQL):
         found = []
-        for statement in _statements(operation.sql) + _statements(operation.reverse_sql):
+        for statement in _statements(operation.sql) + _statements(
+            operation.reverse_sql
+        ):
             words = statement.replace(";", " ").replace("(", " ").split()
-            found += [w.strip('"') for i, w in enumerate(words[1:]) if words[i].lower() in SQL_TABLE_WORDS]
+            found += [
+                w.strip('"')
+                for i, w in enumerate(words[1:])
+                if words[i].lower() in SQL_TABLE_WORDS
+            ]
         return found
     model_name = getattr(operation, "model_name", None)
     return [f"{app_label}_{model_name.lower()}"] if model_name else []
@@ -157,7 +167,8 @@ def test_fork_migrations_do_not_run_undeclared_python():
     for app_label, name, path, migration in _fork_migrations():
         scanned += 1
         if not any(
-            isinstance(op, migrations.RunPython) for op in _flatten(migration.operations)
+            isinstance(op, migrations.RunPython)
+            for op in _flatten(migration.operations)
         ):
             continue
         lines = path.read_text().splitlines()

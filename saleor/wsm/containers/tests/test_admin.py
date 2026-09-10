@@ -1,5 +1,5 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
-"""Can a merchant operate the series and kit screens?
+"""Whether a merchant can operate the series and kit screens.
 
 The merchant walk of 2026-09-08 found `axes` as a raw JSON textarea, a
 collection field with no lookup behind it, and no help text saying what
@@ -24,9 +24,7 @@ def grant(user, *dotted_permissions):
     for dotted in dotted_permissions:
         app_label, codename = dotted.split(".")
         user.user_permissions.add(
-            Permission.objects.get(
-                content_type__app_label=app_label, codename=codename
-            )
+            Permission.objects.get(content_type__app_label=app_label, codename=codename)
         )
 
 
@@ -49,9 +47,11 @@ def deployed_middleware(settings):
         if "restrict_writer" not in middleware
     ]
 
+
 @pytest.fixture
 def merchant(client, staff_user):
-    assert staff_user.is_staff and not staff_user.is_superuser
+    assert staff_user.is_staff
+    assert not staff_user.is_superuser
     grant(
         staff_user,
         "wsm_containers.view_seriesconfig",
@@ -129,9 +129,7 @@ def test_the_axes_field_saves_the_ticked_questions_as_a_json_list(
     assert form.save().axes == ["color", "size"]
 
 
-def test_a_saved_series_shows_its_questions_already_ticked(
-    collection, color_attribute
-):
+def test_a_saved_series_shows_its_questions_already_ticked(collection, color_attribute):
     series = SeriesConfig.objects.create(
         collection=collection,
         brand="WeatherTech",
@@ -190,9 +188,7 @@ def test_an_unpublished_series_is_never_gated(collection, color_attribute):
 def test_the_series_screen_counts_the_products_in_the_collection(
     merchant, collection, product_list, color_attribute
 ):
-    """Publishing is refused under 2 published members and the screen said
-    nothing about how many there were, so the merchant had to leave to find out.
-    """
+    """Publishing is refused under 2 published members and the screen said nothing about how many there were, so the merchant had to leave to find out."""
     collection.products.add(*product_list)
     series = SeriesConfig.objects.create(
         collection=collection,
@@ -205,7 +201,9 @@ def test_the_series_screen_counts_the_products_in_the_collection(
         f"/admin/wsm_containers/seriesconfig/{series.pk}/change/"
     ).content.decode()
 
-    assert f"{len(product_list)} in the collection, {len(product_list)} published" in body
+    assert (
+        f"{len(product_list)} in the collection, {len(product_list)} published" in body
+    )
 
 
 def test_the_count_tells_an_unsaved_series_where_products_come_from(merchant):
@@ -335,17 +333,16 @@ def test_a_kit_row_says_what_it_takes_off(merchant, collection):
     from decimal import Decimal
 
     from ....product.models import Collection
-
     from ..models import KitConfig
 
     KitConfig.objects.create(
-        collection=collection, discount_kind="percent", discount_amount=Decimal("10")
+        collection=collection, discount_kind="percent", discount_amount=Decimal(10)
     )
 
     KitConfig.objects.create(
         collection=Collection.objects.create(name="Crate kit", slug="crate-kit"),
         discount_kind="fixed",
-        discount_amount=Decimal("25"),
+        discount_amount=Decimal(25),
     )
 
     body = merchant.get("/admin/wsm_containers/kitconfig/").content.decode()
@@ -398,7 +395,9 @@ def kit_with_members(collection, product_list, count=2):
 
     kit = KitConfig.objects.create(collection=collection)
     members = [
-        KitMember.objects.create(kit=kit, variant=product.variants.first(), sort_order=i)
+        KitMember.objects.create(
+            kit=kit, variant=product.variants.first(), sort_order=i
+        )
         for i, product in enumerate(product_list[:count])
     ]
     return kit, members

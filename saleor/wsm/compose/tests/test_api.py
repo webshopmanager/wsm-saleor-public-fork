@@ -14,9 +14,6 @@ from decimal import Decimal
 
 import pytest
 
-from saleor.wsm.compose.models import Fee, OptionSet, OptionValue
-from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
-from saleor.wsm.tests import COMPOSE_HEADERS
 from saleor.wsm.compose.lines import (
     META_CID,
     META_FEE,
@@ -25,6 +22,9 @@ from saleor.wsm.compose.lines import (
     META_SKU,
     PRICE_OVERRIDE_REASON,
 )
+from saleor.wsm.compose.models import Fee, OptionSet, OptionValue
+from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
+from saleor.wsm.tests import COMPOSE_HEADERS
 
 OPTION_SETS_URL = "/wsm/compose/api/storefront/products/saleor/{}/option-sets"
 CONFIGURED_LINE_URL = "/wsm/compose/api/checkout/configured-line"
@@ -122,10 +122,14 @@ def post_line(
 # --- (a) the PDP read ------------------------------------------------------
 
 
-def test_option_sets_returns_the_contract_shape(client, stage_2_kit, omit_parts, crating_fee):
+def test_option_sets_returns_the_contract_shape(
+    client, stage_2_kit, omit_parts, crating_fee
+):
     option_set, values = omit_parts
 
-    response = client.get(OPTION_SETS_URL.format(gid("Product", stage_2_kit.product_id)))
+    response = client.get(
+        OPTION_SETS_URL.format(gid("Product", stage_2_kit.product_id))
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -176,7 +180,9 @@ def test_option_sets_returns_the_contract_shape(client, stage_2_kit, omit_parts,
     ]
 
 
-def test_option_sets_accepts_a_gid_that_lost_its_padding(client, stage_2_kit, omit_parts):
+def test_option_sets_accepts_a_gid_that_lost_its_padding(
+    client, stage_2_kit, omit_parts
+):
     raw = gid("Product", stage_2_kit.product_id).rstrip("=")
 
     assert client.get(OPTION_SETS_URL.format(raw)).status_code == 200
@@ -252,7 +258,9 @@ def test_configured_line_prices_server_side_and_writes_one_line(
     assert fee_line.metadata[META_PARENT] == cid
 
     # The fee's own product is never something a shopper can browse to.
-    fee_listing = fee_line.variant.product.channel_listings.get(channel=checkout.channel)
+    fee_listing = fee_line.variant.product.channel_listings.get(
+        channel=checkout.channel
+    )
     assert fee_listing.visible_in_listings is False
 
 
@@ -318,12 +326,18 @@ def test_configured_line_stays_inside_its_query_budget(
 
     _, values = omit_parts
     selections = [{"set_id": omit_parts[0].pk, "value_ids": [v.pk for v in values]}]
-    post_line(client, checkout, stage_2_kit, selections=selections,
-              accepted=[crating_fee.pk])
+    post_line(
+        client, checkout, stage_2_kit, selections=selections, accepted=[crating_fee.pk]
+    )
 
     with CaptureQueriesContext(connection) as captured:
-        post_line(client, checkout, stage_2_kit, selections=selections,
-                  accepted=[crating_fee.pk])
+        post_line(
+            client,
+            checkout,
+            stage_2_kit,
+            selections=selections,
+            accepted=[crating_fee.pk],
+        )
 
     assert len(captured.captured_queries) <= 45, (
         f"configured add cost {len(captured.captured_queries)} queries"
@@ -525,7 +539,6 @@ def test_option_sets_never_quotes_a_dealer_delta_to_the_public(
 
     assert [v["price_delta"] for v in retail] == retail_deltas
     assert [v["price_delta"] for v in asked] == retail_deltas
-
 
 
 # --- finding 8: a posted quantity that is not a number is a 422, not a 500 ---
@@ -834,7 +847,9 @@ def test_a_second_configured_add_leaves_the_first_adds_lines_alone(
     cids = {stamps[META_CID] for stamps, _ in after_second.values()}
     assert len(cids) == 2
     parents = [
-        stamps[META_PARENT] for stamps, _ in after_second.values() if META_PARENT in stamps
+        stamps[META_PARENT]
+        for stamps, _ in after_second.values()
+        if META_PARENT in stamps
     ]
     assert sorted(parents) == sorted(cids)
 
@@ -889,7 +904,7 @@ def line_body(checkout, variant, option_set, value, **overrides):
 
 
 @pytest.mark.parametrize(
-    "field,value",
+    ("field", "value"),
     [
         ("checkoutId", "garbage"),
         ("checkoutId", gid("Checkout", "not-a-uuid")),
@@ -910,7 +925,8 @@ def test_an_id_that_is_not_an_id_is_refused_rather_than_raised(
     option_set, values = omit_parts
 
     response = post_raw(
-        client, line_body(checkout, stage_2_kit, option_set, values[0], **{field: value})
+        client,
+        line_body(checkout, stage_2_kit, option_set, values[0], **{field: value}),
     )
 
     assert response.status_code == 400, response.content

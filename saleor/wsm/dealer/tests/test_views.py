@@ -34,22 +34,36 @@ def dealer_group(customer_user):
 def tiers(variant, dealer_group):
     TierPrice.objects.bulk_create(
         [
-            TierPrice(variant=variant, group=dealer_group, min_quantity=5, amount=Decimal("8.00")),
-            TierPrice(variant=variant, group=dealer_group, min_quantity=10, amount=Decimal("7.00")),
+            TierPrice(
+                variant=variant,
+                group=dealer_group,
+                min_quantity=5,
+                amount=Decimal("8.00"),
+            ),
+            TierPrice(
+                variant=variant,
+                group=dealer_group,
+                min_quantity=10,
+                amount=Decimal("7.00"),
+            ),
         ]
     )
     return dealer_group
 
 
 def post(client, url, body):
-    return client.post(url, data=json.dumps(body), content_type="application/json", **HEADERS)
+    return client.post(
+        url, data=json.dumps(body), content_type="application/json", **HEADERS
+    )
 
 
 def gid(type_name, pk):
     return graphene.Node.to_global_id(type_name, pk)
 
 
-def test_prices_endpoint_returns_the_ladder(client, variant, customer_user, tiers, channel_USD):
+def test_prices_endpoint_returns_the_ladder(
+    client, variant, customer_user, tiers, channel_USD
+):
     response = post(
         client,
         PRICES_URL,
@@ -116,7 +130,9 @@ def line_body(checkout, customer_user, variant, channel, quantity):
 def test_dealer_line_sets_price_override_and_metadata(
     client, checkout, variant, customer_user, tiers, channel_USD, stock
 ):
-    response = post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
+    response = post(
+        client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6)
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -156,7 +172,9 @@ def test_a_half_cent_tier_is_charged_up_and_quoted_the_same(
 def test_dealer_line_under_the_lowest_break_is_refused(
     client, checkout, variant, customer_user, tiers, channel_USD
 ):
-    response = post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 4))
+    response = post(
+        client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 4)
+    )
 
     assert response.status_code == 422
     assert response.json() == {"error": "belowBreak"}
@@ -166,7 +184,9 @@ def test_dealer_line_under_the_lowest_break_is_refused(
 def test_dealer_line_in_another_channel_is_refused(
     client, checkout, variant, customer_user, tiers, channel_PLN
 ):
-    response = post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_PLN, 6))
+    response = post(
+        client, LINE_URL, line_body(checkout, customer_user, variant, channel_PLN, 6)
+    )
 
     assert response.status_code == 409
     assert response.json() == {"error": "channelMismatch"}
@@ -175,7 +195,17 @@ def test_dealer_line_in_another_channel_is_refused(
 def test_a_shopper_who_is_not_a_dealer_gets_a_retail_line(
     client, checkout, variant, staff_user, tiers, channel_USD, stock
 ):
-    response = post(client, LINE_URL, line_body(checkout, variant=variant, customer_user=staff_user, channel=channel_USD, quantity=6))
+    response = post(
+        client,
+        LINE_URL,
+        line_body(
+            checkout,
+            variant=variant,
+            customer_user=staff_user,
+            channel=channel_USD,
+            quantity=6,
+        ),
+    )
 
     assert response.status_code == 200
     assert response.json()["dealerPrice"] is None
@@ -286,7 +316,6 @@ def test_a_reprice_that_moves_the_price_expires_it_and_one_that_does_not_leaves_
     assert checkout.price_expiration < later
 
 
-
 # --- finding 3: reprice never clears an override another app wrote -----------
 
 
@@ -329,7 +358,9 @@ def test_dealer_line_refuses_a_variant_not_available_for_purchase(
         available_for_purchase_at=None
     )
 
-    response = post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
+    response = post(
+        client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6)
+    )
 
     assert response.status_code == 422
     assert response.json()["error"] == "lineRefused"
@@ -342,7 +373,9 @@ def test_dealer_line_refuses_a_quantity_over_the_checkout_limit(
     site_settings.limit_quantity_per_checkout = 5
     site_settings.save(update_fields=["limit_quantity_per_checkout"])
 
-    response = post(client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6))
+    response = post(
+        client, LINE_URL, line_body(checkout, customer_user, variant, channel_USD, 6)
+    )
 
     assert response.status_code == 422
     assert response.json()["error"] == "lineRefused"
@@ -360,9 +393,7 @@ def test_dealer_line_refuses_a_quantity_that_is_not_a_number(
 def test_dealer_line_refuses_more_than_the_stock_on_hand(
     client, checkout, variant, customer_user, tiers, channel_USD, stock
 ):
-    body = line_body(
-        checkout, customer_user, variant, channel_USD, stock.quantity + 1
-    )
+    body = line_body(checkout, customer_user, variant, channel_USD, stock.quantity + 1)
 
     response = post(client, LINE_URL, body)
 
@@ -375,7 +406,7 @@ def test_dealer_line_refuses_more_than_the_stock_on_hand(
 
 
 @pytest.mark.parametrize(
-    "url,body",
+    ("url", "body"),
     [
         (PRICES_URL, {"customerId": "garbage", "channel": "x", "variantIds": []}),
         (

@@ -776,3 +776,84 @@ def test_a_break_this_quantity_does_not_reach_leaves_the_base_at_retail(
     )
 
     assert response.json()["unitPrice"] == "4006.99"
+
+
+# --- (d) the stamp lands on the lines THIS request created -----------------
+
+
+def test_a_second_configured_add_leaves_the_first_adds_lines_alone(
+    client, checkout, stage_2_kit, omit_parts, crating_fee
+):
+    """Two configurations of one product are two priced items, not one restamped twice.
+
+    The stamp was keyed by VARIANT, so the second add rewrote the first item
+    line's options snapshot (MP3 then repriced that line to the SECOND
+    configuration, undercharging by the difference) and gave the first fee line
+    the second request's cid (both fee lines then shared a parent AND a variant,
+    collapsed to one entry in `reprice.fee_lines_by_parent`, and one required
+    149.00 charge fell out of the cart as an orphan). No key and no forgery: a
+    shopper buying two configurations of one part.
+    """
+    option_set, values = omit_parts
+
+    first = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [values[0].pk]}],
+    )
+    assert first.status_code == 200, first.content
+    after_first = {
+        line.pk: (dict(line.private_metadata), line.price_override)
+        for line in checkout.lines.all()
+    }
+    assert len(after_first) == 2
+
+    second = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+    )
+    assert second.status_code == 200, second.content
+
+    after_second = {
+        line.pk: (dict(line.private_metadata), line.price_override)
+        for line in checkout.lines.all()
+    }
+    assert len(after_second) == 4
+    for pk, state in after_first.items():
+        assert after_second[pk] == state, (
+            "the second add restamped a line it did not create"
+        )
+
+    # Two configurations, two cids, and each fee line points at its own item.
+    cids = {stamps[META_CID] for stamps, _ in after_second.values()}
+    assert len(cids) == 2
+    parents = [
+        stamps[META_PARENT] for stamps, _ in after_second.values() if META_PARENT in stamps
+    ]
+    assert sorted(parents) == sorted(cids)
+
+
+def test_a_configured_add_does_not_stamp_a_plain_retail_line_of_the_same_variant(
+    client, checkout, stage_2_kit, omit_parts, crating_fee
+):
+    """A retail line already in the cart is not this request's to price."""
+    option_set, values = omit_parts
+    retail = checkout.lines.create(
+        variant=stage_2_kit, quantity=1, currency=checkout.currency
+    )
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [values[0].pk]}],
+    )
+    assert response.status_code == 200, response.content
+
+    retail.refresh_from_db()
+    assert retail.private_metadata == {}
+    assert retail.price_override is None
+    assert retail.price_override_reason is None

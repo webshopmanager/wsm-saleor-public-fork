@@ -389,6 +389,14 @@ def configured_line(request):
         )
     except LineRefused as refusal:
         return JsonResponse({"violations": refusal.violations}, status=422)
+    # The line pks this request is about to create, read the way
+    # `dealer/views.py::_add_line` reads them: `add_variants_to_checkout` returns
+    # the checkout, not the lines, so the lines this request wrote are the ids
+    # that were not there a moment ago. One small query, and it is what keeps the
+    # stamp below off a line this request did not create.
+    before = set(
+        CheckoutLine.objects.filter(checkout_id=checkout.pk).values_list("pk", flat=True)
+    )
     add_variants_to_checkout(
         checkout,
         variants,
@@ -410,8 +418,18 @@ def configured_line(request):
     # the copy MP3 actually prices from is written here, on the lines this
     # request just wrote, and on no others: promoting whatever happens to be in
     # a line's public metadata would honour exactly the forgery this closes.
+    #
+    # Keyed by the NEW line pk, then by variant. Keyed by variant alone it also
+    # hit any line already on the checkout carrying the same variant, which two
+    # ordinary configured adds of one product always produce: a second add
+    # overwrote the first item line's options snapshot, so MP3 repriced it to the
+    # second configuration, and gave the first fee line the second cid, so the
+    # two fee lines collapsed to one entry in `reprice.fee_lines_by_parent` and
+    # one required charge fell off the cart. No key and no forgery: two adds.
     stamped = []
     for info in lines:
+        if info.line.pk in before:
+            continue
         values = stamps_by_variant.get(info.line.variant_id)
         if values:
             info.line.store_value_in_private_metadata(values)

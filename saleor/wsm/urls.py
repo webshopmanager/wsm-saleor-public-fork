@@ -5,6 +5,8 @@ U3 (dealer) and U4 (containers) add themselves here, not to core's urls.py, so
 the core touch stays at one line for the life of the branch.
 """
 
+import os
+
 from django.conf import settings
 from django.urls import include, re_path
 from django.views.static import serve as static_serve
@@ -18,16 +20,36 @@ urlpatterns = [
     # The merchant UI (bake-off design section 6). Its own AdminSite, not
     # `admin.site`: see saleor/wsm/compose/admin.py for why.
     re_path(r"^admin/", compose_admin.urls),
-    # The admin's own CSS and JS. Saleor mounts /static/ only under DEBUG, this
-    # box runs DEBUG off, there is no web server in front of uvicorn and
-    # whitenoise is not a Saleor dependency. Without this the merchant screens
-    # render unstyled, which is a false negative on a screenshot review.
-    # ponytail: correct for one box behind SSH; a real deployment puts static
-    # behind the CDN that already serves Saleor's media.
-    re_path(
-        r"^static/(?P<path>.*)$",
-        static_serve,
-        {"document_root": settings.STATIC_ROOT},
-        name="wsm-static",
-    ),
 ]
+
+
+def static_routes():
+    """Django serving /static/ itself, and only where nothing else will.
+
+    Saleor mounts /static/ only under DEBUG, a bake-off box runs DEBUG off with
+    no web server in front of uvicorn and no whitenoise, so without this the
+    merchant screens render unstyled, which is a false negative on a screenshot
+    review. The target deployment is ECS behind a CDN, where Django serving
+    static files is a production defect, so the default is OFF and the one box
+    that needs it says so: WSM_SERVE_STATIC=true.
+
+    ponytail: the real answer at re-home is `collectstatic` plus the CDN prefix
+    that already serves Saleor's media, and then this function is deleted.
+    """
+    if os.environ.get("WSM_SERVE_STATIC", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return []
+    return [
+        re_path(
+            r"^static/(?P<path>.*)$",
+            static_serve,
+            {"document_root": settings.STATIC_ROOT},
+            name="wsm-static",
+        )
+    ]
+
+
+urlpatterns += static_routes()

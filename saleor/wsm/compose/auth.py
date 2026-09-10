@@ -124,6 +124,33 @@ class AdminPasswordBackend(BaseBackend):
             user_obj._wsm_perm_cache = cached
         return cached
 
+    def has_perm(self, user_obj, perm, obj=None):
+        """Answer from the permission NAME, before any database read.
+
+        This backend grants `wsm_*` and nothing else, and it sits BELOW Saleor's
+        own backends in `AUTHENTICATION_BACKENDS`. Django's `_user_has_perm`
+        walks the list and stops at the first backend that says yes, so every
+        Saleor permission that Saleor DENIED falls through to here: an app token
+        without `manage_channels`, a staff user asked for a field they cannot
+        see, every optional-permission check on the API. Each one loaded our
+        whole `wsm_` grant set to discover that `product.manage_products` was
+        never in it, which is one `permission_permission` join bought to answer
+        a question the string already answered.
+
+        Measured as one extra query per request against upstream on
+        `test_retrieve_channel_listings` (17 vs 16) and
+        `test_stocks_bulk_update_queries_count` (13 vs 12); those two counts are
+        the check that this stays true.
+
+        The answers do not change, only what they cost: a non-`wsm_` permission
+        was already False here, just one round trip later.
+        `get_user_permissions`, `get_group_permissions` and `get_all_permissions`
+        are untouched, so anything asking this backend for the SET still gets it.
+        """
+        if not perm.startswith(WSM_APP_LABEL_PREFIX):
+            return False
+        return super().has_perm(user_obj, perm, obj=obj)
+
     def get_user_permissions(self, user_obj, obj=None):
         # Per-object permissions are not a thing we grant; answering for `obj`
         # would be claiming an authority this backend does not have.

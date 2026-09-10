@@ -9,6 +9,7 @@ Saleor turned it off everywhere, including here.
 import pytest
 from django.conf import settings as django_settings
 from django.db import connections
+from django.test.utils import CaptureQueriesContext
 
 from ....core.db.connection import restrict_writer
 
@@ -134,3 +135,54 @@ def test_a_shop_with_no_settings_row_is_denied_rather_than_broken(
         )
         is None
     )
+
+
+# --- a permission this backend cannot grant costs nothing to refuse ----------
+#
+# Counted on the DEFAULT connection, which is where a `.using(replica)` read
+# lands under `saleor.tests.settings`: the replica alias is a test mirror of it,
+# and it is the connection `django_assert_num_queries` watches, so these two
+# counts are the same arithmetic as the benchmark counts they exist to hold up.
+
+
+def _reads_while(call) -> int:
+    connection = connections[django_settings.DATABASE_CONNECTION_DEFAULT_NAME]
+    with CaptureQueriesContext(connection) as queries:
+        call()
+    return len(queries)
+
+
+def test_a_saleor_permission_is_refused_without_a_query(staff_user):
+    """`AUTHENTICATION_BACKENDS` is app-wide and this backend is last in it, so
+    every Saleor permission Saleor itself denied is asked of us next. Loading the
+    `wsm_` grant set to answer for `product.manage_products` was one join per
+    request on the API's hot path, and the string already carries the answer.
+
+    That one query is the whole gap between this fork and upstream on
+    `test_retrieve_channel_listings` (17 vs 16) and
+    `test_stocks_bulk_update_queries_count` (13 vs 12).
+    """
+    backend = AdminPasswordBackend()
+    answer = []
+
+    reads = _reads_while(
+        lambda: answer.append(backend.has_perm(staff_user, "product.manage_products"))
+    )
+
+    assert answer == [False]
+    assert reads == 0
+
+
+def test_a_wsm_permission_is_still_read_from_the_grant(staff_user):
+    """The other half: the permissions this backend DOES own still cost their one
+    read, so the short-circuit above cannot be widened into refusing everything.
+    """
+    backend = AdminPasswordBackend()
+    answer = []
+
+    reads = _reads_while(
+        lambda: answer.append(backend.has_perm(staff_user, "wsm_compose.change_fee"))
+    )
+
+    assert answer == [False]
+    assert reads == 1

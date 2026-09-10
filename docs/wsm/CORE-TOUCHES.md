@@ -141,6 +141,25 @@ Since review wave A it therefore honours the merchant's own
 own backends (`saleor/wsm/compose/auth.py`, and its tests in
 `saleor/wsm/compose/tests/test_auth.py`).
 
+App-wide covers every `has_perm()` too, not only every `authenticate()`. Django's
+`_user_has_perm` walks `AUTHENTICATION_BACKENDS` until one says yes, and this
+backend is last, so every Saleor permission that SALEOR denied arrives here
+next: an app token without `manage_channels`, a staff user asked for a field
+they cannot see, every optional-permission check on the API. It used to load its
+whole `wsm_` grant set to answer, one `permission_permission` join per request,
+to discover that `product.manage_products` was never in a set that by
+construction only holds `wsm_*`. Since the fork regression sweep (2026-09-09)
+`has_perm` answers `False` off the permission string before any read. That one
+query was the entire difference between this fork and upstream on
+`test_retrieve_channel_listings` (17 queries against 16) and
+`test_stocks_bulk_update_queries_count` (13 against 12), which is why those two
+benchmark counts stay at upstream's numbers instead of being raised. The answers
+did not change, only what they cost. Held by
+`test_a_saleor_permission_is_refused_without_a_query` and
+`test_a_wsm_permission_is_still_read_from_the_grant` in
+`saleor/wsm/compose/tests/test_auth.py`, the first of which is red without the
+short-circuit and the second red if it is widened.
+
 Removal cost: delete the block. Nothing outside `saleor/wsm/` imports any of it.
 
 ## 3. `saleor/settings.py`, +2 lines (U3, 2026-09-08)

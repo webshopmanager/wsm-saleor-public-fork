@@ -141,8 +141,12 @@ def test_no_row_means_the_toggle_is_off(db):
 
 
 class _Line:
-    def __init__(self, stamps, discounts=()):
+    def __init__(self, stamps, discounts=(), reason=None):
         self.private_metadata = stamps
+        # Every real line carries this column and a retail line leaves it NULL.
+        # The catalogue guard reads it now (`is_sale_priced_line`), so a stand-in
+        # that does not answer it is a line no real checkout ever holds.
+        self.price_override_reason = reason
         self._discounts = list(discounts)
 
 

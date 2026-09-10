@@ -1,9 +1,17 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md ("Monkey patches").
 """Which lines a discount may touch, and the two wraps that hold the line.
 
-Two rules share one traversal, `split_discountable`:
+Three rules share one traversal, `split_discountable`:
 
 - Requirement 2.4: no discount combines with dealer pricing, toggle default off.
+- A catalogue promotion is not taken twice off one line. A kit member line and a
+  configured line are priced by the fork from the listing's SALE price
+  (`money.unit_amount`), so the promotion is already inside the number written to
+  `price_override`, and stock Saleor then takes the same rule off that override
+  again. Measured live 2026-09-09: an Alba RZR900 kit member overridden at
+  1899.99 under a 254.01 rule billed at 1645.98 and the kit at a subtotal of
+  2278.98 instead of 2532.99. This one is the CATALOGUE path only; a voucher is
+  a second discount the merchant does mean to stack on a sale price.
 - A FEE line is never discountable, and there is no toggle on that one. A fee is
   a charge the merchant passes through (crating, core, environmental) carried as
   its own checkout line; in 5.0 a coupon came off the merchandise subtotal and
@@ -68,6 +76,21 @@ PRICE_OVERRIDE_REASON = "wsm.dealer"
 # `test_the_fee_marker_is_the_one_compose_writes` pins the two spellings together.
 FEE_METADATA_KEY = "compose.fee"
 
+# The `price_override_reason` values the fork writes on a line whose unit price
+# it computed FROM the listing's sale price: `wsm.containers` on a kit member
+# (containers/pricing.py) and `wsm.compose` on a configured line and its charge
+# (compose/lines.py). Both literals are repeated here rather than imported for
+# the reason FEE_METADATA_KEY is repeated: `saleor.wsm.compose.views` imports
+# this module, so importing compose back would be a cycle, and containers is
+# reached through compose. `test_the_sale_priced_reasons_are_the_ones_the_fork_writes`
+# pins the four spellings together.
+#
+# `wsm.dealer` is deliberately absent. A dealer tier is a price beside the
+# catalogue rather than one derived from it, so nothing is taken twice, and the
+# dealer line already leaves the eligible set through `is_dealer_line` under the
+# merchant's own toggle.
+SALE_PRICED_REASONS = frozenset({"wsm.containers", "wsm.compose"})
+
 # Every module holding `attach_voucher_to_line_info` as its OWN attribute, read
 # from the one place the fork writes its patches down. Every patched function's
 # sites live there, MP2's included, so there is one list to update on a rebase
@@ -111,7 +134,20 @@ def is_fee_line(line) -> bool:
     return FEE_METADATA_KEY in (line.private_metadata or {})
 
 
-def split_discountable(objs, line_of=lambda obj: obj):
+def is_sale_priced_line(line) -> bool:
+    """The COLUMN the fork stamped, not metadata, on a checkout or order line.
+
+    `price_override_reason` is written beside `price_override` by the endpoints
+    that set the price and rewritten by MP3 on every recalculation; there is no
+    metadata mutation that reaches it, so unlike the public `wsm.kit` copy a
+    shopper cannot stamp their own line with it. The two travel together: a
+    reason without an override prices nothing, and the guard only matters where
+    an override exists.
+    """
+    return line.price_override_reason in SALE_PRICED_REASONS
+
+
+def split_discountable(objs, line_of=lambda obj: obj, also_excluded=None):
     """(eligible, excluded) for the discount paths. One pass, no query.
 
     `line_of` reaches the line, so the same function serves the LineInfo lists
@@ -125,12 +161,19 @@ def split_discountable(objs, line_of=lambda obj: obj):
     Excluding a fee needs no toggle of its own: "discount my crating charge" has
     no merchant reading that a discount on the merchandise line cannot express,
     and the charge is money owed to somebody else.
+
+    `also_excluded` is one more predicate on the line, for a rule that holds on
+    ONE of the discount paths rather than both. The catalogue guard passes
+    `is_sale_priced_line`; the voucher guards pass nothing, because a voucher is
+    a discount the merchant means to give on top of a sale price. It is an
+    argument rather than a third clause in the loop so that the caller, and the
+    caller alone, says which rule it is under.
     """
     eligible, excluded = [], []
     dealer_excluded = None
     for obj in objs:
         line = line_of(obj)
-        if is_fee_line(line):
+        if is_fee_line(line) or (also_excluded and also_excluded(line)):
             excluded.append(obj)
         elif is_dealer_line(line):
             if dealer_excluded is None:
@@ -195,7 +238,9 @@ def catalogue_guard(original):
 
     @wraps(original)
     def prepare_checkout_line_discount_objects_for_catalogue_promotions(lines_info):
-        eligible, excluded = split_discountable(lines_info, line_of_info)
+        eligible, excluded = split_discountable(
+            lines_info, line_of_info, is_sale_priced_line
+        )
         if not excluded:
             return original(lines_info)
 

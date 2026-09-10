@@ -420,3 +420,134 @@ class KitMember(models.Model):
             f"{self.quantity} x {variant.product.name} "
             f"[{variant.sku or 'no SKU'}]"
         )
+
+
+# --- cross-member rules -------------------------------------------------------
+
+# The merchant's two sentences about how their kit goes together, and the only
+# two the walk of 2026-09-09 found written on a kit: this part needs one of
+# those, and this part cannot be sold beside that one.
+REQUIRES_ONE_OF = "requires_one_of"
+EXCLUDES = "excludes"
+RULE_KIND_LABELS = {
+    REQUIRES_ONE_OF: "Needs at least one of",
+    EXCLUDES: "Cannot be sold with",
+}
+RULE_KIND_CHOICES = list(RULE_KIND_LABELS.items())
+
+# The one code the storefront branches on. The KIND is data on the rule beside
+# it: a storefront that wants to draw "requires" differently from "excludes"
+# reads that, and one that only wants to show the merchant's sentence reads
+# neither.
+RULE_VIOLATION_CODE = "kit_member_rule"
+
+
+class KitRulesRefused(pricing.KitRefusal):
+    """A kit the merchant's own rules refuse to sell. Their words reach the shopper.
+
+    A `KitRefusal` by inheritance, deliberately: every path that already refuses
+    a kit it cannot charge refuses this one too, and only the endpoint that
+    knows how to say more says more. Nothing is re-priced around a broken rule.
+    """
+
+    code = RULE_VIOLATION_CODE
+
+    def __init__(self, rules):
+        self.rules = list(rules)
+        super().__init__("; ".join(rule.message for rule in self.rules))
+
+
+class KitMemberRule(models.Model):
+    """One member needs, or refuses, another. The merchant writes the sentence.
+
+    The kit is carried as well as the subject's own membership so that a kit's
+    rules are ONE query from the kit (`kit.rules`), which is what the checkout
+    path asks for; `clean` refuses a row whose subject or targets belong to a
+    different kit, so the two can never disagree.
+    """
+
+    kit = models.ForeignKey(KitConfig, related_name="rules", on_delete=models.CASCADE)
+    subject = models.ForeignKey(
+        KitMember,
+        related_name="rules",
+        on_delete=models.CASCADE,
+        help_text="The part this rule is about.",
+    )
+    kind = models.CharField(
+        max_length=20,
+        choices=RULE_KIND_CHOICES,
+        default=REQUIRES_ONE_OF,
+        help_text=(
+            "Whether the part above needs one of the parts you pick below, or "
+            "cannot be sold together with them."
+        ),
+    )
+    targets = models.ManyToManyField(
+        KitMember,
+        related_name="rules_targeting",
+        help_text="The other parts in this kit the rule is about.",
+    )
+    message = models.TextField(
+        help_text=(
+            "What the shopper is told when this rule stops the kit going into "
+            "the cart, in your own words, e.g. Requires Manual or HD Tensioner."
+        ),
+    )
+
+    class Meta:
+        ordering = ("pk",)
+        verbose_name = "kit rule"
+        verbose_name_plural = "kit rules"
+
+    def __str__(self):
+        # Never the row's own id and never a member row's id: this string is the
+        # heading on the "Are you sure?" of a delete (see
+        # saleor/wsm/tests/test_model_strings.py).
+        variant = self.subject.variant
+        return (
+            f"{variant.product.name} [{variant.sku or 'no SKU'}] "
+            f"{RULE_KIND_LABELS.get(self.kind, self.kind).lower()}"
+        )
+
+    def clean(self):
+        """Refuse a rule reaching outside its own kit: nobody could satisfy it."""
+        super().clean()
+        if self.subject_id and self.kit_id and self.subject.kit_id != self.kit_id:
+            raise ValidationError(
+                {"subject": "that part is not in this kit"}
+            )
+
+    @property
+    def target_variant_ids(self):
+        """The SKUs this rule points at, as variant ids. No query when prefetched."""
+        return sorted(member.variant_id for member in self.targets.all())
+
+    def broken_by(self, present_variant_ids) -> bool:
+        """Say whether this selection breaks the rule. Pure, so no kit is needed."""
+        present = set(present_variant_ids)
+        if self.subject.variant_id not in present:
+            return False
+        targets = set(self.target_variant_ids)
+        if not targets:
+            # A rule with nothing on the other side of it says nothing. Refusing
+            # on one would make a half-typed row unsellable, and the merchant
+            # screen already asks for at least one part.
+            return False
+        if self.kind == REQUIRES_ONE_OF:
+            return not (targets & present)
+        return bool(targets & present)
+
+
+def evaluate_rules(kit, variant_ids):
+    """Return this kit's rules, and the ones this selection breaks, from ONE read.
+
+    Both answers together because the caller needs both and they come off the
+    same rows: the broken ones refuse the add, and the whole set is what the
+    response carries so a storefront can say why before a shopper tries again.
+
+    ONE query on a kit that carries no rules, which is every kit today: Django
+    skips a prefetch whose parent set came back empty. Two on a kit that does,
+    whatever the number of rules, and never one per rule.
+    """
+    rules = list(kit.rules.select_related("subject").prefetch_related("targets"))
+    return rules, [rule for rule in rules if rule.broken_by(variant_ids)]

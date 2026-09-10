@@ -491,3 +491,109 @@ def test_a_tax_exempt_dealers_kit_lands_in_a_cart_that_owes_no_tax(
     assert response.status_code == 200, response.content
     checkout.refresh_from_db()
     assert checkout.tax_exemption is True
+
+
+# --- cross-member rules -------------------------------------------------------
+#
+# The kit adds its members together, so a rule is broken by the kit the merchant
+# built rather than by a shopper's typing. That is the same refusal either way:
+# money is never taken on a combination the merchant said cannot be sold, and
+# the shopper reads the merchant's own sentence rather than a code.
+
+
+def rule(kit, kind, subject, targets, message):
+    from saleor.wsm.containers.models import KitMemberRule
+
+    row = KitMemberRule.objects.create(
+        kit=kit, subject=subject, kind=kind, message=message
+    )
+    row.targets.set(targets)
+    return row
+
+
+def test_a_kit_that_breaks_its_own_rule_is_refused_in_the_merchants_words(
+    client, checkout, kit
+):
+    from saleor.wsm.containers.models import EXCLUDES, RULE_VIOLATION_CODE
+
+    members = list(kit.members.order_by("sort_order"))
+    rule(
+        kit,
+        EXCLUDES,
+        members[0],
+        [members[2]],
+        "The billet cover cannot be fitted with the OEM tensioner.",
+    )
+
+    response = post_kit(client, checkout, kit.collection_id)
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["violations"] == [
+        "The billet cover cannot be fitted with the OEM tensioner."
+    ]
+    assert payload["code"] == RULE_VIOLATION_CODE
+    assert payload["rules"] == [
+        {
+            "kind": EXCLUDES,
+            "message": "The billet cover cannot be fitted with the OEM tensioner.",
+            "subject": gid("ProductVariant", members[0].variant_id),
+            "targets": [gid("ProductVariant", members[2].variant_id)],
+        }
+    ]
+    # Refused, never re-priced: nothing reached the checkout.
+    assert checkout.lines.count() == 0
+
+
+def test_a_satisfied_rule_lets_the_kit_through_and_says_what_it_was(
+    client, checkout, kit
+):
+    from saleor.wsm.containers.models import REQUIRES_ONE_OF
+
+    members = list(kit.members.order_by("sort_order"))
+    rule(
+        kit,
+        REQUIRES_ONE_OF,
+        members[0],
+        [members[1]],
+        "Requires Manual or HD Tensioner.",
+    )
+
+    response = post_kit(client, checkout, kit.collection_id)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kitTotal"] == "54.00"
+    assert checkout.lines.count() == 3
+    assert payload["rules"] == [
+        {
+            "kind": REQUIRES_ONE_OF,
+            "message": "Requires Manual or HD Tensioner.",
+            "subject": gid("ProductVariant", members[0].variant_id),
+            "targets": [gid("ProductVariant", members[1].variant_id)],
+        }
+    ]
+
+
+def test_a_rule_about_a_part_that_is_not_in_the_kit_says_nothing(
+    client, checkout, kit
+):
+    """The subject decides whether a rule is even asked. No subject, no rule."""
+    from saleor.wsm.containers.models import EXCLUDES, evaluate_rules
+
+    members = list(kit.members.order_by("sort_order"))
+    row = rule(kit, EXCLUDES, members[0], [members[2]], "never sold together")
+
+    held, broken = evaluate_rules(kit, [members[1].variant_id])
+    assert [rule_row.pk for rule_row in held] == [row.pk]
+    assert broken == []
+    assert row.broken_by([m.variant_id for m in members]) is True
+
+
+def test_a_kit_with_no_rules_is_unchanged(client, checkout, kit):
+    """The whole feature costs a kit that carries no rules one query and no shape."""
+    response = post_kit(client, checkout, kit.collection_id)
+
+    assert response.status_code == 200
+    assert response.json()["rules"] == []
+    assert checkout.lines.count() == 3

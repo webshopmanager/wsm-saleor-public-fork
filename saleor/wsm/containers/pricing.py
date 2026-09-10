@@ -239,7 +239,9 @@ def add_kit_to_checkout(
 ):
     """Explode a kit into ordinary checkout lines at prices computed right here.
 
-    Returns `(group_id, KitPrice, {variant_id: CheckoutLine})`. The lines are
+    Returns `(group_id, KitPrice, {variant_id: CheckoutLine}, [KitMemberRule])`.
+    The rules ride back because the caller has to publish them and this is the
+    one place they are read; see `models.evaluate_rules`. The lines are
     ordinary: nothing downstream needs to know a kit made them, and a shopper who
     deletes one is left with the others at their own prices, which is exactly
     what the "kits are never a Saleor object beyond the Collection" ruling asks
@@ -254,9 +256,10 @@ def add_kit_to_checkout(
     from ...core.utils.metadata_manager import MetadataItem
     from ...graphql.checkout.mutations.utils import CheckoutLineData
     from ...plugins.manager import get_plugins_manager
+    from ..checkout import check_addable
     from ..dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
     from ..dealer.no_stacking import PRICE_OVERRIDE_REASON as DEALER_REASON
-    from ..checkout import check_addable
+    from .models import KitRulesRefused, evaluate_rules
 
     priced = price_kit(
         kit.pricing_members(checkout.channel),
@@ -266,6 +269,16 @@ def add_kit_to_checkout(
         tier_lookup=tier_lookup,
         user=user,
     )
+
+    # The merchant's own rules, checked at the door the money goes through and
+    # before a single line is written. A kit that breaks one is refused WHOLE,
+    # in the merchant's words: a combination they said cannot be sold is never
+    # quietly re-priced into one that can, and half a kit is worse than none.
+    rules, broken = evaluate_rules(
+        kit, [line.member.variant.pk for line in priced.lines]
+    )
+    if broken:
+        raise KitRulesRefused(broken)
 
     group_id = str(uuid.uuid4())
     collection_slug = kit.collection.slug
@@ -385,4 +398,4 @@ def add_kit_to_checkout(
     if stamped:
         CheckoutLine.objects.bulk_update(stamped, ["private_metadata"])
 
-    return group_id, priced, ours
+    return group_id, priced, ours, rules

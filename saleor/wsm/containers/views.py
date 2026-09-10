@@ -25,7 +25,7 @@ from ..dealer import pricing as dealer_pricing
 from ..dealer.tax import bind_tax_exemption
 from ..http import storefront_key_required
 from . import pricing
-from .models import KitConfig
+from .models import KitConfig, KitRulesRefused
 
 
 def _money(cents: int) -> str:
@@ -61,6 +61,23 @@ def _not_found(what: str):
 
 def _refused(message: str):
     return JsonResponse({"violations": [message]}, status=422)
+
+
+def _rule_json(rule):
+    """One cross-member rule as the storefront reads it.
+
+    Variants are named by the same global ids the rest of this response uses, so
+    a storefront pairs a rule to a line it already holds without a second call.
+    """
+    return {
+        "kind": rule.kind,
+        "message": rule.message,
+        "subject": _to_gid("ProductVariant", rule.subject.variant_id),
+        "targets": [
+            _to_gid("ProductVariant", variant_id)
+            for variant_id in rule.target_variant_ids
+        ],
+    }
 
 
 def resolve_tier_lookup(kit, checkout, user, group_code=None):
@@ -171,13 +188,25 @@ def kit_line(request):
     )
 
     try:
-        group_id, priced, lines_by_variant = pricing.add_kit_to_checkout(
+        group_id, priced, lines_by_variant, rules = pricing.add_kit_to_checkout(
             checkout,
             kit,
             quantity,
             user=user,
             tier_lookup=tier_lookup,
             tier_group=tier_group,
+        )
+    except KitRulesRefused as refusal:
+        # The merchant wrote these sentences for a shopper, so they are what the
+        # shopper is shown; the code beside them is what a storefront branches
+        # on, and it never changes with the wording.
+        return JsonResponse(
+            {
+                "violations": [rule.message for rule in refusal.rules],
+                "code": refusal.code,
+                "rules": [_rule_json(rule) for rule in refusal.rules],
+            },
+            status=422,
         )
     except pricing.KitRefusal as refusal:
         return _refused(str(refusal))
@@ -212,5 +241,14 @@ def kit_line(request):
                 for priced_line in priced.lines
             ],
             "kitTotal": _money(priced.total_cents),
+            # Read off the rows the add already had to load, so a kit that
+            # carries no rules pays nothing for the key being here.
+            #
+            # ponytail: this is the only public place a kit's rules appear, so a
+            # PDP cannot draw them until something is added. The ceiling is a
+            # `wsm.kit` stamp on the Collection, mirroring `wsm.series`; the
+            # upgrade is worth buying the first time a storefront asks to show
+            # the rule BEFORE the add rather than instead of it.
+            "rules": [_rule_json(rule) for rule in rules],
         }
     )

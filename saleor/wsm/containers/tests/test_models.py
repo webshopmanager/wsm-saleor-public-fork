@@ -321,3 +321,26 @@ def test_a_kit_member_holding_none_of_its_variant_is_refused(collection, variant
         KitMember(kit=kit, variant=variant, quantity=0).full_clean()
 
     assert "quantity" in refused.value.message_dict
+
+
+# --- cross-member rules -------------------------------------------------------
+
+
+def test_a_rule_whose_subject_is_in_another_kit_is_refused(collection, product_list):
+    """The kit column and the subject's own membership can never disagree."""
+    from saleor.product.models import Collection
+    from saleor.wsm.containers.models import EXCLUDES, KitMemberRule
+
+    mine = KitConfig.objects.create(collection=collection)
+    theirs = KitConfig.objects.create(
+        collection=Collection.objects.create(name="Other", slug="other-kit")
+    )
+    stranger = KitMember.objects.create(
+        kit=theirs, variant=product_list[0].variants.first()
+    )
+
+    row = KitMemberRule(kit=mine, subject=stranger, kind=EXCLUDES, message="no")
+
+    with pytest.raises(ValidationError) as refusal:
+        row.clean()
+    assert "subject" in refusal.value.message_dict

@@ -31,13 +31,19 @@ Every patch this fork installs is named, once, in `saleor/wsm/patches.py` as
 with every module that holds that function as an attribute. One entry per
 function, not one per binding site.
 
-Fork migrations, after the integration squash: **three files, one per app.**
+Fork migrations, after the integration squash: **one 0001 per app, plus what
+has landed since.**
 
 | App | File |
 |---|---|
 | `wsm_compose` | `saleor/wsm/compose/migrations/0001_initial.py` |
 | `wsm_dealer` | `saleor/wsm/dealer/migrations/0001_initial.py` |
 | `wsm_containers` | `saleor/wsm/containers/migrations/0001_initial.py` |
+| `wsm_containers` | `saleor/wsm/containers/migrations/0002_kitmemberrule.py` |
+
+`0002_kitmemberrule` adds the cross-member rule a merchant writes on a kit (one
+table plus its members M2M, both `wsm_containers_`-prefixed), and no core table
+is touched by it.
 
 Nothing else. The 0002s and 0003s the unit branches wrote are gone: they had
 only ever run on bake-off databases, so the three apps were regenerated from
@@ -157,7 +163,7 @@ tables keep their `wsm_dealer_` prefix.
 
 The twin of touch 1, for the same reason: `INSTALLED_APPS` is the only thing an
 app cannot do for itself. The label is pinned to `wsm_containers` in `apps.py`
-so the three tables carry the `wsm_containers_` prefix and stay out of core's
+so its tables carry the `wsm_containers_` prefix and stay out of core's
 namespace. Everything else in Containers (models, migration, pricing, views,
 admin, tests) lives under `saleor/wsm/containers/`, which upstream does not own.
 

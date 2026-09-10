@@ -60,6 +60,9 @@ def merchant(client, staff_user):
         "wsm_containers.view_kitconfig",
         "wsm_containers.add_kitconfig",
         "wsm_containers.change_kitconfig",
+        "wsm_containers.view_kitmemberrule",
+        "wsm_containers.add_kitmemberrule",
+        "wsm_containers.change_kitmemberrule",
         "wsm_containers.view_kitmember",
         "wsm_containers.add_kitmember",
         "wsm_containers.change_kitmember",
@@ -385,3 +388,72 @@ def test_a_kit_list_with_a_kit_in_it_is_the_ordinary_list(merchant, collection):
 
     assert "No kits yet." not in body
     assert collection.name in body
+
+
+# --- cross-member rules, on the kit screen ------------------------------------
+
+
+def kit_with_members(collection, product_list, count=2):
+    from ..models import KitConfig, KitMember
+
+    kit = KitConfig.objects.create(collection=collection)
+    members = [
+        KitMember.objects.create(kit=kit, variant=product.variants.first(), sort_order=i)
+        for i, product in enumerate(product_list[:count])
+    ]
+    return kit, members
+
+
+def test_the_kit_screen_renders_its_rules(merchant, collection, product_list):
+    """A merchant writes the rule where they built the kit, not on a second screen."""
+    from ..models import EXCLUDES, KitMemberRule
+
+    kit, members = kit_with_members(collection, product_list)
+    rule = KitMemberRule.objects.create(
+        kit=kit,
+        subject=members[0],
+        kind=EXCLUDES,
+        message="Requires Manual or HD Tensioner.",
+    )
+    rule.targets.set([members[1]])
+
+    response = merchant.get(f"/admin/wsm_containers/kitconfig/{kit.pk}/change/")
+
+    assert response.status_code == 200
+    # Django capitalises an inline's own plural name for the heading.
+    html = response.content.decode().lower()
+    assert "rules about how this kit goes together" in html
+    assert "requires manual or hd tensioner." in html
+    assert 'name="rules-0-subject"' in html
+    assert 'name="rules-0-targets"' in html
+
+
+def test_a_rule_is_only_offered_this_kits_own_parts(rf, collection, product_list):
+    """A rule pointing at another kit's part could never be satisfied."""
+    from saleor.product.models import Collection
+
+    from ...compose.admin import site as merchant_site
+    from ..admin import KitMemberRuleInline
+    from ..models import KitConfig, KitMember, KitMemberRule
+
+    kit, members = kit_with_members(collection, product_list)
+    stranger = KitMember.objects.create(
+        kit=KitConfig.objects.create(
+            collection=Collection.objects.create(name="Other", slug="other-kit")
+        ),
+        variant=product_list[2].variants.first(),
+    )
+
+    inline = KitMemberRuleInline(KitMemberRule, merchant_site)
+    request = rf.get("/admin/")
+    request._wsm_kit = kit
+    subject = inline.formfield_for_foreignkey(
+        KitMemberRule._meta.get_field("subject"), request
+    )
+    targets = inline.formfield_for_manytomany(
+        KitMemberRule._meta.get_field("targets"), request
+    )
+
+    assert list(subject.queryset) == members
+    assert list(targets.queryset) == members
+    assert stranger not in list(subject.queryset)

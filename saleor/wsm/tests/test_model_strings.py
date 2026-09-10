@@ -14,7 +14,7 @@ import pytest
 
 from ..compose import pricing
 from ..compose.models import Fee, OptionSet, OptionValue
-from ..containers.models import KitConfig, KitMember, SeriesConfig
+from ..containers.models import EXCLUDES, KitConfig, KitMember, KitMemberRule, SeriesConfig
 from ..dealer.models import DealerCustomer, DealerGroup, TierPrice
 
 pytestmark = pytest.mark.django_db
@@ -26,6 +26,7 @@ def rows(product, variant, collection, customer_user):
     group = DealerGroup.objects.create(code="dealer-1", name="Dealer 1")
     option_set = OptionSet.objects.create(product=product, name="Color", label="Colour")
     kit = KitConfig.objects.create(collection=collection)
+    member = KitMember.objects.create(kit=kit, variant=variant, quantity=2)
     return {
         "group": group,
         "customer": DealerCustomer.objects.create(user=customer_user, group=group),
@@ -42,7 +43,10 @@ def rows(product, variant, collection, customer_user):
         ),
         "series": SeriesConfig.objects.create(collection=collection),
         "kit": kit,
-        "member": KitMember.objects.create(kit=kit, variant=variant, quantity=2),
+        "member": member,
+        "rule": KitMemberRule.objects.create(
+            kit=kit, subject=member, kind=EXCLUDES, message="never both"
+        ),
     }
 
 
@@ -58,6 +62,9 @@ def test_each_row_says_what_it_is(rows, product, variant, collection, customer_u
     assert str(rows["series"]) == f"Series: {collection.name}"
     assert str(rows["kit"]) == f"Kit: {collection.name}"
     assert str(rows["member"]) == f"2 x {product.name} [{variant.sku}]"
+    assert str(rows["rule"]) == (
+        f"{product.name} [{variant.sku}] cannot be sold with"
+    )
 
 
 def test_no_row_introduces_itself_by_a_number(rows):

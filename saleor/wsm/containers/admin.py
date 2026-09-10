@@ -28,7 +28,7 @@ from ..admin_pickers import PickerLabelMixin
 from ..compose.admin import EmptyStateMixin, WsmAdminMixin
 from ..compose.admin import site as merchant_site
 from . import pricing
-from .models import KitConfig, KitMember, SeriesConfig
+from .models import KitConfig, KitMember, KitMemberRule, SeriesConfig
 
 MISSING = "(missing)"
 
@@ -184,6 +184,56 @@ class KitMemberInline(PickerLabelMixin, WsmAdminMixin, admin.TabularInline):
     autocomplete_fields = ("variant",)
 
 
+class KitMemberRuleInline(WsmAdminMixin, admin.TabularInline):
+    """How this kit goes together, on the kit itself.
+
+    Both member fields are limited to THIS kit's own parts. A rule pointing at
+    a part of some other kit can never be satisfied, and offering every kit
+    member in the store is the picker the walk of 2026-09-08 already found
+    unusable on a real catalog. `KitMemberRule.clean` refuses the same thing at
+    the model, so the limit here is the screen being honest rather than the
+    only guard.
+
+    A kit with no members yet offers nothing: a rule is written about parts, so
+    the parts are added first. The inline says so rather than showing two empty
+    boxes.
+    """
+
+    model = KitMemberRule
+    extra = 0
+    fields = ("subject", "kind", "targets", "message")
+    verbose_name = "rule"
+    verbose_name_plural = "rules about how this kit goes together"
+
+    def get_formset(self, request, obj=None, **kwargs):
+        # The parent kit is only handed to this method, and the field callbacks
+        # below get nothing but the request. Stashing it is Django's own idiom
+        # for a per-parent queryset on an inline.
+        request._wsm_kit = obj
+        formset = super().get_formset(request, obj, **kwargs)
+        if obj is None or not obj.members.exists():
+            formset.form.base_fields["subject"].help_text = (
+                "Add the parts below first, save, then write the rules."
+            )
+        return formset
+
+    def _members(self, request):
+        kit = getattr(request, "_wsm_kit", None)
+        if kit is None or kit.pk is None:
+            return KitMember.objects.none()
+        return KitMember.objects.filter(kit=kit).select_related("variant__product")
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "subject":
+            kwargs["queryset"] = self._members(request)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def formfield_for_manytomany(self, db_field, request, **kwargs):
+        if db_field.name == "targets":
+            kwargs["queryset"] = self._members(request)
+        return super().formfield_for_manytomany(db_field, request, **kwargs)
+
+
 class KitConfigAdmin(
     EmptyStateMixin, PickerLabelMixin, WsmAdminMixin, admin.ModelAdmin
 ):
@@ -199,7 +249,7 @@ class KitConfigAdmin(
     search_fields = ("collection__slug", "collection__name")
     autocomplete_fields = ("collection",)
     ordering = ("collection__name",)
-    inlines = [KitMemberInline]
+    inlines = [KitMemberInline, KitMemberRuleInline]
 
     @admin.display(description="Collection", ordering="collection__name")
     def collection_name(self, obj):

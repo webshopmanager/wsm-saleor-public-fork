@@ -183,7 +183,9 @@ class TransactionInitialize(TransactionSessionBase):
         )
         checkout_payment_snapshot = None
         if isinstance(source_object, checkout_models.Checkout):
-            checkout_payment_snapshot = cls.validate_checkout(source_object, manager)
+            checkout_payment_snapshot = cls.validate_checkout(
+                source_object, manager, payment_gateway_data.app_identifier
+            )
 
         idempotency_key = cls.clean_idempotency_key(idempotency_key)
         action = cls.clean_action(
@@ -248,8 +250,10 @@ class TransactionInitialize(TransactionSessionBase):
 
     @staticmethod
     def validate_checkout(
-        checkout: checkout_models.Checkout, manager: "PluginsManager"
-    ) -> dict:
+        checkout: checkout_models.Checkout,
+        manager: "PluginsManager",
+        app_identifier: str | None = None,
+    ) -> dict | None:
         if checkout.is_checkout_locked():
             error_code = (
                 TransactionInitializeErrorCode.CHECKOUT_COMPLETION_IN_PROGRESS.value
@@ -265,10 +269,25 @@ class TransactionInitialize(TransactionSessionBase):
                     )
                 }
             )
+        if app_identifier == GIFT_CARD_PAYMENT_GATEWAY_ID:
+            # WSM-FORK: the readiness gate below exists to stop an external
+            # payment APP from charging real money against a checkout that can
+            # never become an order. The gift card gateway is not one of those.
+            # `clean_app_from_payment_gateway` above returns None for this
+            # identifier precisely because there is no app: Saleor is the
+            # gateway, the balance it moves is Saleor's own ledger, and Saleor
+            # releases and detaches that authorization itself when the checkout
+            # does not complete (which is exactly what the two
+            # `test_gift_card_detach_gift_card_from_checkout_*` e2e tests
+            # prove). Attaching a card to a checkout that is not payable yet is
+            # the ordinary flow, so gating it refuses a call upstream accepts
+            # and strands nothing by allowing it. No snapshot either: there is
+            # no outside charge for a later total to be reconciled against.
+            return None
         # A charge attempted against a checkout that can never actually
         # complete (no shipping method, no billing address, no lines) risks
         # real money charged with no order and no way to recover
-        # automatically — refuse before any payment app is ever asked to
+        # automatically: refuse before any payment app is ever asked to
         # charge, rather than discovering it after the fact.
         return clean_checkout_ready_for_payment(
             checkout, manager, TransactionInitializeErrorCode.INVALID.value

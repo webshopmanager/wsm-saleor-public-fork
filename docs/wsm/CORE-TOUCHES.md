@@ -399,6 +399,52 @@ DB, plus `saleor/wsm/tests/test_management_commands.py` (new, fork-owned, two
 asserts), which pins `createsuperuser` and `changepassword` to `saleor.account`
 and was proven able to fail: it is red on `wsm/bakeoff` before the move.
 
+## 11. `saleor/graphql/payment/mutations/transaction/transaction_initialize.py`, +16 lines, 5 of them code (fork regression sweep, 2026-09-09)
+
+`TransactionInitialize.validate_checkout` now takes the payment gateway's
+identifier, and returns `None` without running the payment-readiness gate when
+that identifier is `GIFT_CARD_PAYMENT_GATEWAY_ID`. The gate itself, and every
+other caller of it, is unchanged.
+
+**The regression it fixes.** Three tests passed on upstream `a1ab3a23a3f5` and
+failed on `wsm/bakeoff`, all three with
+`Checkout is not ready for payment: it has no available lines.`:
+`test_for_checkout_with_gift_card_payment_gateway_rejection_keeps_owner_authorization`
+in `saleor/graphql/payment/tests/mutations/test_transaction_initialize.py`, and
+`test_gift_card_detach_gift_card_from_checkout_as_gift_card_transactions_are_about_to_get_charged`
+and
+`test_gift_card_detach_gift_card_from_checkout_as_checkout_gets_completed` in
+`saleor/tests/e2e/gift_cards/test_gift_cards.py`. The gate section 7 installed
+calls `fetch_checkout_lines` and refuses a checkout that has none. Saleor
+attaches a gift card to a checkout THROUGH `transactionInitialize`, and both its
+own e2e tests and that unit test do so against a checkout carrying no lines at
+all, because attaching a card is not a step that requires a payable cart.
+
+**Why the fix is here and not in the gate.** The gate exists to stop an external
+payment APP charging real money against a checkout that can never become an
+order, leaving a charge with no order and no automatic recovery. The gift card
+gateway is not one. `clean_app_from_payment_gateway`, ten lines up in the same
+class, returns `None` for this identifier precisely because there is no app:
+Saleor is the gateway, the balance it moves is Saleor's own ledger, and Saleor
+releases and detaches that authorization itself when the checkout does not
+complete, which is exactly the behaviour the two e2e tests above exist to prove.
+Nothing outside is charged, so nothing can be stranded, and the snapshot the
+gate returns has no outside charge for a later total to be reconciled against.
+Narrowing the gate by gateway rather than relaxing its `not lines` clause leaves
+every payment-app path byte-for-byte as the patch shipped it.
+
+**Not `TransactionProcess`.** Its copy of the gate is untouched, because a gift
+card transaction can never reach it: `clean_payment_app` requires an `App` row
+carrying the transaction's identifier, and no such row exists for the built-in
+gateway, so that mutation refuses gift cards before `validate_checkout` runs.
+
+**Verified by** the three tests above, red then green on a fresh test DB, run
+together with the whole of `test_transaction_initialize.py`,
+`test_transaction_process.py`, `saleor/checkout/tests/test_checkout_cleaner.py`,
+`saleor/graphql/checkout/tests/mutations/test_checkout_complete_with_transactions.py`
+and `saleor/tests/e2e/gift_cards/`: 271 passed, so the gate's own proofs still
+hold.
+
 # Monkey patches
 
 Expected: zero. Actual: **two**, in U3 and U7. Every entry names the exact

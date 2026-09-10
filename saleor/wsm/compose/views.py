@@ -14,8 +14,6 @@ is computed here from catalog rows: it is the checkout the line lands in.
 one process serves one tenant. Endpoint 1 is catalog data and stays open.
 """
 
-import base64
-import binascii
 import json
 import uuid
 from decimal import Decimal
@@ -38,7 +36,12 @@ from ..dealer import pricing as dealer_pricing
 from ..dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from ..dealer.tax import bind_tax_exemption
 from ..checkout import LineRefused, check_addable, whole_number
-from ..http import storefront_key_required
+from ..http import (
+    buyer_mismatch,
+    global_pk,
+    refuses_malformed_ids,
+    storefront_key_required,
+)
 from ..money import unit_amount
 from . import pricing
 from .lines import (
@@ -58,23 +61,8 @@ def _money(cents: int) -> str:
     return f"{Decimal(cents) / 100:.2f}"
 
 
-def _from_gid(raw: str, expected: str) -> str | None:
-    """The primary key inside a Saleor global id, or None if it is not one of `expected`.
-
-    Padding is restored before decoding: a GID that lost its `=` in a URL is a
-    routine thing to receive and refusing it would be a false 404.
-    """
-    if not raw:
-        return None
-    padded = raw + "=" * (-len(raw) % 4)
-    try:
-        decoded = base64.b64decode(padded.encode()).decode()
-    except (binascii.Error, UnicodeDecodeError, ValueError):
-        return None
-    type_name, sep, pk = decoded.partition(":")
-    if not sep or type_name != expected or not pk:
-        return None
-    return pk
+# The app's own error shape, handed to the shared refusal once.
+_MALFORMED = refuses_malformed_ids(lambda message: {"violations": [message]})
 
 
 def _not_found(what: str):
@@ -89,7 +77,7 @@ def _tier_group(customer_gid, db):
     the row owns the lookup.
     """
     return dealer_pricing.tier_group_for(
-        _from_gid(customer_gid or "", "User"), database_connection_name=db
+        global_pk(customer_gid or "", "User"), database_connection_name=db
     )
 
 
@@ -119,13 +107,18 @@ def _warnings(product_pk, using=None):
 
 
 @require_GET
+@_MALFORMED
 def option_sets(request, product_gid):
-    """Everything the PDP needs to draw the configurator, in three queries.
+    """Everything the PDP needs to draw the configurator, in five queries, flat.
 
-    Sets and their values come back through one prefetch; fees are a second
-    table and a third query. The existence check on the product is paid ONLY
-    when the product carries no configuration, which is the case the storefront
-    never asks about: a configured product costs three queries, not four.
+    One to prove the product is published somewhere, sets and their values
+    through one prefetch (two statements), fees as a second table, and the
+    Prop 65 row. Measured flat at 1 set / 2 values and at 5 sets / 50 values:
+    the prefetch does its job and the slope is zero.
+
+    The publication read replaced an existence check that was paid only when the
+    product carried no configuration. It costs one query on every call now and
+    buys the paragraph below.
 
     RETAIL deltas, for everyone. This is the fork's one endpoint that answers
     without the storefront key, and it used to take a `?customerId=` and quote
@@ -135,21 +128,35 @@ def option_sets(request, product_gid):
     come back from the key-gated add instead, which is where the money is taken
     and where the caller has already been authenticated.
     """
-    product_pk = _from_gid(product_gid, "Product")
-    if product_pk is None or not product_pk.isdigit():
+    product_pk = global_pk(product_gid, "Product")
+    if product_pk is None:
         return _not_found("product")
 
     replica = settings.DATABASE_CONNECTION_REPLICA_NAME
+    # Published somewhere, or this endpoint has nothing to say about it. The
+    # read stays anonymous, because the deltas it returns are retail and already
+    # on the PDP; an UNRELEASED product's configuration and pricing is not, and
+    # product ids are sequential integers inside a guessable global id. A
+    # product that is absent and one that is published nowhere answer
+    # identically, so this is not a row-existence oracle either. Same reasoning
+    # that took `?customerId=` off this endpoint; it was never carried to the row.
+    #
+    # No channel is asked for because the request carries none (wsm-storefront
+    # `src/lib/optionSets.ts` sends `X-Client-Id` and nothing else). A
+    # per-channel answer is a later contract change with a storefront companion,
+    # and is not needed to close this.
+    if (
+        not Product.objects.using(replica)
+        .filter(pk=product_pk, channel_listings__is_published=True)
+        .exists()
+    ):
+        return _not_found("product")
     sets = list(
         OptionSet.objects.using(replica)
         .filter(product_id=product_pk)
         .prefetch_related("values")
     )
     fees = list(Fee.objects.using(replica).filter(product_id=product_pk))
-
-    if not sets and not fees:
-        if not Product.objects.using(replica).filter(pk=product_pk).exists():
-            return _not_found("product")
 
     return JsonResponse(
         {
@@ -187,7 +194,7 @@ def option_sets(request, product_gid):
                 }
                 for f in fees
             ],
-            # Fourth query, and only on a product the storefront was already
+            # The last query, and only on a product the storefront was already
             # asking about. Prop 65 is California law rather than a feature, so
             # the PDP that draws the configurator draws the warning with it.
             "warnings": _warnings(product_pk, using=replica),
@@ -223,6 +230,7 @@ def _selections(raw):
 @require_POST
 @storefront_key_required
 @allow_writer()
+@_MALFORMED
 def configured_line(request):
     """Price one configuration and put it in the checkout as a priced line.
 
@@ -233,9 +241,9 @@ def configured_line(request):
     except ValueError:
         return JsonResponse({"violations": ["body is not JSON"]}, status=422)
 
-    checkout_token = _from_gid(body.get("checkoutId", ""), "Checkout")
-    product_pk = _from_gid(body.get("productId", ""), "Product")
-    variant_pk = _from_gid(body.get("variantId", ""), "ProductVariant")
+    checkout_token = global_pk(body.get("checkoutId", ""), "Checkout", shape="uuid")
+    product_pk = global_pk(body.get("productId", ""), "Product")
+    variant_pk = global_pk(body.get("variantId", ""), "ProductVariant")
     if checkout_token is None:
         return _not_found("checkout")
     if product_pk is None or variant_pk is None:
@@ -273,7 +281,16 @@ def configured_line(request):
     fees = list(Fee.objects.filter(product_id=product_pk))
     # Read from the WRITER: a group that decides the price about to be stamped
     # on a checkout line is read from the database the line is written to.
-    customer_pk = _from_gid(body.get("customerId") or "", "User")
+    customer_pk = global_pk(body.get("customerId") or "", "User")
+    # The fork's SECOND piece of evidence about who is buying, and it used to be
+    # thrown away: a checkout that names a user is independent of the body. The
+    # storefront resolves the buyer server-side from its own httpOnly session
+    # cookie and never sends a mismatched pair, so this refuses nothing it sends.
+    # It is what keeps one leaked storefront key off every signed-in cart.
+    if buyer_mismatch(checkout, customer_pk):
+        return JsonResponse(
+            {"violations": ["this checkout belongs to another buyer"]}, status=409
+        )
     tier_group = _tier_group(
         body.get("customerId"), settings.DATABASE_CONNECTION_DEFAULT_NAME
     )

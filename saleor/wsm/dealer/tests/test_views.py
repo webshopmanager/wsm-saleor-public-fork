@@ -369,3 +369,77 @@ def test_dealer_line_refuses_more_than_the_stock_on_hand(
     assert response.status_code == 422
     assert response.json()["error"] == "lineRefused"
     assert not CheckoutLine.objects.filter(checkout_id=checkout.pk).exists()
+
+
+# --- malformed ids are refused, and the checkout's own user is evidence -----
+
+
+@pytest.mark.parametrize(
+    "url,body",
+    [
+        (PRICES_URL, {"customerId": "garbage", "channel": "x", "variantIds": []}),
+        (
+            PRICES_URL,
+            {
+                "customerId": graphene.Node.to_global_id("User", "not-a-number"),
+                "channel": "x",
+                "variantIds": [],
+            },
+        ),
+        (LINE_URL, {"checkoutId": "garbage", "channel": "x"}),
+        (LINE_URL, {"checkoutId": gid("Checkout", "not-a-uuid"), "channel": "x"}),
+        (REPRICE_URL, {"checkoutId": "garbage", "channel": "x"}),
+    ],
+)
+def test_an_id_that_is_not_an_id_is_refused_rather_than_raised(client, url, body):
+    """`_pk` handed anything it could not read straight to the ORM, as a 500."""
+    response = post(client, url, body)
+
+    assert response.status_code == 400, response.content
+    assert response.json() == {"error": "malformedId"}
+
+
+def test_the_dealer_add_refuses_a_buyer_the_checkout_does_not_belong_to(
+    client, checkout, variant, customer_user, staff_user, tiers, channel_USD
+):
+    checkout.user = staff_user
+    checkout.save(update_fields=["user"])
+
+    response = post(
+        client,
+        LINE_URL,
+        {
+            "checkoutId": gid("Checkout", checkout.pk),
+            "channel": channel_USD.slug,
+            "variantId": gid("ProductVariant", variant.pk),
+            "quantity": 5,
+            "customerId": gid("User", customer_user.pk),
+        },
+    )
+
+    assert response.status_code == 409, response.content
+    assert response.json() == {"error": "checkoutBuyerMismatch"}
+    assert CheckoutLine.objects.filter(checkout_id=checkout.pk).count() == 0
+
+
+def test_the_reprice_refuses_a_buyer_the_checkout_does_not_belong_to(
+    client, checkout_with_item, customer_user, staff_user, channel_USD
+):
+    checkout = checkout_with_item
+    checkout.user = staff_user
+    checkout.save(update_fields=["user"])
+    line = checkout.lines.first()
+
+    response = post(
+        client,
+        REPRICE_URL,
+        {
+            "checkoutId": gid("Checkout", checkout.pk),
+            "channel": channel_USD.slug,
+            "lineId": gid("CheckoutLine", line.pk),
+            "customerId": gid("User", customer_user.pk),
+        },
+    )
+
+    assert response.status_code == 409, response.content
+    assert response.json() == {"error": "checkoutBuyerMismatch"}

@@ -192,10 +192,13 @@ def test_option_sets_unknown_product_is_404(client, db):
 def test_option_sets_stays_inside_its_query_budget(
     client, stage_2_kit, omit_parts, crating_fee, django_assert_num_queries
 ):
-    # Design section 5: one read for the sets and their values (a prefetch is
+    # Design section 5, restated from the measurement: one read to prove the
+    # product is published somewhere (the anonymous endpoint says nothing about
+    # an unreleased product), one for the sets and their values (a prefetch is
     # two statements), one for the fees, and since design section 11 one for the
-    # product's Prop 65 row. Anything more is an N+1 creeping in.
-    with django_assert_num_queries(4):
+    # product's Prop 65 row. Flat: 5 at one set and two values, 5 at five sets
+    # and fifty. Anything more is an N+1 creeping in.
+    with django_assert_num_queries(5):
         client.get(OPTION_SETS_URL.format(gid("Product", stage_2_kit.product_id)))
 
 
@@ -857,3 +860,129 @@ def test_a_configured_add_does_not_stamp_a_plain_retail_line_of_the_same_variant
     assert retail.private_metadata == {}
     assert retail.price_override is None
     assert retail.price_override_reason is None
+
+
+# --- (e) an id that is not an id, and a product that is not published -------
+
+
+def post_raw(client, body):
+    return client.post(
+        CONFIGURED_LINE_URL,
+        data=json.dumps(body),
+        content_type="application/json",
+        **HEADERS,
+    )
+
+
+def line_body(checkout, variant, option_set, value, **overrides):
+    body = {
+        "checkoutId": gid("Checkout", checkout.token),
+        "channel": checkout.channel.slug,
+        "productId": gid("Product", variant.product_id),
+        "variantId": gid("ProductVariant", variant.pk),
+        "quantity": 1,
+        "selections": [{"set_id": option_set.pk, "value_ids": [value.pk]}],
+        "acceptedFeeIds": [],
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("checkoutId", "garbage"),
+        ("checkoutId", gid("Checkout", "not-a-uuid")),
+        ("productId", gid("Product", "not-a-number")),
+        ("variantId", "garbage"),
+        ("customerId", gid("User", "not-a-number")),
+    ],
+)
+def test_an_id_that_is_not_an_id_is_refused_rather_than_raised(
+    client, checkout, stage_2_kit, omit_parts, field, value
+):
+    """A key-gated money endpoint answers 400, never 500.
+
+    The pk inside a well-formed global id used to go straight to the ORM, so
+    `base64("Checkout:junk")` reached `uuid.UUID()` and a bare `garbage` reached
+    `int()`. A 500 is a stack trace in the log and a retry from the caller.
+    """
+    option_set, values = omit_parts
+
+    response = post_raw(
+        client, line_body(checkout, stage_2_kit, option_set, values[0], **{field: value})
+    )
+
+    assert response.status_code == 400, response.content
+    assert "malformed" in response.json()["violations"][0]
+
+
+def test_the_option_sets_url_refuses_a_malformed_product_id(client):
+    response = client.get(OPTION_SETS_URL.format("garbage"))
+
+    assert response.status_code == 400, response.content
+
+
+def test_option_sets_does_not_answer_for_an_unpublished_product(
+    client, stage_2_kit, omit_parts, crating_fee
+):
+    """The one anonymous endpoint does not leak an unreleased product's configuration.
+
+    Product ids are sequential integers inside a guessable global id, and an
+    unreleased product's option prices are not PDP-visible the way a published
+    product's are. Absent and unpublished answer identically, so this is not a
+    row-existence oracle either.
+    """
+    url = OPTION_SETS_URL.format(gid("Product", stage_2_kit.product_id))
+    assert client.get(url).status_code == 200
+
+    stage_2_kit.product.channel_listings.update(is_published=False)
+
+    hidden = client.get(url)
+    absent = client.get(OPTION_SETS_URL.format(gid("Product", 987654321)))
+    assert hidden.status_code == 404
+    assert hidden.content == absent.content
+
+
+def test_a_configured_add_refuses_a_buyer_the_checkout_does_not_belong_to(
+    client, checkout, stage_2_kit, omit_parts, customer_user, staff_user
+):
+    """The checkout's own user is evidence about the buyer, and it used to be ignored."""
+    option_set, values = omit_parts
+    checkout.user = staff_user
+    checkout.save(update_fields=["user"])
+
+    response = post_raw(
+        client,
+        line_body(
+            checkout,
+            stage_2_kit,
+            option_set,
+            values[0],
+            customerId=gid("User", customer_user.pk),
+        ),
+    )
+
+    assert response.status_code == 409, response.content
+    assert checkout.lines.count() == 0
+
+
+def test_a_configured_add_still_serves_the_buyer_the_checkout_belongs_to(
+    client, checkout, stage_2_kit, omit_parts, customer_user
+):
+    option_set, values = omit_parts
+    checkout.user = customer_user
+    checkout.save(update_fields=["user"])
+
+    response = post_raw(
+        client,
+        line_body(
+            checkout,
+            stage_2_kit,
+            option_set,
+            values[0],
+            customerId=gid("User", customer_user.pk),
+        ),
+    )
+
+    assert response.status_code == 200, response.content

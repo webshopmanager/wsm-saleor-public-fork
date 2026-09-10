@@ -42,7 +42,7 @@ from ...graphql.checkout.mutations.utils import CheckoutLineData
 from ...plugins.manager import get_plugins_manager
 from ...product.models import ProductVariant, ProductVariantChannelListing
 from ..checkout import LineRefused, check_addable, whole_number
-from ..http import storefront_key_required
+from ..http import buyer_mismatch, global_pk, refuses_malformed_ids, storefront_key_required
 from . import pricing
 from .no_stacking import LINE_METADATA_KEY, PRICE_OVERRIDE_REASON
 from .tax import bind_tax_exemption
@@ -65,21 +65,21 @@ def _body(request) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _pk(global_id, expected_type: str):
+# The app's own error shape, handed to the shared refusal once.
+_MALFORMED = refuses_malformed_ids(lambda message: {"error": "malformedId"})
+
+
+def _pk(global_id, expected_type: str, *, shape: str = "int"):
     """The database id inside a Saleor GID, or None. Raw ids are accepted too.
 
     The storefront sends GIDs; the admin and curl send whatever is at hand, and
-    refusing a raw primary key would buy nothing.
+    refusing a raw primary key would buy nothing. What the old body did buy was
+    a 500: anything `from_global_id` could not read came back VERBATIM and went
+    to the ORM, so `Checkout.pk` (a UUID) and `User.pk` (an AutoField) both blew
+    up in the query layer. The shape of the key is checked in one shared place
+    now, and a value that is not one is a refusal rather than a stack trace.
     """
-    if not global_id:
-        return None
-    try:
-        type_name, raw = graphene.Node.from_global_id(str(global_id))
-    except Exception:
-        return str(global_id)
-    if type_name != expected_type:
-        return None
-    return raw
+    return global_pk(global_id, expected_type, shape=shape, allow_raw=True)
 
 
 def _customer(customer_id, db):
@@ -127,6 +127,7 @@ def _invalidate(checkout):
 @csrf_exempt
 @require_POST
 @storefront_key_required
+@_MALFORMED
 def storefront_prices(request):
     """Endpoint 3. Every break the buyer can reach on up to 100 variants."""
     body = _body(request)
@@ -152,13 +153,23 @@ def storefront_prices(request):
 @require_POST
 @storefront_key_required
 @allow_writer()
+@_MALFORMED
 def dealer_line(request):
     """Endpoint 4. Add one line, priced at the buyer's break where there is one."""
     body = _body(request)
 
-    checkout = Checkout.objects.filter(pk=_pk(body.get("checkoutId"), "Checkout")).first()
+    checkout = Checkout.objects.filter(
+        pk=_pk(body.get("checkoutId"), "Checkout", shape="uuid")
+    ).first()
     if checkout is None:
         return _error("checkoutNotFound", 404)
+    # A checkout that names a user is the fork's second piece of evidence about
+    # who is buying, and it was thrown away. The storefront resolves the buyer
+    # server-side from an httpOnly cookie and never sends a mismatched pair, so
+    # nothing it sends is refused here; one leaked key stops being every
+    # signed-in cart.
+    if buyer_mismatch(checkout, _pk(body.get("customerId"), "User")):
+        return _error("checkoutBuyerMismatch", 409)
     channel = Channel.objects.filter(slug=body.get("channel")).first()
     if channel is None or checkout.channel_id != channel.pk:
         return _error("channelMismatch", 409)
@@ -288,6 +299,7 @@ def _add_line(checkout, channel, variant, quantity, winner, user):
 @require_POST
 @storefront_key_required
 @allow_writer()
+@_MALFORMED
 def dealer_line_reprice(request):
     """Endpoint 5. Re-run the ladder against the line's CURRENT quantity.
 
@@ -297,16 +309,21 @@ def dealer_line_reprice(request):
     """
     body = _body(request)
 
-    checkout = Checkout.objects.filter(pk=_pk(body.get("checkoutId"), "Checkout")).first()
+    checkout = Checkout.objects.filter(
+        pk=_pk(body.get("checkoutId"), "Checkout", shape="uuid")
+    ).first()
     if checkout is None:
         return _error("checkoutNotFound", 404)
+    if buyer_mismatch(checkout, _pk(body.get("customerId"), "User")):
+        return _error("checkoutBuyerMismatch", 409)
     channel = Channel.objects.filter(slug=body.get("channel")).first()
     if channel is None or checkout.channel_id != channel.pk:
         return _error("channelMismatch", 409)
 
     line = (
         CheckoutLine.objects.filter(
-            checkout_id=checkout.pk, pk=_pk(body.get("lineId"), "CheckoutLine")
+            checkout_id=checkout.pk,
+            pk=_pk(body.get("lineId"), "CheckoutLine", shape="uuid"),
         )
         .select_related("variant")
         .first()

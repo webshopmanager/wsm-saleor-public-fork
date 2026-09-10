@@ -8,7 +8,6 @@ draw the configurator is on the Collection's own metadata under `wsm.series`
 """
 
 import base64
-import binascii
 import json
 from decimal import Decimal
 
@@ -23,7 +22,12 @@ from ...core.db.connection import allow_writer
 from ..checkout import LineRefused, whole_number
 from ..dealer import pricing as dealer_pricing
 from ..dealer.tax import bind_tax_exemption
-from ..http import storefront_key_required
+from ..http import (
+    buyer_mismatch,
+    global_pk,
+    refuses_malformed_ids,
+    storefront_key_required,
+)
 from . import pricing
 from .models import KitConfig, KitRulesRefused, UnknownKitMember
 
@@ -32,23 +36,10 @@ def _money(cents: int) -> str:
     return f"{Decimal(cents) / 100:.2f}"
 
 
-def _from_gid(raw: str, expected: str) -> str | None:
-    """Return the primary key inside a Saleor global id, or None if the type is wrong.
-
-    Padding is restored before decoding: a GID that lost its `=` in a URL is a
-    routine thing to receive and refusing it would be a false 404.
-    """
-    if not raw:
-        return None
-    padded = raw + "=" * (-len(raw) % 4)
-    try:
-        decoded = base64.b64decode(padded.encode()).decode()
-    except (binascii.Error, UnicodeDecodeError, ValueError):
-        return None
-    type_name, sep, pk = decoded.partition(":")
-    if not sep or type_name != expected or not pk:
-        return None
-    return pk
+# The app's own error shape, handed to the shared refusal once. This module's
+# own byte-identical copy of `_from_gid` is gone: the pk-shape check that keeps
+# a junk id out of the ORM exists once, in saleor/wsm/http.py.
+_MALFORMED = refuses_malformed_ids(lambda message: {"violations": [message]})
 
 
 def _to_gid(type_name: str, pk) -> str:
@@ -75,8 +66,8 @@ def _variant_pk(raw):
         return raw
     if isinstance(raw, str) and raw.isdigit():
         return int(raw)
-    pk = _from_gid(raw or "", "ProductVariant")
-    return int(pk) if pk is not None and pk.isdigit() else None
+    pk = global_pk(raw or "", "ProductVariant")
+    return int(pk) if pk is not None else None
 
 
 def _rule_json(rule):
@@ -149,6 +140,7 @@ def resolve_tier_lookup(kit, checkout, user, group_code=None):
 # it, exactly as its own webhook views do (saleor/plugins/views.py). This view
 # writes checkout lines, so it asks.
 @allow_writer()
+@_MALFORMED
 def kit_line(request):
     """Explode one kit into its member lines at server-computed prices."""
     try:
@@ -156,11 +148,11 @@ def kit_line(request):
     except ValueError:
         return _refused("body is not JSON")
 
-    checkout_token = _from_gid(body.get("checkoutId", ""), "Checkout")
-    collection_pk = _from_gid(body.get("collectionId", ""), "Collection")
+    checkout_token = global_pk(body.get("checkoutId", ""), "Checkout", shape="uuid")
+    collection_pk = global_pk(body.get("collectionId", ""), "Collection")
     if checkout_token is None:
         return _not_found("checkout")
-    if collection_pk is None or not collection_pk.isdigit():
+    if collection_pk is None:
         return _not_found("kit")
 
     quantity = whole_number(body.get("quantity") or 1)
@@ -201,9 +193,15 @@ def kit_line(request):
     user = None
     raw_customer = body.get("customerId")
     if raw_customer:
-        customer_pk = _from_gid(raw_customer, "User")
+        customer_pk = global_pk(raw_customer, "User")
         if customer_pk is None:
             return _not_found("customer")
+        # A checkout that names a user is evidence about the buyer that the body
+        # cannot overrule. The storefront never sends a mismatched pair.
+        if buyer_mismatch(checkout, customer_pk):
+            return JsonResponse(
+                {"violations": ["this checkout belongs to another buyer"]}, status=409
+            )
         user = User.objects.filter(pk=customer_pk).first()
         if user is None:
             return _not_found("customer")

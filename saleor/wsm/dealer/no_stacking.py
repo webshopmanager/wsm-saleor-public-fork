@@ -1,5 +1,5 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md ("Monkey patches").
-"""Which lines a discount may touch, and the two wraps that hold the line.
+"""Which lines a discount may touch, and the three wraps that hold the line.
 
 Three rules share one traversal, `split_discountable`:
 
@@ -11,7 +11,11 @@ Three rules share one traversal, `split_discountable`:
   again. Measured live 2026-09-09: an Alba RZR900 kit member overridden at
   1899.99 under a 254.01 rule billed at 1645.98 and the kit at a subtotal of
   2278.98 instead of 2532.99. This one is the CATALOGUE path only; a voucher is
-  a second discount the merchant does mean to stack on a sale price.
+  a second discount the merchant does mean to stack on a sale price. It holds on
+  the checkout AND on the order: `saleor/discount/utils/order.py` is a second
+  copy of the same code, reached on every draft order recalculation and every
+  order edit, and a rule that held in the cart and not on the order would quote
+  a shopper the price they were not charged.
 - A FEE line is never discountable, and there is no toggle on that one. A fee is
   a charge the merchant passes through (crating, core, environmental) carried as
   its own checkout line; in 5.0 a coupon came off the merchandise subtotal and
@@ -36,9 +40,9 @@ There is no stock lever. Both discount paths were read before this was written:
   every dealer line would put a discount row a merchant never created into the
   API, the order and the invoice.
 
-So this is the bake-off's first monkey patch, and it is two wraps that both drop
-dealer lines out of the line set the stock code discounts. Nothing is
-reimplemented: the original functions do all the work, on fewer lines.
+So this is the bake-off's first monkey patch, and it is three wraps that all
+drop undiscountable lines out of the line set the stock code discounts. Nothing
+is reimplemented: the original functions do all the work, on fewer lines.
 
 Cost: zero. A checkout with no dealer line takes the original path with no extra
 call and no settings query; the toggle is read only once a dealer line is
@@ -47,9 +51,9 @@ present, and cached per process until the row changes.
 Upstream change that would delete this file: a documented exclusion hook on the
 checkout line-discount path, e.g. a `CheckoutLine.discounts_excluded` flag (or a
 `can_discount_line(line_info)` predicate) honoured by both
-`attach_voucher_to_line_info` and
-`prepare_checkout_line_discount_objects_for_catalogue_promotions`, the way
-`is_gift` already is.
+`attach_voucher_to_line_info` and both
+`prepare_*_line_discount_objects_for_catalogue_promotions`, the way `is_gift`
+already is.
 """
 
 from __future__ import annotations
@@ -102,10 +106,16 @@ CATALOGUE = (
     "prepare_checkout_line_discount_objects_for_catalogue_promotions"
 )
 CATALOGUE_BINDING_SITES = patches.PINNED[CATALOGUE]
+ORDER_CATALOGUE = (
+    "saleor.discount.utils.order."
+    "prepare_order_line_discount_objects_for_catalogue_promotions"
+)
+ORDER_CATALOGUE_BINDING_SITES = patches.PINNED[ORDER_CATALOGUE]
 
 _installed = False
 _voucher_guard = None
 _catalogue_guard = None
+_order_catalogue_guard = None
 
 
 def is_dealer_line(line) -> bool:
@@ -233,32 +243,77 @@ def _guard_vouchers():
     _voucher_guard = install_guard(VOUCHER, voucher_guard)
 
 
+def _catalogue_split(lines_info):
+    """(eligible, excluded, stale) for either catalogue path. One pass, no query.
+
+    `eligible` is the lines the original may still discount; `stale` is every
+    catalogue row already sitting on a line that is no longer one of them. A
+    merchant can put a product on sale after the line was created, so a rule
+    that only skipped NEW lines would leave the old ones discounted twice.
+
+    Decided here and not in each wrapper because a shopper meets both paths in
+    one purchase: a line the cart refuses to discount and the order agrees to
+    quotes two prices for the same thing, and the order's is the one billed.
+    """
+    eligible, excluded = split_discountable(
+        lines_info, line_of_info, is_sale_priced_line
+    )
+    stale = [
+        discount for info in excluded for discount in info.get_catalogue_discounts()
+    ]
+    return eligible, excluded, stale
+
+
 def catalogue_guard(original):
     """The wrapper, given the function it wraps, so a test can build its own."""
 
     @wraps(original)
     def prepare_checkout_line_discount_objects_for_catalogue_promotions(lines_info):
-        eligible, excluded = split_discountable(
-            lines_info, line_of_info, is_sale_priced_line
-        )
+        eligible, excluded, stale = _catalogue_split(lines_info)
         if not excluded:
             return original(lines_info)
 
         result = original(eligible)
-        # A promotion already written onto a line before it became undiscountable
-        # has to come off, or the rule only holds for lines added after it.
-        stale = [
-            discount
-            for info in excluded
-            for discount in info.get_catalogue_discounts()
-        ]
         if result is None:
+            # The original answers nothing when it is handed no lines at all,
+            # which is what a cart of nothing but kit members leaves it. The
+            # stale rows still have to come off. The fifth slot is the promotion
+            # end date, which no removal moves.
             return ([], [], stale, [], None) if stale else None
-        creates, updates, removes, updated_fields, end_date = result
-        removes.extend(stale)
-        return creates, updates, removes, updated_fields, end_date
+        # Slot 2 is `line_discounts_to_remove`, in both paths' answer.
+        result[2].extend(stale)
+        return result
 
     return prepare_checkout_line_discount_objects_for_catalogue_promotions
+
+
+def order_catalogue_guard(original):
+    """The same rule on the order path. A wrapper a test can build its own of.
+
+    `saleor/discount/utils/order.py` is a second copy of the checkout catalogue
+    code, reached on every draft order recalculation and every order edit, and
+    it was unguarded: the kit member the cart charged 1899.99 fell to 1645.98
+    the moment the checkout became an order. `create_order_from_checkout` copies
+    `price_override_reason` and the private stamps onto the order line, so the
+    same three predicates answer the question with no new field.
+
+    It differs from the checkout wrapper in one thing only, the width of the
+    answer: the order path has no promotion end date to carry.
+    """
+
+    @wraps(original)
+    def prepare_order_line_discount_objects_for_catalogue_promotions(lines_info):
+        eligible, excluded, stale = _catalogue_split(lines_info)
+        if not excluded:
+            return original(lines_info)
+
+        result = original(eligible)
+        if result is None:
+            return ([], [], stale, []) if stale else None
+        result[2].extend(stale)
+        return result
+
+    return prepare_order_line_discount_objects_for_catalogue_promotions
 
 
 def installed_catalogue_guard():
@@ -266,9 +321,19 @@ def installed_catalogue_guard():
     return _catalogue_guard
 
 
+def installed_order_catalogue_guard():
+    """The wrapper `install` put in place, for the test that pins the site set."""
+    return _order_catalogue_guard
+
+
 def _guard_catalogue_promotions():
     global _catalogue_guard
     _catalogue_guard = install_guard(CATALOGUE, catalogue_guard)
+
+
+def _guard_order_catalogue_promotions():
+    global _order_catalogue_guard
+    _order_catalogue_guard = install_guard(ORDER_CATALOGUE, order_catalogue_guard)
 
 
 def install() -> None:
@@ -280,3 +345,4 @@ def install() -> None:
 
     _guard_vouchers()
     _guard_catalogue_promotions()
+    _guard_order_catalogue_promotions()

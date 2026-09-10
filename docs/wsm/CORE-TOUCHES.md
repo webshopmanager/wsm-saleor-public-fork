@@ -563,10 +563,10 @@ in `saleor/wsm/tests/test_reprice.py`, which drives the forgery through the
 stock `updateMetadata` mutation unauthenticated, asserts the mutation is
 accepted, and then asserts the price does not move.
 
-## MP1. Dealer lines and fee lines are excluded from checkout line discounts
+## MP1. Undiscountable lines are left out of line discounts, cart and order
 
 Installed by `saleor/wsm/dealer/apps.py` `DealerConfig.ready()`; the whole patch
-is `saleor/wsm/dealer/no_stacking.py`. Two functions are wrapped, neither is
+is `saleor/wsm/dealer/no_stacking.py`. Three functions are wrapped, none is
 reimplemented: each wrapper calls the original with a smaller list of lines.
 
 **Which lines get left out is one function, `split_discountable`**, and MP1 and
@@ -583,6 +583,18 @@ apart. It excludes two kinds of line:
   label and `apply_to` only), and the answer would be the same if it were.
 - Any line carrying the private `wsm.dealer` stamp, while the merchant leaves
   discount stacking off. That is requirement 2.4 and its toggle, unchanged.
+- On the CATALOGUE paths only, any line the fork priced FROM the listing's sale
+  price: `price_override_reason` of `wsm.containers` (a kit member) or
+  `wsm.compose` (a configured line or its charge). The promotion is already
+  inside the number written to `price_override`, so stock Saleor taking the
+  same rule off that override charges the merchant's one sale twice. Measured
+  live on the Tonneau Outlaw stage 2026-09-09: an Alba RZR900 kit member
+  overridden at 1899.99 under a 254.01 rule billed at 1645.98, and the kit at a
+  subtotal of 2278.98 instead of 2532.99. A VOUCHER still stacks on those
+  lines, which is why this is an argument to `split_discountable` and not a
+  third clause inside it: a voucher is a discount the merchant does mean to
+  give on top of a sale price, and only the caller knows which rule it is
+  under.
 
 The toggle is read at most once per call and only once a dealer line has
 actually been seen, so a cart of retail lines and charges still costs no
@@ -593,6 +605,7 @@ original arguments.
 |---|---|---|
 | `attach_voucher_to_line_info(voucher_info, lines_info)` | `saleor/discount/utils/voucher.py` | Runs the original, then clears `voucher` and `voucher_code` from every line info `split_discountable` excludes. |
 | `prepare_checkout_line_discount_objects_for_catalogue_promotions(lines_info)` | `saleor/discount/utils/checkout.py` | Calls the original with the discountable lines only, and adds any catalogue discount already sitting on an excluded line to the returned removal list. |
+| `prepare_order_line_discount_objects_for_catalogue_promotions(lines_info)` | `saleor/discount/utils/order.py` | The same, on the order path's own copy of that code. Both wrappers call one `_catalogue_split`, so which lines are left out is decided once; they differ only in the width of the answer the original returns, the order path having no promotion end date to carry. |
 
 The voucher function is rebound in every module that holds it as its own
 attribute: the module that defines it, plus `saleor.order.fetch` and
@@ -640,12 +653,24 @@ cheaper than a wrong price.
 Upstream change that deletes this file: a documented per-line discount exclusion
 on the checkout path, for example a `CheckoutLine.discounts_excluded` flag or a
 `can_discount_line(line_info)` predicate honoured by both
-`attach_voucher_to_line_info` and
-`prepare_checkout_line_discount_objects_for_catalogue_promotions`, the way
+`attach_voucher_to_line_info` and both
+`prepare_*_line_discount_objects_for_catalogue_promotions`, the way
 `is_gift` already is.
 
+**Why the order path needs its own wrap.** `saleor/discount/utils/order.py` is a
+second copy of the checkout catalogue code, run on every draft order
+recalculation and every order edit, and it was left unguarded when the
+sale-price rule landed. `create_order_from_checkout` copies
+`price_override_reason` and the private stamps onto the order line, so all three
+predicates already answer on an order line and the wrap costs one more entry in
+`PINNED`. Without it a kit member the cart charged 1899.99 fell back to 1645.98
+the moment the checkout became an order, and a dealer line lost its tier price
+to a promotion the cart had kept off it: the shopper is shown one price and
+billed another, and the order is the one they are billed.
+
 Scope: this covers LINE-level discounts (catalogue promotions, `SPECIFIC_PRODUCT`
-and `apply_once_per_order` vouchers). ENTIRE_ORDER vouchers and order promotions
+and `apply_once_per_order` vouchers), on the checkout and on the order.
+ENTIRE_ORDER vouchers and order promotions
 are checkout-level discounts in Saleor, they never reach a line, and MP1 leaves
 them alone. U3 filed that gap rather than fixing it; MP2 below closes it.
 

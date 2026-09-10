@@ -42,6 +42,14 @@ PINNED = {
     "prepare_checkout_line_discount_objects_for_catalogue_promotions": (
         "saleor.discount.utils.checkout",
     ),
+    # The order path's own copy of the line above. `refresh_order_...` reaches
+    # it through the module global in the file that defines it, so the definer
+    # is the only site; the sweep in `install_guard` says so at every boot
+    # rather than this comment saying so once.
+    "saleor.discount.utils.order."
+    "prepare_order_line_discount_objects_for_catalogue_promotions": (
+        "saleor.discount.utils.order",
+    ),
     # MP2, saleor/wsm/dealer/no_stacking_order_level.py: an order-level discount
     # is computed and spread over the retail lines only.
     "saleor.checkout.utils.get_voucher_discount_for_checkout": (

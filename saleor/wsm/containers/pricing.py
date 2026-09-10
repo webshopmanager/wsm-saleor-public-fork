@@ -57,6 +57,11 @@ class Member:
 
     `variant` is a ProductVariant in production and any object in a unit test:
     nothing here reads it, it is handed to `tier_lookup` and to the caller.
+
+    `unit_list_cents` is what one of this member sells for on its own BEFORE the
+    kit does anything, which means after any catalogue promotion the merchant put
+    it on: the kit discount prorates over what the parts actually cost today, not
+    over a list price nobody is being charged.
     """
 
     variant: object

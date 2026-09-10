@@ -663,3 +663,28 @@ def test_a_configured_line_whose_option_vanished_leaves_the_cart_readable(
 
     assert not CheckoutLine.objects.filter(pk__in=[parent.pk, fees[0].pk]).exists()
     assert prices(graphql(client, READ_CHECKOUT, ident(checkout))) == []
+
+
+def test_a_promotion_that_starts_after_the_add_moves_the_line_down(
+    client, checkout, stage_2_kit, omit_parts, crating_fee,
+):
+    """A sale the merchant starts mid-cart reaches the line on the next read.
+
+    The mirror of every other correction in this file: the base price moved, so
+    the configured line moves with it. Without it a shopper who loaded a page
+    before the promotion went live pays the old price all the way into the order,
+    while the catalog beside it quotes the new one.
+    """
+    parent, _ = configure(client, checkout, stage_2_kit, omit_parts)
+    assert parent.price_override == Decimal(CONFIGURED_UNIT)
+
+    stage_2_kit.channel_listings.filter(channel=checkout.channel).update(
+        discounted_price_amount=Decimal("3500.00")
+    )
+
+    checkout_info, lines = checkout_info_for(checkout)
+    reprice(checkout_info, lines)
+
+    parent.refresh_from_db()
+    # 3500.00 less the same three omitted parts.
+    assert parent.price_override == Decimal("2995.01")

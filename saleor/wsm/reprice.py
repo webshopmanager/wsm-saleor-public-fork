@@ -76,6 +76,7 @@ from .containers.pricing import (
     META_KIT,
     PRICE_OVERRIDE_REASON as KIT_REASON,
 )
+from .money import unit_amount
 from .dealer import pricing as dealer_pricing
 from .dealer.no_stacking import (
     LINE_METADATA_KEY as DEALER_META,
@@ -716,7 +717,11 @@ def _reprice_one_configured(
     required = {fee.pk for fee in product_fees if fee.required}
     try:
         priced = compose_pricing.price_configured(
-            to_cents(line_info.channel_listing.price_amount),
+            # The same base the add endpoint used, re-read: a promotion that
+            # started after the line was added moves it DOWN on the next cart
+            # read, and one that ended moves it back up, which is what "no price
+            # this fork wrote outlives the facts it was computed from" means.
+            to_cents(unit_amount(line_info.channel_listing)),
             [
                 option_set.to_pricing()
                 for option_set in sets_by_product.get(line_info.product.pk, [])

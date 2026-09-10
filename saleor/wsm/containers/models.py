@@ -25,6 +25,7 @@ from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models, transaction
 
+from ..money import unit_amount
 from . import pricing
 
 # The raw values are the pricing module's vocabulary. A merchant reads the
@@ -397,6 +398,12 @@ class KitConfig(models.Model):
         query is the cheap half of the pair, and it keeps the member rows from
         multiplying if a variant is ever listed in more than one channel.
 
+        A member's price is what that member SELLS FOR on its own today, the
+        merchant's catalogue promotion included (`money.unit_amount`), and the
+        kit's own discount then comes off that. The list price was charged here
+        until 2026-09-09, which overcharged every kit holding a part the merchant
+        had put on sale.
+
         `variant_ids` is the shopper's PICKS. A kit page that offers a manual or
         an HD tensioner sends back the one they chose, and the money is then the
         money for what they are buying: the discount prorates over the picked
@@ -417,13 +424,14 @@ class KitConfig(models.Model):
         if not members:
             raise pricing.KitRefusal("a kit with no members has no price")
 
-        prices = dict(
-            ProductVariantChannelListing.objects.filter(
+        prices = {
+            listing.variant_id: unit_amount(listing)
+            for listing in ProductVariantChannelListing.objects.filter(
                 variant_id__in=[m.variant_id for m in members],
                 channel_id=channel.pk,
                 price_amount__isnull=False,
-            ).values_list("variant_id", "price_amount")
-        )
+            ).only("variant_id", "price_amount", "discounted_price_amount")
+        }
         missing = [m.variant_id for m in members if m.variant_id not in prices]
         if missing:
             raise pricing.KitRefusal(

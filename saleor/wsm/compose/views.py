@@ -39,6 +39,7 @@ from ..dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from ..dealer.tax import bind_tax_exemption
 from ..checkout import LineRefused, check_addable, whole_number
 from ..http import storefront_key_required
+from ..money import unit_amount
 from . import pricing
 from .lines import (
     META_ACCEPTED,
@@ -291,7 +292,11 @@ def configured_line(request):
     try:
         selections = _selections(body.get("selections"))
         priced = pricing.price_configured(
-            to_cents(listing.price_amount),
+            # The base is what this variant SELLS FOR today, the merchant's
+            # catalogue promotion included, and the option deltas move off that.
+            # `price_amount` was the base until 2026-09-09, which billed a
+            # configured line at list for a product the shop had on sale.
+            to_cents(unit_amount(listing)),
             [s.to_pricing() for s in sets],
             selections,
             tier_group,

@@ -390,7 +390,11 @@ def bakeoff_kit(collection, product_list, channel_USD):
     collection.products.add(stage_2, stage_3)
     for product, price in ((stage_2, "3998.99"), (stage_3, "6399.00")):
         product.variants.first().channel_listings.filter(channel=channel_USD).update(
-            price_amount=Decimal(price)
+            # Both columns, because the promotion task keeps them in step and the
+            # fork charges from the discounted one: a fixture that moves only the
+            # list price describes a listing production never holds.
+            price_amount=Decimal(price),
+            discounted_price_amount=Decimal(price),
         )
     kit = KitConfig.objects.create(
         collection=collection,
@@ -635,7 +639,11 @@ def fee_kit(collection, product_list, channel_USD):
     collection.products.add(body, core)
     for product, price in ((body, "3180.85"), (core, "500.00")):
         product.variants.first().channel_listings.filter(channel=channel_USD).update(
-            price_amount=Decimal(price)
+            # Both columns, because the promotion task keeps them in step and the
+            # fork charges from the discounted one: a fixture that moves only the
+            # list price describes a listing production never holds.
+            price_amount=Decimal(price),
+            discounted_price_amount=Decimal(price),
         )
     kit = KitConfig.objects.create(
         collection=collection,
@@ -939,3 +947,49 @@ def test_the_picked_kit_is_re_derived_as_the_picked_kit(
 
     assert after == before
     assert set(after) == set(picked)
+
+
+# --- the member the merchant put on sale ------------------------------------
+
+
+def test_a_member_on_sale_is_priced_at_the_sale_price(
+    client, checkout, kit, product_list
+):
+    """A kit never charges list for a part its own shop advertises cheaper.
+
+    Measured live 2026-09-09: the Team Alba rebuild kit's 350-96MM-KIT member sat
+    at base 2154.00 under a 254.01 catalogue promotion, Saleor's own pricing
+    answered 1899.99, and this endpoint charged 2154.00 and billed the kit
+    2787.00 instead of 2532.99. The promotion is modelled here exactly as the
+    promotion tasks leave it, as `discounted_price_amount` on the listing.
+
+    The cheapest member's discounted price is NULLED on purpose: that is how
+    Saleor leaves a listing no price recalculation has reached yet, and the
+    fallback there has to be the list price rather than nothing at all.
+    """
+    cheapest, middle, dearest = (p.variants.first() for p in product_list)
+    dearest.channel_listings.filter(channel=checkout.channel).update(
+        discounted_price_amount=Decimal("24.00")
+    )
+    cheapest.channel_listings.filter(channel=checkout.channel).update(
+        discounted_price_amount=None
+    )
+
+    response = post_kit(client, checkout, kit.collection_id)
+
+    assert response.status_code == 200, response.content
+    payload = response.json()
+    units = {line["variantId"]: line["unitPrice"] for line in payload["lines"]}
+    # 10.00 + 20.00 + 24.00 = 54.00, ten percent off = 5.40, prorated by share
+    # as 1.00 / 2.00 / 2.40 with no residue to place.
+    assert units[gid("ProductVariant", cheapest.pk)] == "9.00"
+    assert units[gid("ProductVariant", middle.pk)] == "18.00"
+    assert units[gid("ProductVariant", dearest.pk)] == "21.60"
+    assert payload["listTotal"] == "54.00"
+    assert payload["discount"]["amount"] == "5.40"
+    assert payload["kitTotal"] == "48.60"
+    # On the lines, not only in the answer.
+    assert checkout.lines.get(variant_id=dearest.pk).price_override == Decimal("21.60")
+    # And a cart read re-derives it from the same listing, so it cannot drift
+    # back up to list on the next page the shopper loads.
+    assert recalculate(checkout)[dearest.pk] == Decimal("21.60")

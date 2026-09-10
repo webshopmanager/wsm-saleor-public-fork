@@ -597,3 +597,31 @@ def test_a_tax_exempt_dealers_configured_line_lands_in_a_cart_that_owes_no_tax(
     assert response.status_code == 200, response.content
     checkout.refresh_from_db()
     assert checkout.tax_exemption is True
+
+
+def test_a_configured_line_starts_from_the_sale_price(
+    client, checkout, stage_2_kit, omit_parts
+):
+    """The same defect as the kit member, on the configured line's own base.
+
+    A merchant who puts a configurable product on a catalogue promotion has
+    dropped its price: the option deltas come off what it sells for today, not
+    off the list price the storefront is already striking through.
+    """
+    option_set, values = omit_parts
+    stage_2_kit.channel_listings.filter(channel=checkout.channel).update(
+        discounted_price_amount=Decimal("3500.00")
+    )
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [v.pk for v in values]}],
+    )
+
+    assert response.status_code == 200, response.content
+    # 3500.00 - 29.99 - 30.00 - 445.00, where list would have given 3494.00.
+    assert response.json()["unitPrice"] == "2995.01"
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert line.price_override == Decimal("2995.01")

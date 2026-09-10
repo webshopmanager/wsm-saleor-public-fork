@@ -289,14 +289,26 @@ def configured_line(request):
         fid for fid in requested_fee_ids if fid not in required_fee_ids
     )
 
+    # The base is what this variant SELLS FOR this buyer today: the merchant's
+    # catalogue promotion included, and the dealer's own tier price in place of
+    # the listing when he has one and it is the better of the two. `price_amount`
+    # was the base until 2026-09-09, which billed a configured line at list for a
+    # product the shop had on sale; the listing alone was the base until
+    # 2026-09-10, which billed a DEALER at retail however correctly his option
+    # deltas were tiered.
+    base_amount, base_tiered = dealer_pricing.base_unit_price(
+        unit_amount(listing),
+        variant.pk,
+        checkout.channel,
+        tier_group,
+        quantity,
+        database_connection_name=settings.DATABASE_CONNECTION_DEFAULT_NAME,
+    )
+
     try:
         selections = _selections(body.get("selections"))
         priced = pricing.price_configured(
-            # The base is what this variant SELLS FOR today, the merchant's
-            # catalogue promotion included, and the option deltas move off that.
-            # `price_amount` was the base until 2026-09-09, which billed a
-            # configured line at list for a product the shop had on sale.
-            to_cents(unit_amount(listing)),
+            to_cents(base_amount),
             [s.to_pricing() for s in sets],
             selections,
             tier_group,
@@ -304,6 +316,7 @@ def configured_line(request):
             accepted_fee_ids=accepted_fee_ids,
             base_sku=variant.sku or "",
             quantity=quantity,
+            base_tiered=base_tiered,
         )
     except pricing.ComposeRefusal as refusal:
         return JsonResponse({"violations": [str(refusal)]}, status=422)

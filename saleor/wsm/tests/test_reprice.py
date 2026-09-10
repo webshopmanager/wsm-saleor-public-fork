@@ -30,9 +30,11 @@ from saleor.wsm.compose.models import OptionValue
 from saleor.wsm.compose.tests.test_api import (  # noqa: F401
     CONFIGURED_UNIT,
     FEE_AMOUNT,
+    buckle,
     crating_fee,
     dealer_credit,
     gid,
+    jobber,
     omit_parts,
     post_line,
     stage_2_kit,
@@ -493,6 +495,41 @@ def test_a_configured_checkout_costs_the_queries_the_doc_says_it_does(
     ]
 
 
+def test_a_dealer_priced_checkout_costs_one_more_query_for_the_whole_cart(
+    client, checkout, stage_2_kit, buckle, jobber,
+):
+    """The ladder that decides a dealer's base is read ONCE, not once per line.
+
+    Same steady read as the test above with a dealer on it: the four catalog
+    queries plus one ladder for every configured line at once. A per-line read
+    here would be a query per cart line on the hottest path in the app, which is
+    the shape `_reprice_dealer` was written to avoid.
+    """
+    option_set, value = buckle
+    post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [value.pk]}],
+        customer=jobber,
+    )
+    checkout_info, lines = checkout_info_for(checkout)
+
+    with CaptureQueriesContext(connection) as captured:
+        moved = reprice(checkout_info, lines)
+
+    assert moved == [], "nothing moved, so nothing is written"
+    tables = [q["sql"].split(" FROM ")[-1].split()[0] for q in captured.captured_queries]
+    assert tables == [
+        '"wsm_compose_optionset"',
+        '"wsm_compose_optionvalue"',
+        '"wsm_compose_dealertieroptionprice"',
+        '"wsm_compose_fee"',
+        # The buyer's own price for the variants under the configured lines.
+        '"wsm_dealer_tierprice"',
+    ]
+
+
 def test_a_price_correction_does_not_write_back_a_stale_quantity(
     client, checkout, stage_2_kit, omit_parts, crating_fee,
 ):
@@ -688,3 +725,39 @@ def test_a_promotion_that_starts_after_the_add_moves_the_line_down(
     parent.refresh_from_db()
     # 3500.00 less the same three omitted parts.
     assert parent.price_override == Decimal("2995.01")
+
+
+# --- exploit 6: the dealer base a quantity change could hand back to retail --
+
+
+def test_a_dealers_configured_base_survives_the_stock_quantity_stepper(
+    client, checkout, stage_2_kit, buckle, jobber,
+):
+    """The storefront's real shape: priced for a dealer, no user on the checkout.
+
+    The add endpoint resolves the buyer server side and never attaches him, so
+    every recalculation after it sees an anonymous checkout and re-derives the
+    base from the group stamped on the line. If the funnel read the listing
+    instead, the first cart render after a quantity change would quietly hand
+    this dealer back to retail: 4006.99 where he agreed to 3208.00, with the
+    snapshot rewritten to match so nothing on the line says a tier ever applied.
+    """
+    option_set, value = buckle
+    post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [value.pk]}],
+        customer=jobber,
+    )
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert line.price_override == Decimal("3208.00")
+    assert checkout.user is None, "the add attaches nobody, which is the point"
+
+    drop_quantity(client, checkout, line, 2)
+
+    line.refresh_from_db()
+    assert line.quantity == 2
+    assert line.price_override == Decimal("3208.00")
+    assert json.loads(line.private_metadata[OPTIONS_KEY])["tier_applied"] is True
+    assert DEALER_KEY in line.private_metadata

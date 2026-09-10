@@ -347,6 +347,7 @@ def price_configured(
     accepted_fee_ids=(),
     base_sku: str = "",
     quantity: int = 1,
+    base_tiered: bool = False,
     sku_separator: str = DEFAULT_SKU_SEPARATOR,
 ) -> ConfiguredPrice:
     """Validate the selections against the authoritative catalog, then price one line.
@@ -354,6 +355,13 @@ def price_configured(
     `option_sets` and `fees` are catalog rows the caller read from the database;
     the only fee fact a caller may pass is which DECLINABLE ones the shopper took.
     No caller-supplied price, delta or fee amount is ever honored (requirement 1.4).
+
+    `base_unit_cents` is what THIS buyer pays for the variant itself, which for
+    a dealer is his tier price and not the channel listing: the caller resolves
+    it through `dealer.pricing.base_unit_price`, because which price a buyer
+    starts from is a dealer fact and this module knows nothing about a buyer.
+    `base_tiered` says that resolution honoured a tier row, so a line priced off
+    a dealer base reports `tier_applied` even when no option delta was tiered.
 
     `fee_total_cents` is a LINE number (per-unit fees times quantity, per-line
     fees once) and is NOT folded into `unit_cents`, so a caller that ignores fees
@@ -384,7 +392,7 @@ def price_configured(
     )
     unit_cents = base_unit_cents
     sku_parts = [base_sku] if base_sku else []
-    lines, tier_applied = [], False
+    lines, tier_applied = [], base_tiered
     for option_set in chosen:
         selection = picked[option_set.id]
         if option_set.prompt_type in TEXT_PROMPTS:

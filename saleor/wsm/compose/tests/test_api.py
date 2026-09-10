@@ -15,6 +15,7 @@ from decimal import Decimal
 import pytest
 
 from saleor.wsm.compose.models import Fee, OptionSet, OptionValue
+from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from saleor.wsm.tests import COMPOSE_HEADERS
 from saleor.wsm.compose.lines import (
     META_CID,
@@ -625,3 +626,153 @@ def test_a_configured_line_starts_from_the_sale_price(
     assert response.json()["unitPrice"] == "2995.01"
     line = checkout.lines.get(variant_id=stage_2_kit.pk)
     assert line.price_override == Decimal("2995.01")
+
+
+# --- (e) the dealer's base price under a configured line --------------------
+
+# What Jobbers pay for the Stage 2 Kit itself: a tier row well under the
+# 3998.99 the listing quotes everyone else.
+JOBBER_BASE = Decimal("3200.00")
+
+
+@pytest.fixture
+def buckle(stage_2_kit):
+    """One priced add-on: the Build-A-Belt shape, a positive delta on a base."""
+    option_set = OptionSet.objects.create(
+        product=stage_2_kit.product,
+        name="Buckle",
+        label="Buckle",
+        prompt_type="choice_one",
+        required=True,
+    )
+    value = OptionValue.objects.create(
+        option_set=option_set,
+        name="Plastic Push with Snap Hooks",
+        sku_fragment="PPSH",
+        price_delta=Decimal("8.00"),
+        sort_order=0,
+    )
+    return option_set, value
+
+
+@pytest.fixture
+def jobber(customer_user, stage_2_kit, channel_USD):
+    """A dealer priced on the VARIANT and on no option value at all.
+
+    Deliberately the opposite of `dealer_credit`: that fixture proves the tier
+    row on a value is honoured, and every number it asserts is still correct
+    when the base underneath it is wrong, which is how the base stayed retail.
+    """
+    from saleor.wsm.dealer.models import DealerCustomer, DealerGroup, TierPrice
+
+    group = DealerGroup.objects.create(code="jobbers", name="Jobbers")
+    DealerCustomer.objects.create(user=customer_user, group=group)
+    TierPrice.objects.create(
+        variant=stage_2_kit, group=group, min_quantity=1, amount=JOBBER_BASE
+    )
+    return customer_user
+
+
+def test_a_dealers_configured_line_starts_from_his_own_price(
+    client, checkout, stage_2_kit, buckle, jobber
+):
+    """The Build-A-Belt defect, in this fixture's numbers.
+
+    Measured on the demo stage 2026-09-09: a Jobber was quoted 31.36 on the PDP
+    (his 23.36 plus an 8.00 buckle) and charged 36.95 in the cart (retail 28.95
+    plus the same 8.00), because the configured line was built on the channel
+    listing and the buyer's own price was never asked for. 17.8% over.
+    """
+    option_set, value = buckle
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [value.pk]}],
+        customer=jobber,
+    )
+
+    assert response.status_code == 200
+    # 3200.00 + 8.00, never 3998.99 + 8.00.
+    assert response.json()["unitPrice"] == "3208.00"
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert line.price_override == Decimal("3208.00")
+    snapshot = json.loads(line.metadata[META_OPTIONS])
+    assert snapshot["base_unit_cents"] == 320000
+    # The tier decided this price, so the line has to SAY it is a dealer line:
+    # without the stamp a voucher or a catalogue promotion comes off a price
+    # that is already the dealer's.
+    assert snapshot["tier_applied"] is True
+    assert DEALER_KEY in line.private_metadata
+
+
+def test_a_retail_shopper_is_unmoved_by_a_tier_price_on_the_variant(
+    client, checkout, stage_2_kit, buckle, jobber
+):
+    """The dealer's row is sitting right there and retail still pays retail."""
+    option_set, value = buckle
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [value.pk]}],
+    )
+
+    assert response.json()["unitPrice"] == "4006.99"
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    assert line.price_override == Decimal("4006.99")
+    assert DEALER_KEY not in line.private_metadata
+
+
+def test_a_dealer_never_pays_his_tier_when_the_shop_is_selling_it_for_less(
+    client, checkout, stage_2_kit, buckle, jobber, channel_USD
+):
+    """Better-of, the same rule a kit member and an option delta already follow.
+
+    A merchant who puts a product on sale below a dealer's negotiated price has
+    made the sale price the better one, and quoting the dealer the higher of the
+    two is the complaint that arrives by phone.
+    """
+    option_set, value = buckle
+    stage_2_kit.channel_listings.filter(channel=channel_USD).update(
+        discounted_price_amount=Decimal("3000.00")
+    )
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [value.pk]}],
+        customer=jobber,
+    )
+
+    assert response.json()["unitPrice"] == "3008.00"
+    line = checkout.lines.get(variant_id=stage_2_kit.pk)
+    snapshot = json.loads(line.metadata[META_OPTIONS])
+    # The tier lost, so nothing may claim it applied: a line stamped as
+    # dealer-priced when it is not is how a promotion gets suppressed on a
+    # retail price.
+    assert snapshot["tier_applied"] is False
+    assert DEALER_KEY not in line.private_metadata
+
+
+def test_a_break_this_quantity_does_not_reach_leaves_the_base_at_retail(
+    client, checkout, stage_2_kit, buckle, jobber
+):
+    """The base follows the same ladder rule as a plain dealer line: by quantity."""
+    from saleor.wsm.dealer.models import TierPrice
+
+    TierPrice.objects.filter(variant=stage_2_kit).update(min_quantity=5)
+    option_set, value = buckle
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [value.pk]}],
+        customer=jobber,
+    )
+
+    assert response.json()["unitPrice"] == "4006.99"

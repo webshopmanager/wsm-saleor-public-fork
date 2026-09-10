@@ -628,6 +628,29 @@ def _reprice_configured(
     # it is ours and not the shopper's.
     stamped_group_stands = user is None
 
+    # The group each line is priced at, decided once. It picks the option
+    # deltas AND the base the line starts from, so it is read before either.
+    groups = {
+        info.line.pk: (_stamped_group(info.line) if stamped_group_stands else tier_group)
+        for info in configured
+    }
+    codes = sorted({code for code in groups.values() if code})
+    # One query for every dealer-priced line on the checkout, the shape
+    # `_reprice_dealer` already uses, and no query at all for a cart with no
+    # dealer on it. One checkout can hold lines stamped with different groups,
+    # so each line is offered only the ladder of its own.
+    tiers = (
+        dealer_pricing.ladders(
+            None,
+            checkout_info.channel,
+            [info.line.variant_id for info in configured],
+            group_codes=codes,
+            database_connection_name=database_connection_name,
+        )
+        if codes
+        else {}
+    )
+
     token = checkout_info.checkout.token
     dropped = []
 
@@ -651,8 +674,12 @@ def _reprice_configured(
                     fees_by_product,
                     fees_by_id,
                     fee_lines_by_parent,
-                    tier_group,
-                    stamped_group_stands,
+                    groups[line_info.line.pk],
+                    [
+                        row
+                        for row in tiers.get(line_info.line.variant_id, [])
+                        if row.group_code == groups[line_info.line.pk]
+                    ],
                     mark,
                     dropped,
                 )
@@ -672,6 +699,24 @@ def _reprice_configured(
     return dropped
 
 
+def _stamped_group(line):
+    """The buyer group a configured line was priced against at add time, or None.
+
+    The snapshot is PRIVATE metadata, so it is ours and not the shopper's; the
+    public copy beside it is display only. Unreadable is None: a line whose
+    record of its own group cannot be parsed prices at retail here and is
+    refused for real a moment later in `_reprice_one_configured`, which is the
+    one place that turns an unreadable snapshot into a dropped line.
+    """
+    raw = (line.private_metadata or {}).get(META_OPTIONS)
+    if not raw:
+        return None
+    try:
+        return (json.loads(raw) or {}).get("tier_group") or None
+    except ValueError:
+        return None
+
+
 def _log_drop(token, line_info, reason):
     logger.warning(
         "wsm reprice: dropping checkout line %s from checkout %s: %s",
@@ -688,7 +733,7 @@ def _reprice_one_configured(
     fees_by_id,
     fee_lines_by_parent,
     tier_group,
-    stamped_group_stands,
+    breaks,
     mark,
     dropped,
 ):
@@ -708,20 +753,22 @@ def _reprice_one_configured(
             "the options recorded on a configured line cannot be read"
         ) from error
 
-    if stamped_group_stands:
-        tier_group = snapshot.get("tier_group") or None
-
     product_fees = fees_by_product.get(line_info.product.pk, [])
     # Exactly what the add endpoint does with the same list: a required fee is
     # charged whether or not it was named, and naming one is not "accepting" it.
     required = {fee.pk for fee in product_fees if fee.required}
+    # The same base the add endpoint used, re-derived: a promotion that started
+    # after the line was added moves it DOWN on the next cart read, one that
+    # ended moves it back up, and the dealer's own price is re-read against
+    # today's quantity, which is what "no price this fork wrote outlives the
+    # facts it was computed from" means.
+    base_amount, base_tiered = dealer_pricing.base_from_breaks(
+        unit_amount(line_info.channel_listing), breaks, line.quantity
+    )
+
     try:
         priced = compose_pricing.price_configured(
-            # The same base the add endpoint used, re-read: a promotion that
-            # started after the line was added moves it DOWN on the next cart
-            # read, and one that ended moves it back up, which is what "no price
-            # this fork wrote outlives the facts it was computed from" means.
-            to_cents(unit_amount(line_info.channel_listing)),
+            to_cents(base_amount),
             [
                 option_set.to_pricing()
                 for option_set in sets_by_product.get(line_info.product.pk, [])
@@ -734,6 +781,7 @@ def _reprice_one_configured(
             ),
             base_sku=line_info.variant.sku or "",
             quantity=line.quantity,
+            base_tiered=base_tiered,
         )
     except compose_pricing.ComposeRefusal as refusal:
         raise Unrepriceable(

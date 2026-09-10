@@ -992,3 +992,6 @@ above is an assertion in that file, not prose:
 `test_a_checkout_this_fork_does_not_own_costs_no_queries` for the zero and
 `test_a_configured_checkout_costs_the_queries_the_doc_says_it_does` for the four
 and the five, which asserts the TABLES, so adding a query reddens it by name.
+`test_a_dealer_priced_checkout_costs_one_more_query_for_the_whole_cart` pins the
+sixth: a checkout carrying dealer-priced configured lines reads the tier ladder
+that decides their base once for all of them, never once per line.

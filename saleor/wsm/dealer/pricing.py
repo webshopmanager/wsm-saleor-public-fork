@@ -169,6 +169,65 @@ def dealer_price_for(
     return best_break(breaks, quantity)
 
 
+def base_from_breaks(retail_amount, breaks, quantity: int):
+    """The unit price a line starts from for this buyer, and whether a tier set it.
+
+    The BASE, not a delta: what one of the variant itself costs before any
+    option is chosen. A configured line is base plus deltas, and a configured
+    line built on the retail base charges a dealer retail no matter how
+    correctly the deltas were tiered. Measured on the demo stage 2026-09-09: a
+    Jobber quoted 31.36 on the belt PDP (his 23.36 plus an 8.00 buckle) and
+    charged 36.95 in the cart (retail 28.95 plus the same 8.00).
+
+    Better of the two, never both and never the higher, which is the rule
+    `compose.pricing.delta_for` already applies to an option delta and
+    `containers.pricing` to a kit member: a merchant who puts a product on sale
+    below a dealer's negotiated price has made the sale price the better one.
+    Quoting the dealer his own higher number is the complaint that arrives by
+    phone.
+
+    The flag is whether the tier was HONORED, not whether a row was found: a row
+    that lost to a sale leaves the buyer at retail, and a line stamped as
+    dealer-priced when it is not is how a promotion gets suppressed on a retail
+    price (`compose.pricing.delta_for` says the same about a value).
+
+    Takes breaks rather than reading them, so the caller with a whole checkout
+    of lines reads one ladder for all of them (`saleor/wsm/reprice.py`) and the
+    caller with one line reads one for itself, and both price by one rule.
+    """
+    winner = best_break(breaks, quantity)
+    if winner is None or winner.amount >= retail_amount:
+        return retail_amount, False
+    return winner.amount, True
+
+
+def base_unit_price(
+    retail_amount,
+    variant_id,
+    channel,
+    tier_group,
+    quantity: int,
+    *,
+    database_connection_name=None,
+):
+    """`base_from_breaks` for one variant, in ONE query, or none at retail.
+
+    Costs a retail shopper nothing: no group, no query. The group arrives
+    already resolved because the caller needed it for the option deltas anyway,
+    so this never re-reads `DealerCustomer`.
+    """
+    if not tier_group:
+        return retail_amount, False
+    breaks = ladders(
+        None,
+        channel,
+        [variant_id],
+        group_codes=[tier_group],
+        database_connection_name=database_connection_name,
+    ).get(variant_id, [])
+    return base_from_breaks(retail_amount, breaks, quantity)
+
+
 def prices_for_variants(
     user, channel, variant_ids, *, database_connection_name=None
 ) -> dict[str, list[dict]]:

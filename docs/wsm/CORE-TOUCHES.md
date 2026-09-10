@@ -453,9 +453,22 @@ Narrowing the gate by gateway rather than relaxing its `not lines` clause leaves
 every payment-app path byte-for-byte as the patch shipped it.
 
 **Not `TransactionProcess`.** Its copy of the gate is untouched, because a gift
-card transaction can never reach it: `clean_payment_app` requires an `App` row
-carrying the transaction's identifier, and no such row exists for the built-in
-gateway, so that mutation refuses gift cards before `validate_checkout` runs.
+card transaction can never get THROUGH it: `clean_payment_app` requires an `App`
+row carrying the transaction's identifier, and no such row exists for the
+built-in gateway, so that mutation refuses a gift card whatever the readiness
+gate says. Upstream, with no gate at all, refuses it in the same place.
+
+Corrected 2026-09-10 (Wild West finding 10, checked and NOT reproduced): this
+paragraph used to say the refusal happens BEFORE `validate_checkout`, and the
+call order does not support that. `perform_mutation` calls `validate_checkout`
+at line 196 and `clean_payment_app` at line 218, so on a checkout that is not
+payment-ready the readiness error is the one returned. Both are refusals of a
+call that cannot succeed either way, so the asymmetry is not a defect and the
+gate was left alone rather than growing a second core edit for it. The
+reachability argument is now held by a test rather than by this paragraph:
+`saleor/wsm/tests/test_payment_readiness.py`. If an `App` row ever comes to
+carry the built-in gift card identifier, that test goes red and the carve-out
+has to be carried across.
 
 **Verified by** the three tests above, red then green on a fresh test DB, run
 together with the whole of `test_transaction_initialize.py`,

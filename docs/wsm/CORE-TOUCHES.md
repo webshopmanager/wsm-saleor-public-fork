@@ -110,7 +110,7 @@ to satisfy one of its dependencies. Grouped, with what breaks without it:
 | `INSTALLED_APPS`: `saleor.wsm.compose.apps.WsmAuthConfig` | `django.contrib.auth`, relabelled `django_auth` | `admin.E403`: the admin refuses to load |
 | `INSTALLED_APPS`: `django.contrib.sessions`, `django.contrib.messages`, `django.contrib.admin` | the admin itself and the two apps it requires | no admin |
 | `INSTALLED_APPS`: `django.forms` | Saleor sets `FORM_RENDERER = TemplatesSetting`, which resolves widget templates through the loaders | `TemplateDoesNotExist` on every admin form |
-| `MIDDLEWARE`: session, authentication, message | admin checks `admin.E40x` | admin refuses to load |
+| `MIDDLEWARE`: session, authentication, message, each a `/admin/`-scoped subclass since section 12 | admin checks `admin.E40x` | admin refuses to load |
 | `TEMPLATES` context processors: `auth`, `messages`, `request` | same checks, plus `admin.W411` for the sidebar | admin refuses to load |
 | `AUTHENTICATION_BACKENDS`: `saleor.wsm.compose.auth.AdminPasswordBackend` | email + password login, and permissions read from Saleor's renamed `permission_permission` | no way to log in as a merchant |
 | `MIGRATION_MODULES = {"django_auth": "saleor.wsm.compose.django_auth_migrations"}` | `saleor.auth` already owns the `auth` label and holds the 13 historical auth migrations | duplicate migration history, `migrate` fails |
@@ -444,6 +444,58 @@ together with the whole of `test_transaction_initialize.py`,
 `saleor/graphql/checkout/tests/mutations/test_checkout_complete_with_transactions.py`
 and `saleor/tests/e2e/gift_cards/`: 271 passed, so the gate's own proofs still
 hold.
+
+## 12. `saleor/settings.py`, three `MIDDLEWARE` entries repointed, +5 comment lines (fork regression sweep, 2026-09-09)
+
+`django.contrib.sessions.middleware.SessionMiddleware`,
+`django.contrib.auth.middleware.AuthenticationMiddleware` and
+`django.contrib.messages.middleware.MessageMiddleware` are replaced by
+`AdminSessionMiddleware`, `AdminAuthenticationMiddleware` and
+`AdminMessageMiddleware` from the new fork-owned file `saleor/wsm/middleware.py`.
+Each is a subclass of the Django one that runs its hooks only when
+`request.path` starts with `/admin/`, which is where `saleor/wsm/urls.py` mounts
+the merchant admin. No entry was added or removed, and inside `/admin/` the
+behaviour is Django's, unchanged.
+
+**The regression it fixes.** `saleor/core/tests/test_dataloaders.py` passed 2/2
+on upstream `a1ab3a23a3f5` and failed 2/2 on `wsm/bakeoff`. Both assert the
+plugin requestor contract: `test_plugins_manager_loader_loads_requestor_in_plugin`
+wants the authenticated `User`, and got
+`SimpleLazyObject(AnonymousUser)`;
+`test_plugins_manager_loader_requestor_in_plugin_when_no_app_and_user_in_req_is_none`
+wants nothing at all, and got the same truthy lazy object.
+`AuthenticationMiddleware.process_request` assigns `request.user`
+unconditionally, so with the admin block listed unscoped it overwrote whatever
+was there on EVERY request in the process. `plugin_manager_promise`
+(`saleor/graphql/plugins/dataloaders.py:51`) reads exactly that attribute:
+`requestor = app or user`. So the fork was handing every plugin in the manager
+an `AnonymousUser` where upstream hands a `User` or `None`, on the live GraphQL
+API and not only under pytest. Evaluating that lazy object for its truthiness
+also loads it, which is a `django_session` read charged to a request that never
+asked for a session.
+
+**Why the fix is here and not in the requestor resolution.** The broken value is
+"which requests these three middlewares run on", and `MIDDLEWARE` is the list
+that owns it. Teaching `plugin_manager_promise` to read an anonymous lazy user
+as `None` would be a core edit inside upstream's own contract, and it would fix
+one reader while leaving `request.user` wrong for every other one; the fork
+would keep paying the session cost on the API path either way. Scoping the
+three restores upstream behaviour for the whole process outside `/admin/`, which
+is the class, not the instance.
+
+**Why subclasses rather than wrapper functions.** `django.contrib.admin`'s own
+system checks (`admin.E408`, `E409`, `E410`) look for a `MIDDLEWARE` entry that
+is a SUBCLASS of each of these three, so a subclass keeps the admin's
+configuration valid where a wrapper function would report it broken;
+`manage.py check` returns "no issues" on this branch. A subclass also keeps
+`MiddlewareMixin`'s sync and async capability, which a plain function drops.
+
+**Verified by** the two upstream tests above, red then green on a fresh test DB,
+run together with `saleor/wsm/compose/tests/test_admin.py` and
+`test_auth.py`, which drive the merchant admin over real HTTP
+(`client.force_login`, then the index, the changelists and a change-form POST)
+and would go red if the scope were tighter than the admin needs: 36 passed. Plus
+`manage.py check`, for the `admin.E40x` family the scoping could have tripped.
 
 # Monkey patches
 

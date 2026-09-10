@@ -291,11 +291,14 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "saleor.core.middleware.jwt_refresh_token_middleware",
-    # WSM-FORK: the three the Django admin requires. Session and message state
-    # exists only for /admin/; the GraphQL API is untouched by them.
-    "django.contrib.sessions.middleware.SessionMiddleware",
-    "django.contrib.auth.middleware.AuthenticationMiddleware",
-    "django.contrib.messages.middleware.MessageMiddleware",
+    # WSM-FORK: the three the Django admin requires, each a subclass that runs
+    # only under /admin/. Unscoped, AuthenticationMiddleware overwrites
+    # request.user with a lazy AnonymousUser on every request, and the plugin
+    # manager's requestor stops being a User or None. See
+    # saleor/wsm/middleware.py and docs/wsm/CORE-TOUCHES.md.
+    "saleor.wsm.middleware.AdminSessionMiddleware",
+    "saleor.wsm.middleware.AdminAuthenticationMiddleware",
+    "saleor.wsm.middleware.AdminMessageMiddleware",
 ]
 
 ENABLE_RESTRICT_WRITER_MIDDLEWARE = get_bool_from_env(

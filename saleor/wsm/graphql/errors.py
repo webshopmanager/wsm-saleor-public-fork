@@ -23,11 +23,25 @@ from .types import DOC_CATEGORY_WSM
 
 
 class WsmErrorCode(Enum):
+    # Stock codes, produced by graphene and by Django's own validators.
+    DUPLICATED_INPUT_ITEM = "duplicated_input_item"
     GRAPHQL_ERROR = "graphql_error"
     INVALID = "invalid"
     NOT_FOUND = "not_found"
     REQUIRED = "required"
     UNIQUE = "unique"
+
+    # --- containers: every one of these is a rule with a line that enforces it.
+    # The value is what the enforcing raise passes as its `code`, so the screen
+    # reading the error and the model refusing the save never drift.
+    AXIS_NOT_IN_AXES = "axis_not_in_axes"
+    SERIES_NEEDS_TWO_MEMBERS = "series_needs_two_members"
+    MEMBER_MISSING_PARTITIONING_ATTRIBUTE = "member_missing_partitioning_attribute"
+    UNKNOWN_ATTRIBUTE_SLUG = "unknown_attribute_slug"
+    DUPLICATE_KIT_MEMBER = "duplicate_kit_member"
+    KIT_MEMBER_QUANTITY_BELOW_ONE = "kit_member_quantity_below_one"
+    RULE_SUBJECT_NOT_IN_KIT = "rule_subject_not_in_kit"
+    RULE_TARGET_NOT_IN_KIT = "rule_target_not_in_kit"
 
 
 # `from_enum` names the GraphQL type after the PYTHON class, so the type in the

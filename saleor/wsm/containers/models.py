@@ -209,8 +209,12 @@ class SeriesConfig(models.Model):
         if self.partitioning_axis not in axes:
             raise ValidationError(
                 {
-                    "partitioning_axis": (
-                        f"{self.partitioning_axis!r} is not one of the axes {axes!r}"
+                    "partitioning_axis": ValidationError(
+                        f"{self.partitioning_axis!r} is not one of the axes {axes!r}",
+                        # The code travels with the refusal so every door that
+                        # renders one, the admin and now the GraphQL mutation,
+                        # names the same rule without reading the sentence.
+                        code="axis_not_in_axes",
                     )
                 }
             )
@@ -223,9 +227,10 @@ class SeriesConfig(models.Model):
         if len(members) < 2:
             raise ValidationError(
                 {
-                    "published": (
+                    "published": ValidationError(
                         "a series materializes only with 2 or more published "
-                        f"members; this collection has {len(members)}"
+                        f"members; this collection has {len(members)}",
+                        code="series_needs_two_members",
                     )
                 }
             )
@@ -242,9 +247,10 @@ class SeriesConfig(models.Model):
         if missing:
             raise ValidationError(
                 {
-                    "published": (
+                    "published": ValidationError(
                         f"every member must carry {self.partitioning_axis!r}; "
-                        f"missing on {sorted(missing)}"
+                        f"missing on {sorted(missing)}",
+                        code="member_missing_partitioning_attribute",
                     )
                 }
             )
@@ -590,7 +596,13 @@ class KitMemberRule(models.Model):
         """Refuse a rule reaching outside its own kit: nobody could satisfy it."""
         super().clean()
         if self.subject_id and self.kit_id and self.subject.kit_id != self.kit_id:
-            raise ValidationError({"subject": "that part is not in this kit"})
+            raise ValidationError(
+                {
+                    "subject": ValidationError(
+                        "that part is not in this kit", code="rule_subject_not_in_kit"
+                    )
+                }
+            )
 
     @property
     def target_variant_ids(self):

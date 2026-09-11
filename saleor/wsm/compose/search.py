@@ -5,12 +5,12 @@ The rule: typing `71801`, a manufacturer part number, put the product that
 carries it FIFTH, behind four covers whose SKUs (`trp:1471801`) merely CONTAIN
 those digits, because product name was the only order the caller had.
 
-Four live callers, all searching the same rows for the same reason. Three are
+Three live callers, all searching the same rows for the same reason, all
 Dashboard list filters through `graphql/compose/filters.py`:
 `wsmOptionSets(filter: {search})`, `wsmFees(filter: {search})` and
-`wsmProductCompliances(filter: {search})`. The fourth is the merchant console's
-product picker (`compose/admin.py:190`), which wrote the rule first and which
-the Dashboard screens replace. A copy in each would be four rules a month from
+`wsmProductCompliances(filter: {search})`. The Django admin product picker
+wrote the rule first and is deleted on this branch, which is why the rule lives
+here and not in it. A copy in each filter would be three rules a month from
 now, and the one that drifts is the one nobody is looking at.
 
 Three tiers, one CASE, no extra round trip: the whole term as a SKU, the whole

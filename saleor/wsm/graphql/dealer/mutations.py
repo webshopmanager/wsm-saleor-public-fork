@@ -879,6 +879,11 @@ class WsmDealerSettingsInput(WsmDocCategory, BaseInputObjectType):
             "number. False (the default): the box is offered, not demanded."
         )
     )
+    po_label = graphene.String(
+        description=(
+            'What you call that reference. Blank restores the default, "PO number".'
+        )
+    )
 
 
 class WsmDealerSettingsUpdate(WsmMutationMeta, DeprecatedModelMutation):
@@ -899,6 +904,20 @@ class WsmDealerSettingsUpdate(WsmMutationMeta, DeprecatedModelMutation):
         model = models.DealerSettings
         object_type = WsmDealerSettings
         permissions = DEALER_PERMISSIONS
+
+    @classmethod
+    def clean_input(cls, info, instance, data, **kwargs):
+        """A blank label is the DEFAULT, never an empty box on a checkout.
+
+        The field is how a merchant changes the word, not how they remove it, so
+        clearing it restores "PO number" rather than storing "".
+        """
+        cleaned_input = super().clean_input(info, instance, data, **kwargs)
+        if "po_label" in cleaned_input:
+            cleaned_input["po_label"] = (
+                cleaned_input["po_label"] or ""
+            ).strip() or models.DEFAULT_PO_LABEL
+        return cleaned_input
 
     @classmethod
     def get_instance(cls, info, **data):

@@ -176,6 +176,13 @@ class WsmMyDealerTerms(WsmDocCategory, BaseObjectType):
             "one round trip rather than two."
         ),
     )
+    po_label = graphene.String(
+        required=True,
+        description=(
+            "What this merchant calls that reference, for the label above the "
+            "box. Never empty."
+        ),
+    )
 
     class Meta:
         description = "What the signed-in shopper's dealer account allows."
@@ -284,6 +291,13 @@ class WsmDealerSettings(WsmDocCategory, ModelObjectType[models.DealerSettings]):
             "offers and stores the box, it just does not demand it."
         ),
     )
+    po_label = graphene.String(
+        required=True,
+        description=(
+            "What this merchant calls the reference on an account order. Never "
+            "empty: a blank label is a box with no question above it."
+        ),
+    )
 
     class Meta:
         model = models.DealerSettings
@@ -294,6 +308,16 @@ class WsmDealerSettings(WsmDocCategory, ModelObjectType[models.DealerSettings]):
         if root.pk is None:
             return None
         return graphene.Node.to_global_id("WsmDealerSettings", root.pk)
+
+    @staticmethod
+    def resolve_po_label(root: models.DealerSettings, _info):
+        """The stored label, or the default. Never the empty string.
+
+        The unsaved instance this resolver is handed when no row exists already
+        carries the column default, so this only has to catch the row a merchant
+        blanked out.
+        """
+        return (root.po_label or "").strip() or models.DEFAULT_PO_LABEL
 
 
 class WsmDealerGroupCountableConnection(WsmDocCategory, CountableConnection):

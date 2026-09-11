@@ -427,6 +427,7 @@ MY_TERMS = """
         accountNumber
         accountStatus
         poRequired
+        poLabel
       }
     }"""
 
@@ -457,6 +458,7 @@ def test_a_dealer_reads_their_own_flags_and_the_store_setting(
         "accountNumber": "DS-4471",
         "accountStatus": "ACTIVE",
         "poRequired": True,
+        "poLabel": "PO number",
     }
 
 
@@ -481,6 +483,7 @@ def test_a_dealer_reads_their_OWN_record_and_not_the_other_ones(
         "accountNumber": "STAFF-1",
         "accountStatus": "ACTIVE",
         "poRequired": False,
+        "poLabel": "PO number",
     }
 
 
@@ -559,3 +562,26 @@ def test_a_probation_account_reads_back_as_probation_not_as_active(
     on_terms.account_status = ACCOUNT_STATUS_PROBATION
     on_terms.save()
     assert my_terms(user_api_client)["accountStatus"] == "PROBATION"
+
+
+# --- the merchant's own word for the reference box --------------------------
+
+
+def test_the_merchants_own_word_for_the_po_box_reaches_the_checkout(
+    user_api_client, on_terms
+):
+    """Ds names the field on all three of its configured payment methods."""
+    DealerSettings.objects.create(po_label="Release number", po_required=True)
+    assert my_terms(user_api_client)["poLabel"] == "Release number"
+
+
+def test_a_blank_label_is_the_default_rather_than_a_box_with_no_question(
+    user_api_client, on_terms
+):
+    DealerSettings.objects.create(po_label="   ")
+    assert my_terms(user_api_client)["poLabel"] == "PO number"
+
+
+def test_no_settings_row_at_all_still_labels_the_box(user_api_client, on_terms):
+    assert not DealerSettings.objects.exists()
+    assert my_terms(user_api_client)["poLabel"] == "PO number"

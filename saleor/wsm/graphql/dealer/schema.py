@@ -288,6 +288,8 @@ class WsmDealerQueries(graphene.ObjectType):
             account_number=account.account_number,
             account_status=account.account_status,
             po_required=bool(settings_row and settings_row.po_required),
+            po_label=((settings_row.po_label or "").strip() if settings_row else "")
+            or models.DEFAULT_PO_LABEL,
         )
 
     @staticmethod

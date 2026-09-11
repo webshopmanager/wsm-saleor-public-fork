@@ -11,7 +11,9 @@ dealer WRITE stays MANAGE_DISCOUNTS.
 """
 
 import graphene
-from django.db.models import Count
+from django.db.models import Count, IntegerField, OuterRef, Subquery
+from django.db.models.functions import Coalesce
+from graphql.language.ast import FragmentSpread, InlineFragment
 
 from ....graphql.core import ResolveInfo
 from ....graphql.core.connection import (
@@ -31,6 +33,7 @@ from .filters import (
     WsmTierPriceFilterInput,
 )
 from .mutations import (
+    DEALER_PERMISSIONS,
     WsmDealerCustomerAssign,
     WsmDealerCustomerUnassign,
     WsmDealerCustomerUpdate,
@@ -57,7 +60,13 @@ from .types import (
     WsmTierPriceCountableConnection,
 )
 
-DEALER_PERMISSIONS = [DiscountPermissions.MANAGE_DISCOUNTS]
+# One definition, two shapes stock insists on for the same value:
+# `BaseMutation.Meta` raises unless `permissions` is a TUPLE
+# (`saleor/graphql/core/mutations.py:151`) and `PermissionsField` asserts unless
+# it is a LIST (`saleor/graphql/core/fields.py:50`). Converted once here, which
+# is what the second hand-written copy of this list was doing and what let the
+# two of them drift.
+DEALER_READ_PERMISSIONS = list(DEALER_PERMISSIONS)
 # Read-only, and only on the group: see the module docstring.
 DEALER_GROUP_READ_PERMISSIONS = [
     DiscountPermissions.MANAGE_DISCOUNTS,
@@ -65,24 +74,82 @@ DEALER_GROUP_READ_PERMISSIONS = [
 ]
 
 
-def _groups(info: ResolveInfo):
-    """Every group query, with both of its counts already answered.
+# The count field a screen can select -> the alias the type reads it back
+# under, and the table it counts.
+COUNT_ANNOTATIONS = {
+    "tierPriceCount": (TIER_PRICE_COUNT, models.TierPrice),
+    "customerCount": (CUSTOMER_COUNT, models.DealerCustomer),
+}
 
-    Both counts are on the LIST screen, so a per-row count would be 2N queries
-    to render a table of five rows. Annotating them costs the same one query the
-    list was already doing.
+
+def _field_names(selections, fragments, names: set) -> set:
+    """Every field name anywhere under a selection set, fragments followed."""
+    for selection in selections:
+        if isinstance(selection, FragmentSpread):
+            fragment = fragments.get(selection.name.value)
+            if fragment is not None:
+                _field_names(fragment.selection_set.selections, fragments, names)
+            continue
+        if not isinstance(selection, InlineFragment):
+            names.add(selection.name.value)
+        if selection.selection_set is not None:
+            _field_names(selection.selection_set.selections, fragments, names)
+    return names
+
+
+def _selected(info: ResolveInfo) -> set:
+    names: set = set()
+    for field in info.field_asts:
+        if field.selection_set is not None:
+            _field_names(field.selection_set.selections, info.fragments, names)
+    return names
+
+
+def _row_count(model) -> Coalesce:
+    """How many of `model`'s rows point at this group, as its own SELECT."""
+    return Coalesce(
+        Subquery(
+            model.objects.filter(group_id=OuterRef("pk"))
+            .order_by()
+            .values("group_id")
+            .annotate(total=Count("pk"))
+            .values("total"),
+            output_field=IntegerField(),
+        ),
+        0,
+    )
+
+
+def _groups(info: ResolveInfo):
+    """Every group query, with a count annotated only when one was asked for.
+
+    Two multi-valued `Count(distinct=True)` annotations in one `annotate` share
+    one FROM clause, so the database builds the CROSS PRODUCT of both joins and
+    then throws the duplicates away: 304 tier rows and 40 customers on one group
+    is 12,160 intermediate rows to answer "304" and "40", and `totalCount` on
+    the same connection pays for it a second time. Each count is its own scalar
+    subquery now, one index read per group, nothing multiplied.
+
+    Carrying them at all is the other half. `_groups` also answers the single
+    `wsmDealerGroup` lookup and the compose option-set picker, which select id,
+    code and name; both were paying for two aggregates nobody selected. The
+    selection set says which ones the answer actually needs, and
+    `WsmDealerGroup` already falls back to a per-row count for the callers that
+    hand it an un-annotated instance.
     """
     # Named connection, not a bare `.objects`: under
     # ENABLE_RESTRICT_WRITER_MIDDLEWARE an unrouted read inside a GraphQL
     # request raises UnsafeWriterAccessError.
-    return models.DealerGroup.objects.using(
+    groups = models.DealerGroup.objects.using(
         get_database_connection_name(info.context)
-    ).annotate(
-        **{
-            TIER_PRICE_COUNT: Count("tier_prices", distinct=True),
-            CUSTOMER_COUNT: Count("customers", distinct=True),
-        }
     )
+    selected = _selected(info)
+    annotations = {
+        alias: _row_count(model)
+        for field, (alias, model) in COUNT_ANNOTATIONS.items()
+        if field in selected
+    }
+    return groups.annotate(**annotations) if annotations else groups
 
 
 def _tier_prices(info: ResolveInfo):
@@ -120,7 +187,7 @@ class WsmDealerQueries(graphene.ObjectType):
         id=graphene.Argument(graphene.ID, description="ID of the assignment."),
         user=graphene.Argument(graphene.ID, description="ID of the shopper."),
         description="Look up one shopper's group assignment, by row or by user.",
-        permissions=DEALER_PERMISSIONS,
+        permissions=DEALER_READ_PERMISSIONS,
         doc_category=DOC_CATEGORY_WSM,
     )
     wsm_dealer_customers = FilterConnectionField(
@@ -129,7 +196,7 @@ class WsmDealerQueries(graphene.ObjectType):
             description="Filtering options for dealer customers."
         ),
         description="List of shoppers in a buyer group.",
-        permissions=DEALER_PERMISSIONS,
+        permissions=DEALER_READ_PERMISSIONS,
         doc_category=DOC_CATEGORY_WSM,
     )
     wsm_tier_price = PermissionsField(
@@ -138,7 +205,7 @@ class WsmDealerQueries(graphene.ObjectType):
             graphene.ID, required=True, description="ID of the tier price."
         ),
         description="Look up one quantity break.",
-        permissions=DEALER_PERMISSIONS,
+        permissions=DEALER_READ_PERMISSIONS,
         doc_category=DOC_CATEGORY_WSM,
     )
     wsm_tier_prices = FilterConnectionField(
@@ -147,14 +214,14 @@ class WsmDealerQueries(graphene.ObjectType):
             description="Filtering options for tier prices."
         ),
         description="List of quantity breaks.",
-        permissions=DEALER_PERMISSIONS,
+        permissions=DEALER_READ_PERMISSIONS,
         doc_category=DOC_CATEGORY_WSM,
     )
     wsm_dealer_settings = PermissionsField(
         WsmDealerSettings,
         required=True,
         description="Store-wide dealer pricing settings.",
-        permissions=DEALER_PERMISSIONS,
+        permissions=DEALER_READ_PERMISSIONS,
         doc_category=DOC_CATEGORY_WSM,
     )
 

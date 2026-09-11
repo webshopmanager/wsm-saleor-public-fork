@@ -32,19 +32,20 @@ import graphene
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
+from ....graphql.core.context import get_database_connection_name
 from ....graphql.core.mutations import (
     BaseMutation,
     DeprecatedModelMutation,
     ModelBulkDeleteMutation,
     ModelDeleteMutation,
 )
-from ....graphql.core.scalars import PositiveDecimal
 from ....graphql.core.types import BaseInputObjectType, NonNullList
-from ....graphql.core.utils import from_global_id_or_error
 from ....permission.enums import DiscountPermissions
 from ...dealer import models
 from ..errors import WsmError
+from ..scalars import WsmDecimal
 from ..types import DOC_CATEGORY_WSM
+from ..utils import TypedIdMixin, error, pk_or_none
 from .types import (
     WsmDealerCustomer,
     WsmDealerGroup,
@@ -66,18 +67,13 @@ DEALER_PERMISSIONS = (DiscountPermissions.MANAGE_DISCOUNTS,)
 # stores three to match CheckoutLine.price_override.
 TIER_AMOUNT_PLACES = 2
 
-
-def _error(message: str, code: str) -> ValidationError:
-    return ValidationError(message, code=code)
-
-
-def _pk_or_none(global_id, type_name: str):
-    """The database id behind a global id, or None if it is not one of those."""
-    try:
-        _, pk = from_global_id_or_error(global_id, type_name, raise_error=True)
-        return int(pk)
-    except Exception:
-        return None
+# One call is one paste. Stock caps its own bulk create the same way
+# (`MAX_ORDERS = 50`, `saleor/graphql/order/bulk_mutations/order_bulk_create.py:86`)
+# and 50 is the shape of an order import, not of a price list: live data is 304
+# tier rows on one group (`dealer/admin.py:32`), so the cap is set above the
+# paste this mutation exists for and below the payload that would hold the
+# request open building instances nobody can read back.
+MAX_TIER_PRICES = 500
 
 
 def _clean_amount(amount, field: str) -> Decimal:
@@ -88,12 +84,12 @@ def _clean_amount(amount, field: str) -> Decimal:
     chances for one of them to drift a cent.
     """
     if amount is None:
-        raise ValidationError({field: _error("say what this group pays", "required")})
+        raise ValidationError({field: error("say what this group pays", "required")})
     amount = Decimal(amount)
     if -amount.as_tuple().exponent > TIER_AMOUNT_PLACES:
         raise ValidationError(
             {
-                field: _error(
+                field: error(
                     "a price has at most two decimal places",
                     "tier_amount_too_many_decimals",
                 )
@@ -102,38 +98,13 @@ def _clean_amount(amount, field: str) -> Decimal:
     if amount < models.MIN_TIER_AMOUNT:
         raise ValidationError(
             {
-                field: _error(
+                field: error(
                     "a dealer price is a price, so it is at least one cent",
                     "tier_amount_below_one_cent",
                 )
             }
         )
     return amount
-
-
-class TypedIdMixin:
-    """Resolve an input's FK ids to the type that input NAMES, not to any node.
-
-    The inherited `clean_input` resolves a bare `ID` field with no `only_type`,
-    so a Collection global id posted as `group` comes back as a Collection and
-    the assignment that follows is a 500. Every id in this file names exactly
-    one type, so saying which turns that into a field error.
-    """
-
-    # field name in the input -> the graphene type its global id must carry
-    typed_ids: dict = {}
-
-    @classmethod
-    def clean_input(cls, info, instance, data, **kwargs):
-        typed = {name: data.pop(name) for name in cls.typed_ids if name in data}
-        cleaned_input = super().clean_input(info, instance, data, **kwargs)
-        for name, value in typed.items():
-            if value is None:
-                continue
-            cleaned_input[name] = cls.get_node_or_error(
-                info, value, field=name, only_type=cls.typed_ids[name]
-            )
-        return cleaned_input
 
 
 # --- groups ------------------------------------------------------------------
@@ -164,14 +135,12 @@ class WsmDealerGroupUpdateInput(BaseInputObjectType):
 class GroupWriteMixin:
     @classmethod
     def clean_input(cls, info, instance, data, **kwargs):
-        from ....graphql.core.context import get_database_connection_name
-
         cleaned_input = super().clean_input(info, instance, data, **kwargs)
         code = (cleaned_input.get("code") or "").strip()
         if "code" in cleaned_input:
             if not code:
                 raise ValidationError(
-                    {"code": _error("a group needs a code", "required")}
+                    {"code": error("a group needs a code", "required")}
                 )
             cleaned_input["code"] = code
             # Its own check rather than `full_clean`'s, which calls this
@@ -188,7 +157,7 @@ class GroupWriteMixin:
             if taken:
                 raise ValidationError(
                     {
-                        "code": _error(
+                        "code": error(
                             f"{code!r} already names a dealer group",
                             "duplicate_group_code",
                         )
@@ -242,13 +211,44 @@ class GroupDeleteMixin:
         if count:
             raise ValidationError(
                 {
-                    "id": _error(
+                    "id": error(
                         f"{count} customer(s) buy at this group's prices. Move "
                         f"them to another group first.",
                         "group_in_use",
                     )
                 }
             )
+
+    @classmethod
+    def clean_input(cls, info, instances, ids):
+        """Name the ROW that was refused, and keep the code that says why.
+
+        `BaseBulkMutation.clean_input` keys its error dict by the node's GLOBAL
+        ID and joins the messages into a bare string, dropping the code on the
+        way (`saleor/graphql/core/mutations.py:1066-1067`, where stock's own
+        FIXME says so). The refusal therefore reached the Dashboard as
+        `field: "V3NtRGVhbGVyR3JvdXA6MQ=="`, `code: INVALID`: the Dashboard
+        shows a message as a FORM error only when `field` is empty and branches
+        on the code for everything else, so GROUP_IN_USE was neither readable
+        nor recognisable and the merchant saw base64. `ids.<i>` is how stock's
+        bulk mutations name a row, and `get_nodes` returns the instances in the
+        order the ids were posted (`saleor/graphql/utils/__init__.py:144`), so
+        the index is the line the merchant selected.
+        """
+        clean_instance_ids: list = []
+        errors_dict: dict[str, list[ValidationError]] = {}
+        for index, instance in enumerate(instances):
+            try:
+                cls.clean_instance(info, instance)
+            except ValidationError as exc:
+                errors_dict[f"ids.{index}"] = (
+                    [item for items in exc.error_dict.values() for item in items]
+                    if hasattr(exc, "error_dict")
+                    else list(exc.error_list)
+                )
+            else:
+                clean_instance_ids.append(instance.pk)
+        return clean_instance_ids, errors_dict
 
 
 class WsmDealerGroupDelete(GroupDeleteMixin, ModelDeleteMutation):
@@ -327,8 +327,6 @@ class WsmDealerCustomerAssign(TypedIdMixin, DeprecatedModelMutation):
 
     @classmethod
     def clean_input(cls, info, instance, data, **kwargs):
-        from ....graphql.core.context import get_database_connection_name
-
         cleaned_input = super().clean_input(info, instance, data, **kwargs)
         user = cleaned_input.get("user")
         if user is not None:
@@ -343,7 +341,7 @@ class WsmDealerCustomerAssign(TypedIdMixin, DeprecatedModelMutation):
             if existing is not None:
                 raise ValidationError(
                     {
-                        "user": _error(
+                        "user": error(
                             f"{user.email} already buys at {existing.group}'s "
                             f"prices. Move them instead.",
                             "customer_already_assigned",
@@ -394,7 +392,7 @@ class WsmTierPriceCreateInput(BaseInputObjectType):
     variant = graphene.ID(required=True, description="The exact SKU.")
     group = graphene.ID(required=True, description="The group that pays this price.")
     min_quantity = graphene.Int(description="This price applies from here up.")
-    amount = PositiveDecimal(
+    amount = WsmDecimal(
         required=True, description="What the group pays each, at least one cent."
     )
 
@@ -404,7 +402,7 @@ class WsmTierPriceCreateInput(BaseInputObjectType):
 
 class WsmTierPriceUpdateInput(BaseInputObjectType):
     min_quantity = graphene.Int(description="This price applies from here up.")
-    amount = PositiveDecimal(description="What the group pays each.")
+    amount = WsmDecimal(description="What the group pays each.")
 
     class Meta:
         doc_category = DOC_CATEGORY_WSM
@@ -421,7 +419,7 @@ class TierPriceWriteMixin(TypedIdMixin):
         quantity = cleaned_input.get("min_quantity")
         if quantity is not None and quantity < 1:
             raise ValidationError(
-                {"minQuantity": _error("a quantity break starts at one", "invalid")}
+                {"minQuantity": error("a quantity break starts at one", "invalid")}
             )
         return cleaned_input
 
@@ -433,8 +431,6 @@ class TierPriceWriteMixin(TypedIdMixin):
         screen renders for it is the one that says what a break IS, because
         "unique" on a screen with four fields names none of them.
         """
-        from ....graphql.core.context import get_database_connection_name
-
         taken = (
             models.TierPrice.objects.using(get_database_connection_name(info.context))
             .filter(
@@ -448,7 +444,7 @@ class TierPriceWriteMixin(TypedIdMixin):
         if taken:
             raise ValidationError(
                 {
-                    "minQuantity": _error(
+                    "minQuantity": error(
                         "this group already has a price for that SKU at that quantity",
                         "duplicate_tier_break",
                     )
@@ -528,7 +524,7 @@ class WsmTierPriceBulkCreateInput(BaseInputObjectType):
     variant = graphene.ID(required=True, description="The exact SKU.")
     group = graphene.ID(required=True, description="The group that pays this price.")
     min_quantity = graphene.Int(description="This price applies from here up.")
-    amount = PositiveDecimal(
+    amount = WsmDecimal(
         required=True, description="What the group pays each, at least one cent."
     )
 
@@ -576,13 +572,16 @@ class WsmTierPriceBulkCreate(BaseMutation):
     def perform_mutation(cls, _root, info, /, *, tier_prices, **data):
         try:
             rows = cls._clean_rows(info, tier_prices)
-        except ValidationError as error:
+        except ValidationError as exc:
             # `count` and `tierPrices` are non-null, so a refusal has to carry
             # them: a payload that returned null for either would be a schema
             # error on top of the merchant's own.
-            return cls.handle_errors(error, count=0, tier_prices=[])
+            return cls.handle_errors(exc, count=0, tier_prices=[])
         with transaction.atomic():
-            created = models.TierPrice.objects.bulk_create(rows)
+            # The widest INSERT we will build in one round trip. Equal to the
+            # cap today, so a legal paste is one statement; named separately
+            # because raising the cap must not widen the statement.
+            created = models.TierPrice.objects.bulk_create(rows, batch_size=500)
         return cls(errors=[], count=len(created), tier_prices=created)
 
     @classmethod
@@ -593,8 +592,18 @@ class WsmTierPriceBulkCreate(BaseMutation):
         `tierPrices.<index>.<field>`, so a failed paste of 300 lines tells the
         merchant which line to fix instead of which column.
         """
-        from ....graphql.core.context import get_database_connection_name
         from ....product.models import ProductVariant
+
+        if len(rows) > MAX_TIER_PRICES:
+            raise ValidationError(
+                {
+                    "tierPrices": error(
+                        f"{len(rows)} rows in one call, and the limit is "
+                        f"{MAX_TIER_PRICES}. Split the paste.",
+                        "bulk_limit",
+                    )
+                }
+            )
 
         database = get_database_connection_name(info.context)
         errors: dict = {}
@@ -603,33 +612,33 @@ class WsmTierPriceBulkCreate(BaseMutation):
 
         for index, row in enumerate(rows):
             field = f"tierPrices.{index}"
-            variant_pk = _pk_or_none(row["variant"], "ProductVariant")
-            group_pk = _pk_or_none(row["group"], "WsmDealerGroup")
+            variant_pk = pk_or_none(row["variant"], "ProductVariant")
+            group_pk = pk_or_none(row["group"], "WsmDealerGroup")
             if variant_pk is None:
-                errors[f"{field}.variant"] = _error(
+                errors[f"{field}.variant"] = error(
                     "that is not a product variant", "invalid"
                 )
                 continue
             if group_pk is None:
-                errors[f"{field}.group"] = _error(
+                errors[f"{field}.group"] = error(
                     "that is not a dealer group", "invalid"
                 )
                 continue
             quantity = row.get("min_quantity")
             quantity = 1 if quantity is None else quantity
             if quantity < 1:
-                errors[f"{field}.minQuantity"] = _error(
+                errors[f"{field}.minQuantity"] = error(
                     "a quantity break starts at one", "invalid"
                 )
                 continue
             try:
                 amount = _clean_amount(row.get("amount"), f"{field}.amount")
-            except ValidationError as error:
-                errors.update(error.error_dict)
+            except ValidationError as exc:
+                errors.update(exc.error_dict)
                 continue
             break_key = (variant_pk, group_pk, quantity)
             if break_key in seen:
-                errors[f"{field}.minQuantity"] = _error(
+                errors[f"{field}.minQuantity"] = error(
                     f"row {seen[break_key]} in this paste already prices that "
                     f"SKU for that group at that quantity",
                     "duplicate_tier_break",
@@ -651,7 +660,16 @@ class WsmTierPriceBulkCreate(BaseMutation):
 
         variant_pks = {row["variant_pk"] for row in parsed}
         group_pks = {row["group_pk"] for row in parsed}
-        variants = ProductVariant.objects.using(database).in_bulk(variant_pks)
+        # The rows this mutation RETURNS are the rows the Dashboard renders,
+        # and it selects `variant.product.name` and `currencyCode` on each one.
+        # Bare instances make that a query per line of the paste the merchant
+        # just made, which is the 1+N the bulk path exists to avoid.
+        variants = (
+            ProductVariant.objects.using(database)
+            .select_related("product")
+            .prefetch_related("channel_listings")
+            .in_bulk(variant_pks)
+        )
         groups = models.DealerGroup.objects.using(database).in_bulk(group_pks)
         stored = set(
             models.TierPrice.objects.using(database)
@@ -665,17 +683,17 @@ class WsmTierPriceBulkCreate(BaseMutation):
             variant = variants.get(row["variant_pk"])
             group = groups.get(row["group_pk"])
             if variant is None:
-                errors[f"{field}.variant"] = _error(
+                errors[f"{field}.variant"] = error(
                     "that SKU does not exist", "not_found"
                 )
                 continue
             if group is None:
-                errors[f"{field}.group"] = _error(
+                errors[f"{field}.group"] = error(
                     "that dealer group does not exist", "not_found"
                 )
                 continue
             if (variant.pk, group.pk, row["min_quantity"]) in stored:
-                errors[f"{field}.minQuantity"] = _error(
+                errors[f"{field}.minQuantity"] = error(
                     "this group already has a price for that SKU at that quantity",
                     "duplicate_tier_break",
                 )
@@ -740,8 +758,6 @@ class WsmDealerSettingsUpdate(DeprecatedModelMutation):
         singleton table a second row on every call. There is no id to take,
         because the row is the store, so the existing row is the instance.
         """
-        from ....graphql.core.context import get_database_connection_name
-
         return (
             models.DealerSettings.objects.using(
                 get_database_connection_name(info.context)

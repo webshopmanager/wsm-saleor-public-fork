@@ -56,6 +56,10 @@ class WsmErrorCode(Enum):
     DUPLICATE_GROUP_CODE = "duplicate_group_code"
     CUSTOMER_ALREADY_ASSIGNED = "customer_already_assigned"
     GROUP_IN_USE = "group_in_use"
+    # A paste is capped on stock's own bulk-create shape (`MAX_ORDERS`,
+    # `saleor/graphql/order/bulk_mutations/order_bulk_create.py:86`), and
+    # this is stock's name for that refusal (`saleor/order/error_codes.py:86`).
+    BULK_LIMIT = "bulk_limit"
 
 
 # `from_enum` names the GraphQL type after the PYTHON class, so the type in the

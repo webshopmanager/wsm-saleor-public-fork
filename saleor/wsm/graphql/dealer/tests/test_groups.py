@@ -19,7 +19,7 @@ import graphene
 import pytest
 
 from .....graphql.tests.utils import assert_no_permission, get_graphql_content
-from ....dealer.models import DealerCustomer, DealerGroup
+from ....dealer.models import DealerCustomer, DealerGroup, TierPrice
 
 pytestmark = pytest.mark.django_db
 
@@ -64,6 +64,14 @@ DETAIL = """
     query Detail($id: ID, $code: String) {
       wsmDealerGroup(id: $id, code: $code) {
         id code name tierPriceCount customerCount
+      }
+    }
+"""
+
+PICKER = """
+    query Picker {
+      wsmDealerGroups(first: 100) {
+        edges { node { id code name } }
       }
     }
 """
@@ -349,8 +357,19 @@ def test_bulk_delete_skips_a_group_that_still_has_customers(
     content = get_graphql_content(response)
     payload = content["data"]["wsmDealerGroupBulkDelete"]
     assert payload["count"] == 1
-    assert [error["message"] for error in payload["errors"]] == [
-        "1 customer(s) buy at this group's prices. Move them to another group first."
+    # Field AND code, not just the sentence. The Dashboard shows a message as a
+    # form error only when `field` is empty and branches on the code for
+    # everything else, and stock's bulk path hands it a base64 node id with no
+    # code at all (`saleor/graphql/core/mutations.py:1066-1067`).
+    assert payload["errors"] == [
+        {
+            "field": "ids.0",
+            "code": "GROUP_IN_USE",
+            "message": (
+                "1 customer(s) buy at this group's prices. Move them to "
+                "another group first."
+            ),
+        }
     ]
     assert list(DealerGroup.objects.values_list("code", flat=True)) == ["dealer-1"]
 
@@ -376,8 +395,6 @@ def test_the_group_list_counts_its_prices_and_its_customers(
     customer_user,
     variant,
 ):
-    from ....dealer.models import TierPrice
-
     DealerCustomer.objects.create(user=customer_user, group=dealer_group)
     TierPrice.objects.create(
         variant=variant, group=dealer_group, min_quantity=1, amount="10.00"
@@ -410,3 +427,47 @@ def test_the_group_list_search_matches_the_code_and_the_name(
         edge["node"]["code"] for edge in content["data"]["wsmDealerGroups"]["edges"]
     ]
     assert codes == ["warehouse"]
+
+
+def test_a_group_read_pays_only_for_the_counts_it_was_asked_for(
+    staff_api_client,
+    permission_manage_discounts,
+    dealer_group,
+    customer_user,
+    variant,
+    capture_queries,
+):
+    """Two counts in one `annotate` cross-multiply, and nobody always wants them.
+
+    The compose option-set picker and the single-group lookup select id, code
+    and name, so a count annotated unconditionally is a join and an aggregate
+    bought for a field nobody read. When they ARE selected, two multi-valued
+    `Count(distinct=True)` annotations sharing one FROM clause make the database
+    build the product of both joins before deduplicating, which on live data
+    (304 tier rows, 40 customers) is 12,160 intermediate rows for two numbers.
+    A scalar subquery per count joins nothing.
+    """
+    DealerCustomer.objects.create(user=customer_user, group=dealer_group)
+    TierPrice.objects.create(
+        variant=variant, group=dealer_group, min_quantity=1, amount="10.00"
+    )
+    staff_api_client.user.user_permissions.add(permission_manage_discounts)
+    groups = DealerGroup._meta.db_table
+    counted = (TierPrice._meta.db_table, DealerCustomer._meta.db_table)
+
+    with capture_queries() as picker:
+        get_graphql_content(staff_api_client.post_graphql(PICKER))
+    reads = [q["sql"] for q in picker.captured_queries if groups in q["sql"]]
+    assert reads
+    assert not [sql for sql in reads if any(table in sql for table in counted)], reads
+
+    with capture_queries() as listed:
+        content = get_graphql_content(staff_api_client.post_graphql(LIST))
+    node = content["data"]["wsmDealerGroups"]["edges"][0]["node"]
+    assert (node["tierPriceCount"], node["customerCount"]) == (1, 1)
+    joins = [
+        q["sql"]
+        for q in listed.captured_queries
+        if groups in q["sql"] and "JOIN" in q["sql"]
+    ]
+    assert not joins, joins

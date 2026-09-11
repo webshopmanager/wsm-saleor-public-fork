@@ -16,11 +16,11 @@ import graphene
 
 from ....graphql.account.types import User
 from ....graphql.core.connection import CountableConnection
-from ....graphql.core.context import ChannelContext, get_database_connection_name
-from ....graphql.core.scalars import PositiveDecimal
+from ....graphql.core.context import ChannelContext
 from ....graphql.core.types import ModelObjectType
 from ....graphql.product.types.products import ProductVariant
 from ...dealer import models
+from ..scalars import WsmDecimal
 from ..types import DOC_CATEGORY_WSM
 
 # The names the list resolvers annotate their counts under. Read off the row
@@ -104,7 +104,7 @@ class WsmTierPrice(ModelObjectType[models.TierPrice]):
         required=True,
         description="This price applies from this quantity up, until the next break.",
     )
-    amount = PositiveDecimal(
+    amount = WsmDecimal(
         required=True,
         description=(
             "What this group pays EACH, and at least one cent. An absolute "
@@ -134,26 +134,34 @@ class WsmTierPrice(ModelObjectType[models.TierPrice]):
         return ChannelContext(node=root.variant, channel_slug=None)
 
     @staticmethod
-    def resolve_currency_code(root: models.TierPrice, info):
-        """The SKU's own currency, off the listings the list already prefetched.
+    def resolve_currency_code(root: models.TierPrice, _info):
+        """The cheapest of the SKU's own listings, or nothing.
+
+        Cheapest rather than "whichever row the database returned first": the
+        merchant screen labels ONE money box, and an unordered pick labels it
+        differently between two requests for no reason the merchant can see.
+        Null when the SKU is in no channel, which is the honest answer and what
+        the field being nullable is for; the fallback this replaces took an
+        arbitrary Channel's currency and labelled the box with a currency this
+        SKU is not sold in.
 
         A 300-row grid is the screen this field exists for, so it must not cost
-        a query per row: both resolvers prefetch `variant__channel_listings`,
-        and `.all()` on a prefetched manager reads the cache.
+        a query per row: every resolver that hands back tier prices prefetches
+        `variant__channel_listings`, and `.all()` on a prefetched manager reads
+        the cache. Ordered in python for the same reason, because `order_by` on
+        a prefetched manager is a fresh query per row.
         ponytail: the ceiling is a caller that reaches a tier price WITHOUT that
         prefetch (a mutation payload, one row), which pays one query. The
         upgrade, if a second unprefetched list ever appears, is a dataloader.
         """
-        listing = next(iter(root.variant.channel_listings.all()), None)
-        if listing is not None:
-            return listing.currency
-        from ....channel.models import Channel
-
-        return (
-            Channel.objects.using(get_database_connection_name(info.context))
-            .values_list("currency_code", flat=True)
-            .first()
-        )
+        priced = [
+            listing
+            for listing in root.variant.channel_listings.all()
+            if listing.price_amount is not None
+        ]
+        if not priced:
+            return None
+        return min(priced, key=lambda listing: listing.price_amount).currency
 
 
 class WsmDealerSettings(ModelObjectType[models.DealerSettings]):

@@ -137,6 +137,16 @@ class DealerCustomer(models.Model):
             "nobody has approved for terms pays like everyone else."
         ),
     )
+    no_free_shipping = models.BooleanField(
+        default=False,
+        help_text=(
+            "Never offer this dealer a shipping method that costs nothing. "
+            "Free shipping is something you sell retail shoppers; a dealer on "
+            "this flag pays their own freight, or has it billed to their "
+            "carrier account. Off by default, so a dealer ships like everyone "
+            "else until you say otherwise."
+        ),
+    )
     account_number = models.CharField(
         max_length=100,
         blank=True,

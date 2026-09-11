@@ -117,10 +117,9 @@ class WsmContainersQueries(graphene.ObjectType):
     def resolve_wsm_kit_config(
         _root, info: ResolveInfo, /, *, id=None, collection=None
     ):
-        kit = _by_id_or_collection(
+        return _by_id_or_collection(
             info, models.KitConfig.objects, "WsmKitConfig", id, collection
         )
-        return kit
 
     @staticmethod
     def resolve_wsm_kit_configs(_root, info: ResolveInfo, /, **kwargs):

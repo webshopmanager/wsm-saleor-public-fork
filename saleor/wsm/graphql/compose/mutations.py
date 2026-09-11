@@ -25,10 +25,12 @@ from ....graphql.core.mutations import DeprecatedModelMutation, ModelDeleteMutat
 from ....graphql.core.scalars import Decimal, PositiveDecimal
 from ....graphql.core.types import BaseInputObjectType, NonNullList
 from ....graphql.core.utils import from_global_id_or_error
+from ....graphql.product.types import Product
 from ....permission.enums import ProductPermissions
 from ...compose import models
 from ..errors import WsmError
 from ..types import DOC_CATEGORY_WSM
+from ..utils import TypedIdMixin
 from .enums import WsmFeeBasisEnum, WsmFeeScopeEnum, WsmOptionSetPromptTypeEnum
 from .types import (
     WsmDealerTierOptionPrice,
@@ -132,6 +134,13 @@ def replace_tier_deltas(value_row, tier_input, field_prefix):
         seen[group] = index
         rows.append((row, field))
 
+    # ponytail: rows are deleted first and saved after, so two rows SWAPPING
+    # dealer groups inside one submit transiently collide on
+    # (option_value, tier_group) and the save refuses. Ceiling: a merchant who
+    # swaps two groups between existing rows has to delete and re-add instead.
+    # Upgrade path is the same one containers' `_write_members` carries, a
+    # deferrable unique constraint; the Dashboard datagrid deletes and adds, so
+    # nothing reaches it today.
     value_row.tier_deltas.exclude(pk__in=kept).delete()
     for row, _field in rows:
         row.save()
@@ -161,7 +170,12 @@ def replace_option_values(option_set, values_input):
         else:
             row = models.OptionValue(option_set=option_set)
         row.name = item["name"]
-        row.sku_fragment = item.get("sku_fragment") or ""
+        # `is not None`, like the three fields below it: the Dashboard
+        # datagrid sends only what the merchant touched, so an absent fragment
+        # means unchanged. Reading it as a clear renames every SKU the choice
+        # builds, on an edit that never mentioned it.
+        if item.get("sku_fragment") is not None:
+            row.sku_fragment = item["sku_fragment"]
         if item.get("price_delta") is not None:
             row.price_delta = item["price_delta"]
         if item.get("image_url") is not None:
@@ -284,8 +298,10 @@ class WsmOptionSetUpdateInput(BaseInputObjectType):
         doc_category = DOC_CATEGORY_WSM
 
 
-class WsmOptionSetMutationBase(DeprecatedModelMutation):
+class WsmOptionSetMutationBase(TypedIdMixin, DeprecatedModelMutation):
     """What create and update share: the nested list, inside one transaction."""
+
+    typed_ids = {"product": Product}
 
     class Meta:
         abstract = True
@@ -391,7 +407,7 @@ class WsmFeeUpdateInput(BaseInputObjectType):
         doc_category = DOC_CATEGORY_WSM
 
 
-class WsmFeeCreate(DeprecatedModelMutation):
+class WsmFeeCreate(TypedIdMixin, DeprecatedModelMutation):
     """`variant` is deliberately absent from the input.
 
     The hidden carrier variant is written by the first configured add and never
@@ -407,6 +423,8 @@ class WsmFeeCreate(DeprecatedModelMutation):
         permissions = MANAGE_PRODUCTS
         error_type_class = WsmError
         doc_category = DOC_CATEGORY_WSM
+
+    typed_ids = {"product": Product}
 
     class Arguments:
         input = WsmFeeCreateInput(

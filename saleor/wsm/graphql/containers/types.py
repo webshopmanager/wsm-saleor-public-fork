@@ -15,7 +15,7 @@ what a merchant reads and what a mutation has to check at once.
 import graphene
 
 from ....graphql.core.connection import CountableConnection
-from ....graphql.core.context import ChannelContext, get_database_connection_name
+from ....graphql.core.context import ChannelContext
 from ....graphql.core.scalars import PositiveDecimal
 from ....graphql.core.types import ModelObjectType, NonNullList
 from ....graphql.product.types.collections import Collection
@@ -105,17 +105,11 @@ class WsmSeriesConfig(ModelObjectType[models.SeriesConfig]):
     def resolve_member_count(root: models.SeriesConfig, info):
         # One aggregate, and the same one the admin's readonly row showed
         # (`containers/admin.py:168`): published members, because that is what
-        # the publish rule counts.
-        from ....product.models import Product
+        # the publish rule counts. Batched, because the series LIST selects it
+        # once per row and an inline query there is 1+N.
+        from .dataloaders import MemberCountByCollectionIdLoader
 
-        return (
-            Product.objects.using(get_database_connection_name(info.context))
-            .filter(
-                collections__id=root.collection_id, channel_listings__is_published=True
-            )
-            .distinct()
-            .count()
-        )
+        return MemberCountByCollectionIdLoader(info.context).load(root.collection_id)
 
 
 class WsmKitMember(ModelObjectType[models.KitMember]):
@@ -231,31 +225,16 @@ class WsmKitConfig(ModelObjectType[models.KitConfig]):
 
     @staticmethod
     def resolve_currency_code(root: models.KitConfig, info):
-        """What the members are priced in, in one query, from the members.
+        """What the members are priced in, read off the members.
 
         A kit carries no currency column because no WSM column does: the honest
         answer is the one the merchant's own listing gives, and the shop's
-        channel is the fallback while a kit is still empty.
-        ponytail: one query per kit, which is a detail screen, not a list; a
-        list that ever selects this field wants a dataloader instead.
+        channel is the fallback while a kit is still empty. Batched, because the
+        kit LIST selects this field and an inline query there is 1+N.
         """
-        from ....channel.models import Channel
-        from ....product.models import ProductVariantChannelListing
+        from .dataloaders import CurrencyCodeByKitIdLoader
 
-        database = get_database_connection_name(info.context)
-        currency = (
-            ProductVariantChannelListing.objects.using(database)
-            .filter(variant__wsm_kit_memberships__kit_id=root.pk)
-            .values_list("currency", flat=True)
-            .first()
-        )
-        if currency:
-            return currency
-        return (
-            Channel.objects.using(database)
-            .values_list("currency_code", flat=True)
-            .first()
-        )
+        return CurrencyCodeByKitIdLoader(info.context).load(root.pk)
 
 
 class WsmSeriesConfigCountableConnection(CountableConnection):

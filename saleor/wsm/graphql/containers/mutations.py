@@ -28,11 +28,12 @@ from ....attribute import AttributeType
 from ....graphql.core.mutations import DeprecatedModelMutation, ModelDeleteMutation
 from ....graphql.core.scalars import PositiveDecimal
 from ....graphql.core.types import BaseInputObjectType, NonNullList
-from ....graphql.core.utils import from_global_id_or_error
 from ....permission.enums import ProductPermissions
 from ...containers import models
 from ..errors import WsmError
 from ..types import DOC_CATEGORY_WSM
+from ..utils import error as _error
+from ..utils import pk_or_none as _pk_or_none
 from .types import (
     WsmKitConfig,
     WsmKitDiscountKind,
@@ -48,19 +49,6 @@ from .types import (
 # `PERMISSIONS_ENUMS` from `ready()` before the schema is built, at which point
 # the existing `create_wsm_permissions` receiver already carries the rows.
 CONTAINER_PERMISSIONS = (ProductPermissions.MANAGE_PRODUCTS,)
-
-
-def _error(message: str, code: str) -> ValidationError:
-    return ValidationError(message, code=code)
-
-
-def _pk_or_none(global_id, type_name: str):
-    """The database id behind a global id, or None if it is not one of those."""
-    try:
-        _, pk = from_global_id_or_error(global_id, type_name, raise_error=True)
-        return int(pk)
-    except Exception:
-        return None
 
 
 def _collection_or_error(database: str, global_id, field: str = "collection"):

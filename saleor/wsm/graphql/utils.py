@@ -15,6 +15,11 @@ error the Dashboard already knows how to render.
 from django.core.exceptions import ValidationError
 from graphql.error import GraphQLError
 
+from ...graphql.core.connection import (
+    create_connection_slice,
+    filter_connection_queryset,
+)
+from ...graphql.core.context import get_database_connection_name
 from ...graphql.core.utils import from_global_id_or_error
 
 # One call is one paste, on every bulk path in the layer. Stock caps its own
@@ -70,6 +75,37 @@ class BulkLimitMixin:
         if len(ids) > BULK_LIMIT:
             return 0, bulk_limit_error(len(ids), "ids")
         return super().perform_mutation(root, info, ids=ids, **data)
+
+
+def reader(model, info):
+    """Every list and detail read on the request's own connection.
+
+    A bare `.objects` raises UnsafeWriterAccessError under
+    ENABLE_RESTRICT_WRITER_MIDDLEWARE, which is how 164 tests went red on the
+    TNO pass. One helper above the domains, so no resolver in the layer can
+    forget and no domain writes its own.
+    """
+    return model.objects.using(get_database_connection_name(info.context))
+
+
+def by_global_id(qs, global_id, type_name):
+    """One row off an already-shaped queryset, by the id the screen holds."""
+    _type, pk = from_global_id_or_error(global_id, type_name, raise_error=True)
+    return qs.filter(pk=pk).first()
+
+
+def connection_slice(qs, info, kwargs, connection_type):
+    """Stock's list read: narrow the queryset, then page it. In that order.
+
+    Written six times across two domains, identically, before it lived here.
+    Both halves are stock's own (`saleor/graphql/core/connection.py`); what
+    was being copied was the pairing, and the `allow_replica` argument that
+    goes with it.
+    """
+    qs = filter_connection_queryset(
+        qs, kwargs, allow_replica=info.context.allow_replica
+    )
+    return create_connection_slice(qs, info, kwargs, connection_type)
 
 
 def pk_or_none(global_id, type_name: str):

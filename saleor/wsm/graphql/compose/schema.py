@@ -15,16 +15,12 @@ import graphene
 from django.core.exceptions import ValidationError
 
 from ....graphql.core import ResolveInfo
-from ....graphql.core.connection import (
-    create_connection_slice,
-    filter_connection_queryset,
-)
-from ....graphql.core.context import get_database_connection_name
 from ....graphql.core.fields import FilterConnectionField, PermissionsField
 from ....graphql.core.utils import from_global_id_or_error
 from ....permission.enums import ProductPermissions
 from ...compose import models
 from ..types import DOC_CATEGORY_WSM
+from ..utils import by_global_id, connection_slice, reader
 
 # Importing the module is what appends the three fields to stock's `Product`.
 # Its position in this block does not matter: the ordering that does is inside
@@ -59,19 +55,8 @@ from .types import (
 MANAGE_PRODUCTS = [ProductPermissions.MANAGE_PRODUCTS]
 
 
-def _reader(model, info):
-    """Every list and detail read on the request's own connection.
-
-    A bare `.objects` here raises UnsafeWriterAccessError under
-    ENABLE_RESTRICT_WRITER_MIDDLEWARE, which is how 164 tests went red on the
-    TNO pass. One helper so no resolver below can forget.
-    """
-    return model.objects.using(get_database_connection_name(info.context))
-
-
 def _by_id(model, graphql_type, info, object_id):
-    _type, pk = from_global_id_or_error(object_id, graphql_type, raise_error=True)
-    return _reader(model, info).filter(pk=pk).first()
+    return by_global_id(reader(model, info), object_id, graphql_type)
 
 
 class ComposeQueries(graphene.ObjectType):
@@ -133,12 +118,11 @@ class ComposeQueries(graphene.ObjectType):
 
     @staticmethod
     def resolve_wsm_option_sets(_root, info: ResolveInfo, /, **kwargs):
-        qs = _reader(models.OptionSet, info)
-        qs = filter_connection_queryset(
-            qs, kwargs, allow_replica=info.context.allow_replica
-        )
-        return create_connection_slice(
-            qs, info, kwargs, WsmOptionSetCountableConnection
+        return connection_slice(
+            reader(models.OptionSet, info),
+            info,
+            kwargs,
+            WsmOptionSetCountableConnection,
         )
 
     @staticmethod
@@ -147,11 +131,9 @@ class ComposeQueries(graphene.ObjectType):
 
     @staticmethod
     def resolve_wsm_fees(_root, info: ResolveInfo, /, **kwargs):
-        qs = _reader(models.Fee, info)
-        qs = filter_connection_queryset(
-            qs, kwargs, allow_replica=info.context.allow_replica
+        return connection_slice(
+            reader(models.Fee, info), info, kwargs, WsmFeeCountableConnection
         )
-        return create_connection_slice(qs, info, kwargs, WsmFeeCountableConnection)
 
     @staticmethod
     def resolve_wsm_product_compliance(
@@ -172,18 +154,17 @@ class ComposeQueries(graphene.ObjectType):
         from ....graphql.product.types import Product
 
         _type, pk = from_global_id_or_error(product, Product, raise_error=True)
-        return _reader(models.ProductCompliance, info).filter(product_id=pk).first()
+        return reader(models.ProductCompliance, info).filter(product_id=pk).first()
 
     @staticmethod
     def resolve_wsm_product_compliances(_root, info: ResolveInfo, /, **kwargs):
         # No `Meta.ordering` on this model, and a connection slice with no
         # deterministic order pages rows twice and skips others.
-        qs = _reader(models.ProductCompliance, info).order_by("pk")
-        qs = filter_connection_queryset(
-            qs, kwargs, allow_replica=info.context.allow_replica
-        )
-        return create_connection_slice(
-            qs, info, kwargs, WsmProductComplianceCountableConnection
+        return connection_slice(
+            reader(models.ProductCompliance, info).order_by("pk"),
+            info,
+            kwargs,
+            WsmProductComplianceCountableConnection,
         )
 
 

@@ -22,17 +22,13 @@ from django.db.models.functions import Coalesce
 from graphql.language.ast import FragmentSpread, InlineFragment
 
 from ....graphql.core import ResolveInfo
-from ....graphql.core.connection import (
-    create_connection_slice,
-    filter_connection_queryset,
-)
-from ....graphql.core.context import get_database_connection_name
 from ....graphql.core.fields import FilterConnectionField, PermissionsField
 from ....graphql.core.utils import from_global_id_or_error
 from ....graphql.core.validators import validate_one_of_args_is_in_query
 from ....permission.enums import DiscountPermissions, ProductPermissions
 from ...dealer import models
 from ..types import DOC_CATEGORY_WSM
+from ..utils import by_global_id, connection_slice, reader
 from .filters import (
     WsmDealerCustomerFilterInput,
     WsmDealerGroupFilterInput,
@@ -144,12 +140,7 @@ def _groups(info: ResolveInfo):
     `WsmDealerGroup` already falls back to a per-row count for the callers that
     hand it an un-annotated instance.
     """
-    # Named connection, not a bare `.objects`: under
-    # ENABLE_RESTRICT_WRITER_MIDDLEWARE an unrouted read inside a GraphQL
-    # request raises UnsafeWriterAccessError.
-    groups = models.DealerGroup.objects.using(
-        get_database_connection_name(info.context)
-    )
+    groups = reader(models.DealerGroup, info)
     selected = _selected(info)
     annotations = {
         alias: _row_count(model)
@@ -174,7 +165,7 @@ def _customers(info: ResolveInfo):
     still annotates only the counts the selection set actually asked for.
     """
     return (
-        models.DealerCustomer.objects.using(get_database_connection_name(info.context))
+        reader(models.DealerCustomer, info)
         .select_related("user")
         .prefetch_related(Prefetch("group", queryset=_groups(info)))
     )
@@ -192,7 +183,7 @@ def _tier_prices(info: ResolveInfo):
     on it a query each.
     """
     return (
-        models.TierPrice.objects.using(get_database_connection_name(info.context))
+        reader(models.TierPrice, info)
         .select_related("variant", "variant__product")
         .prefetch_related(
             "variant__channel_listings",
@@ -266,16 +257,12 @@ class WsmDealerQueries(graphene.ObjectType):
         qs = _groups(info)
         if code:
             return qs.filter(code=code).first()
-        _, pk = from_global_id_or_error(id, "WsmDealerGroup", raise_error=True)
-        return qs.filter(pk=pk).first()
+        return by_global_id(qs, id, "WsmDealerGroup")
 
     @staticmethod
     def resolve_wsm_dealer_groups(_root, info: ResolveInfo, /, **kwargs):
-        qs = filter_connection_queryset(
-            _groups(info), kwargs, allow_replica=info.context.allow_replica
-        )
-        return create_connection_slice(
-            qs, info, kwargs, WsmDealerGroupCountableConnection
+        return connection_slice(
+            _groups(info), info, kwargs, WsmDealerGroupCountableConnection
         )
 
     @staticmethod
@@ -285,40 +272,27 @@ class WsmDealerQueries(graphene.ObjectType):
         if user:
             _, pk = from_global_id_or_error(user, "User", raise_error=True)
             return qs.filter(user_id=pk).first()
-        _, pk = from_global_id_or_error(id, "WsmDealerCustomer", raise_error=True)
-        return qs.filter(pk=pk).first()
+        return by_global_id(qs, id, "WsmDealerCustomer")
 
     @staticmethod
     def resolve_wsm_dealer_customers(_root, info: ResolveInfo, /, **kwargs):
-        qs = filter_connection_queryset(
-            _customers(info), kwargs, allow_replica=info.context.allow_replica
-        )
-        return create_connection_slice(
-            qs, info, kwargs, WsmDealerCustomerCountableConnection
+        return connection_slice(
+            _customers(info), info, kwargs, WsmDealerCustomerCountableConnection
         )
 
     @staticmethod
     def resolve_wsm_tier_price(_root, info: ResolveInfo, /, *, id):
-        _, pk = from_global_id_or_error(id, "WsmTierPrice", raise_error=True)
-        return _tier_prices(info).filter(pk=pk).first()
+        return by_global_id(_tier_prices(info), id, "WsmTierPrice")
 
     @staticmethod
     def resolve_wsm_tier_prices(_root, info: ResolveInfo, /, **kwargs):
-        qs = filter_connection_queryset(
-            _tier_prices(info), kwargs, allow_replica=info.context.allow_replica
-        )
-        return create_connection_slice(
-            qs, info, kwargs, WsmTierPriceCountableConnection
+        return connection_slice(
+            _tier_prices(info), info, kwargs, WsmTierPriceCountableConnection
         )
 
     @staticmethod
     def resolve_wsm_dealer_settings(_root, info: ResolveInfo):
-        return (
-            models.DealerSettings.objects.using(
-                get_database_connection_name(info.context)
-            ).first()
-            or models.DealerSettings()
-        )
+        return reader(models.DealerSettings, info).first() or models.DealerSettings()
 
 
 class WsmDealerMutations(graphene.ObjectType):

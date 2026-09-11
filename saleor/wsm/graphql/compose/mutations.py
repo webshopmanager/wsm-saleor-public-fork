@@ -29,7 +29,6 @@ from django.db import transaction
 
 from ....graphql.core.mutations import DeprecatedModelMutation, ModelDeleteMutation
 from ....graphql.core.types import BaseInputObjectType, NonNullList
-from ....graphql.core.utils import from_global_id_or_error
 from ....graphql.product.types import Product
 from ....permission.enums import ProductPermissions
 from ...compose import models
@@ -37,7 +36,7 @@ from ..dealer.mutations import DEALER_PERMISSIONS
 from ..errors import WsmMutationMeta
 from ..scalars import WsmDecimal
 from ..types import WsmDocCategory
-from ..utils import TypedIdMixin
+from ..utils import TypedIdMixin, error, pk_or_none
 from .enums import WsmFeeBasisEnum, WsmFeeScopeEnum, WsmOptionSetPromptTypeEnum
 from .types import (
     WsmDealerTierOptionPrice,
@@ -50,24 +49,18 @@ from .types import (
 MANAGE_PRODUCTS = (ProductPermissions.MANAGE_PRODUCTS,)
 
 
+def _not_found(field, message):
+    return ValidationError({field: error(message, "not_found")})
+
+
 def _row_pk(raw_id, only_type, field):
     """A child row's global ID as an integer, or a NOT_FOUND field error."""
-    try:
-        _type, pk = from_global_id_or_error(raw_id, only_type, raise_error=True)
-        return int(pk)
-    except Exception:
-        raise ValidationError(
-            {
-                field: ValidationError(
-                    f"{raw_id!r} is not the ID of a {only_type.__name__} row.",
-                    code="not_found",
-                )
-            }
-        ) from None
-
-
-def _not_found(field, message):
-    return ValidationError({field: ValidationError(message, code="not_found")})
+    pk = pk_or_none(raw_id, only_type)
+    if pk is None:
+        raise _not_found(
+            field, f"{raw_id!r} is not the ID of a {only_type.__name__} row."
+        )
+    return pk
 
 
 def _clean_row(row, field_prefix, field_map):

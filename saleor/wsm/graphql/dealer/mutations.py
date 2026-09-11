@@ -53,6 +53,7 @@ from ..utils import (
     check_bulk_limit,
     error,
     pk_or_none,
+    reader,
 )
 from .types import (
     WsmDealerCustomer,
@@ -153,9 +154,7 @@ class GroupWriteMixin:
             # "unique": the Dashboard renders one sentence per code, and
             # "unique" is the code it would also get from a duplicate anything.
             taken = (
-                models.DealerGroup.objects.using(
-                    get_database_connection_name(info.context)
-                )
+                reader(models.DealerGroup, info)
                 .filter(code=code)
                 .exclude(pk=instance.pk)
                 .exists()
@@ -323,9 +322,7 @@ class WsmDealerCustomerAssign(WsmMutationMeta, TypedIdMixin, DeprecatedModelMuta
         user = cleaned_input.get("user")
         if user is not None:
             existing = (
-                models.DealerCustomer.objects.using(
-                    get_database_connection_name(info.context)
-                )
+                reader(models.DealerCustomer, info)
                 .select_related("group")
                 .filter(user=user)
                 .first()
@@ -414,7 +411,7 @@ class TierPriceWriteMixin(TypedIdMixin):
         "unique" on a screen with four fields names none of them.
         """
         taken = (
-            models.TierPrice.objects.using(get_database_connection_name(info.context))
+            reader(models.TierPrice, info)
             .filter(
                 variant_id=instance.variant_id,
                 group_id=instance.group_id,
@@ -890,7 +887,5 @@ class WsmDealerSettingsUpdate(WsmMutationMeta, DeprecatedModelMutation):
         KEY makes the race unwritable, and `wsm_dealer_settings_is_one_row`
         (migration 0002) is the backstop under it for every other writer.
         """
-        instance, _created = models.DealerSettings.objects.using(
-            get_database_connection_name(info.context)
-        ).get_or_create(pk=1)
+        instance, _created = reader(models.DealerSettings, info).get_or_create(pk=1)
         return instance

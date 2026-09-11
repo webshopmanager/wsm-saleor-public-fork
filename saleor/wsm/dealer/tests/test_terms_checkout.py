@@ -490,3 +490,38 @@ def test_a_held_account_says_so_before_the_shopper_reaches_the_payment_step(
     on_terms.account_status = ACCOUNT_STATUS_HOLD
     on_terms.save()
     assert my_terms(user_api_client)["accountStatus"] == "HOLD"
+
+
+# --- the dealer's own account number, on the order --------------------------
+
+
+def test_the_dealers_account_number_lands_on_the_order_a_merchant_reads(
+    user_api_client, placeable, on_terms
+):
+    """Ds carries an account number on 504 orders; the fleet on 233,613.
+
+    Both copies, and they are not the same thing. The PUBLIC one is the
+    shopper's receipt. The PRIVATE one is what an invoice and the Dashboard
+    order page read, because a shopper can write public metadata on their own
+    CHECKOUT and stock copies a checkout's metadata onto the order at creation.
+    """
+    payload = call(user_api_client, placeable, po="DS-TEST-001")
+    assert payload["errors"] == []
+
+    order = Order.objects.get()
+    assert order.metadata[terms.ACCOUNT_NUMBER_KEY] == "DS-4471"
+    assert order.private_metadata[terms.PRIVATE_ACCOUNT_NUMBER_KEY] == "DS-4471"
+
+
+def test_an_account_with_no_number_stamps_neither_copy(
+    user_api_client, placeable, on_terms
+):
+    """An empty string is not an account number, and an empty key is worse."""
+    on_terms.account_number = ""
+    on_terms.save()
+
+    assert call(user_api_client, placeable)["errors"] == []
+
+    order = Order.objects.get()
+    assert terms.ACCOUNT_NUMBER_KEY not in order.metadata
+    assert terms.PRIVATE_ACCOUNT_NUMBER_KEY not in order.private_metadata

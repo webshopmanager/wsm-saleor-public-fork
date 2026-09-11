@@ -60,6 +60,12 @@ PO_KEY = "po_number"
 ACCOUNT_NUMBER_KEY = "wsm_account_number"
 PRIVATE_TERMS_KEY = "wsm.terms"
 PRIVATE_PO_KEY = "wsm.terms.po_number"
+# The merchant-trusted copy of the dealer's own account number. The public
+# `wsm_account_number` beside it is the shopper's receipt; THIS is the one an
+# invoice and the Dashboard order page read, for the same reason the terms
+# marker has a private copy: a shopper can write public metadata on their own
+# CHECKOUT and that metadata is copied onto the order at creation.
+PRIVATE_ACCOUNT_NUMBER_KEY = "wsm.dealer_account_number"
 
 # The value `wsm_terms` carries. A string rather than "true" so a second terms
 # arrangement (net 30, credit card on file) is a new value and not a new key.
@@ -118,6 +124,7 @@ def order_stamps(account: DealerCustomer, po_number: str) -> tuple[dict, dict]:
         private[PRIVATE_PO_KEY] = po_number
     if account.account_number:
         public[ACCOUNT_NUMBER_KEY] = account.account_number
+        private[PRIVATE_ACCOUNT_NUMBER_KEY] = account.account_number
     return public, private
 
 

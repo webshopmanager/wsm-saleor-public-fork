@@ -15,6 +15,7 @@ import pytest
 from saleor.graphql.tests.utils import assert_no_permission, get_graphql_content
 from saleor.wsm.compose import pricing
 from saleor.wsm.compose.models import Fee
+from saleor.wsm.graphql.utils import BULK_LIMIT
 
 DETAIL = """
     query WsmFee($id: ID!) {
@@ -309,3 +310,18 @@ def test_bulk_delete_removes_only_the_rows_it_was_given(
     assert payload["errors"] == []
     assert payload["count"] == 1
     assert list(Fee.objects.values_list("pk", flat=True)) == [spared.pk]
+
+
+@pytest.mark.django_db
+def test_bulk_delete_refuses_more_ids_than_the_cap(merchant_api_client, fee):
+    """Bounded before a single id is decoded, and nothing is deleted."""
+    ids = [fee_id(fee)] * (BULK_LIMIT + 1)
+
+    response = merchant_api_client.post_graphql(BULK_DELETE, {"ids": ids})
+
+    payload = get_graphql_content(response)["data"]["wsmFeeBulkDelete"]
+    assert [(e["field"], e["code"]) for e in payload["errors"]] == [
+        ("ids", "BULK_LIMIT")
+    ]
+    assert payload["count"] == 0
+    assert Fee.objects.filter(pk=fee.pk).exists()

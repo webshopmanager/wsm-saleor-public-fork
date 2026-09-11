@@ -26,6 +26,7 @@ from django.test.utils import CaptureQueriesContext
 from .....graphql.tests.utils import assert_no_permission, get_graphql_content
 from .....product.models import ProductVariant, ProductVariantChannelListing
 from ....dealer.models import DealerGroup, TierPrice
+from ...utils import BULK_LIMIT
 
 pytestmark = pytest.mark.django_db
 
@@ -1353,3 +1354,24 @@ def test_the_bulk_update_response_costs_the_same_at_three_hundred_rows_as_at_twe
     large = cost(300, 9200)
 
     assert large == small, f"20 rows cost {small} queries, 300 cost {large}"
+
+
+def test_bulk_delete_refuses_more_ids_than_the_cap(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    """Bounded before a single id is decoded, and nothing is deleted."""
+    row = TierPrice.objects.create(
+        variant=variant, group=dealer_group, min_quantity=1, amount="90.00"
+    )
+    ids = [tier_gid(row)] * (BULK_LIMIT + 1)
+
+    response = staff_api_client.post_graphql(
+        BULK_DELETE, {"ids": ids}, permissions=[permission_manage_discounts]
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmTierPriceBulkDelete"]
+    assert [(e["field"], e["code"]) for e in payload["errors"]] == [
+        ("ids", "BULK_LIMIT")
+    ]
+    assert payload["count"] == 0
+    assert TierPrice.objects.filter(pk=row.pk).exists()

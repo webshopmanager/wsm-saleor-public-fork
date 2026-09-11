@@ -27,9 +27,9 @@ from ....graphql.core.utils import from_global_id_or_error
 from ....graphql.product.types import Product
 from ....permission.enums import ProductPermissions
 from ...compose import models
+from ..dealer.mutations import DEALER_PERMISSIONS
 from ..errors import WsmError
 from ..scalars import WsmDecimal
-from ..dealer.mutations import DEALER_PERMISSIONS
 from ..types import DOC_CATEGORY_WSM
 from ..utils import TypedIdMixin
 from .enums import WsmFeeBasisEnum, WsmFeeScopeEnum, WsmOptionSetPromptTypeEnum

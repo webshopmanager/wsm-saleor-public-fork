@@ -24,7 +24,7 @@ from django.db import IntegrityError, connection, transaction
 from django.test.utils import CaptureQueriesContext
 
 from .....graphql.tests.utils import assert_no_permission, get_graphql_content
-from .....product.models import ProductVariant
+from .....product.models import ProductVariant, ProductVariantChannelListing
 from ....dealer.models import DealerGroup, TierPrice
 
 pytestmark = pytest.mark.django_db
@@ -75,6 +75,16 @@ BULK_CREATE = """
       wsmTierPriceBulkCreate(tierPrices: $tierPrices) {
         count
         tierPrices { id minQuantity amount }
+        errors { field code message }
+      }
+    }
+"""
+
+BULK_CREATE_GRID = """
+    mutation BulkCreate($tierPrices: [WsmTierPriceBulkCreateInput!]!) {
+      wsmTierPriceBulkCreate(tierPrices: $tierPrices) {
+        count
+        tierPrices { id amount currencyCode variant { sku product { name } } }
         errors { field code message }
       }
     }
@@ -629,3 +639,236 @@ def test_the_tier_list_carries_the_currency_the_money_column_is_labelled_with(
     content = get_graphql_content(response)
     node = content["data"]["wsmTierPrices"]["edges"][0]["node"]
     assert node["currencyCode"] == "USD"
+
+
+def paste_variants(product, channel, count, offset):
+    """`count` SKUs, each listed in one channel, because the grid labels money."""
+    variants = ProductVariant.objects.bulk_create(
+        [
+            ProductVariant(product=product, sku=f"grid-{index}", name=str(index))
+            for index in range(offset, offset + count)
+        ]
+    )
+    ProductVariantChannelListing.objects.bulk_create(
+        [
+            ProductVariantChannelListing(
+                variant=variant,
+                channel=channel,
+                currency=channel.currency_code,
+                price_amount=Decimal("199.99"),
+            )
+            for variant in variants
+        ]
+    )
+    return variants
+
+
+def paste_cost(client, capture_queries, group, variants):
+    rows = [
+        {
+            "variant": variant_gid(variant),
+            "group": group_gid(group),
+            "minQuantity": 1,
+            "amount": "199.99",
+        }
+        for variant in variants
+    ]
+    with capture_queries() as captured:
+        response = client.post_graphql(BULK_CREATE_GRID, {"tierPrices": rows})
+    payload = get_graphql_content(response)["data"]["wsmTierPriceBulkCreate"]
+    assert payload["errors"] == []
+    assert payload["count"] == len(variants)
+    return len(captured.captured_queries)
+
+
+def test_a_price_leaves_as_an_exact_string_and_not_as_a_float(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    """`PositiveDecimal` is a `graphene.Float` with no `serialize` override.
+
+    So the money this domain returns went out through IEEE double: 2.50 became
+    2.5, and a screen that posts back what it was handed is one rounding step
+    away from charging a different price than the merchant typed.
+    """
+    response = create(
+        staff_api_client,
+        permission_manage_discounts,
+        variant,
+        dealer_group,
+        amount="2.50",
+    )
+
+    content = get_graphql_content(response)
+    payload = content["data"]["wsmTierPriceCreate"]
+    assert payload["errors"] == []
+    assert payload["tierPrice"]["amount"] == "2.50"
+
+    row = TierPrice.objects.get()
+    # No `permissions=`: the create above already granted it, and that argument
+    # asserts the call is refused without it first.
+    content = get_graphql_content(
+        staff_api_client.post_graphql(DETAIL, {"id": tier_gid(row)})
+    )
+    # Read back off the column, which holds three places to match
+    # CheckoutLine.price_override. Still a string, still exact.
+    assert content["data"]["wsmTierPrice"]["amount"] == "2.500"
+
+
+def test_a_negative_price_is_refused_as_a_price_and_not_as_a_missing_one(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    """-1 is a price the merchant typed, not a price they forgot to type.
+
+    `PositiveDecimal.parse_value` maps anything below zero to None
+    (`saleor/graphql/core/scalars.py:56-62`), so the amount rule never saw the
+    number and answered REQUIRED: "say what this group pays", about a field the
+    merchant had just filled in.
+    """
+    response = create(
+        staff_api_client,
+        permission_manage_discounts,
+        variant,
+        dealer_group,
+        amount=-1,
+    )
+
+    content = get_graphql_content(response)
+    payload = content["data"]["wsmTierPriceCreate"]
+    assert payload["errors"] == [
+        {
+            "field": "amount",
+            "code": "TIER_AMOUNT_BELOW_ONE_CENT",
+            "message": "a dealer price is a price, so it is at least one cent",
+        }
+    ]
+    assert not TierPrice.objects.exists()
+
+
+def test_the_paste_response_costs_the_same_at_three_hundred_rows_as_at_twenty(
+    staff_api_client,
+    permission_manage_discounts,
+    product,
+    channel_USD,
+    dealer_group,
+    capture_queries,
+):
+    """The rows this mutation returns are the rows the Dashboard renders.
+
+    It selects `variant.product.name` and `currencyCode` on each one, and
+    `bulk_create` hands back bare instances, so the RESPONSE was a query per
+    line of the paste even though validating it was not. The only assertion
+    that catches that is the shape of the cost curve.
+    """
+    staff_api_client.user.user_permissions.add(permission_manage_discounts)
+    # Discarded: the first request of a test warms per-process caches (site
+    # settings, the permission lookup) that have nothing to do with row count.
+    paste_cost(
+        staff_api_client,
+        capture_queries,
+        dealer_group,
+        paste_variants(product, channel_USD, 1, 0),
+    )
+
+    small = paste_cost(
+        staff_api_client,
+        capture_queries,
+        dealer_group,
+        paste_variants(product, channel_USD, 20, 100),
+    )
+    large = paste_cost(
+        staff_api_client,
+        capture_queries,
+        dealer_group,
+        paste_variants(product, channel_USD, 300, 1000),
+    )
+
+    assert large == small, f"20 rows cost {small} queries, 300 cost {large}"
+
+
+def test_the_currency_is_the_cheapest_listing_and_null_when_there_is_none(
+    staff_api_client,
+    permission_manage_discounts,
+    product,
+    channel_USD,
+    channel_PLN,
+    dealer_group,
+):
+    """One money box, one label, and no label at all when there is no price.
+
+    The resolver took whichever listing came back first, so the column heading
+    on a two-channel SKU depended on row order, and a SKU in no channel got an
+    arbitrary Channel's currency: a box labelled in a currency that SKU is not
+    sold in, which is worse than an empty label.
+    """
+    listed = ProductVariant.objects.create(product=product, sku="two-channels")
+    ProductVariantChannelListing.objects.create(
+        variant=listed,
+        channel=channel_USD,
+        currency="USD",
+        price_amount=Decimal("100.00"),
+    )
+    ProductVariantChannelListing.objects.create(
+        variant=listed,
+        channel=channel_PLN,
+        currency="PLN",
+        price_amount=Decimal("5.00"),
+    )
+    unlisted = ProductVariant.objects.create(product=product, sku="no-channel")
+    rows = TierPrice.objects.bulk_create(
+        [
+            TierPrice(variant=listed, group=dealer_group, min_quantity=1, amount="90"),
+            TierPrice(
+                variant=unlisted, group=dealer_group, min_quantity=1, amount="90"
+            ),
+        ]
+    )
+    staff_api_client.user.user_permissions.add(permission_manage_discounts)
+
+    cheapest = get_graphql_content(
+        staff_api_client.post_graphql(DETAIL, {"id": tier_gid(rows[0])})
+    )
+    assert cheapest["data"]["wsmTierPrice"]["currencyCode"] == "PLN"
+
+    nowhere = get_graphql_content(
+        staff_api_client.post_graphql(DETAIL, {"id": tier_gid(rows[1])})
+    )
+    assert nowhere["data"]["wsmTierPrice"]["currencyCode"] is None
+
+
+def test_a_paste_above_the_cap_is_refused_before_a_row_is_written(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    """An uncapped bulk create is a merchant paste away from a held-open request.
+
+    Stock caps its own bulk create the same way
+    (`MAX_ORDERS`, `saleor/graphql/order/bulk_mutations/order_bulk_create.py:86`),
+    and the refusal carries stock's code for it so the screen can say which
+    limit was hit rather than "invalid".
+    """
+    rows = [
+        {
+            "variant": variant_gid(variant),
+            "group": group_gid(dealer_group),
+            "minQuantity": quantity,
+            "amount": "10.00",
+        }
+        for quantity in range(1, 502)
+    ]
+
+    response = staff_api_client.post_graphql(
+        BULK_CREATE_COUNT_ONLY,
+        {"tierPrices": rows},
+        permissions=[permission_manage_discounts],
+    )
+
+    content = get_graphql_content(response)
+    payload = content["data"]["wsmTierPriceBulkCreate"]
+    assert payload["count"] == 0
+    assert payload["errors"] == [
+        {
+            "field": "tierPrices",
+            "code": "BULK_LIMIT",
+            "message": "501 rows in one call, and the limit is 500. Split the paste.",
+        }
+    ]
+    assert not TierPrice.objects.exists()

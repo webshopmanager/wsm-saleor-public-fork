@@ -16,11 +16,11 @@ import graphene
 
 from ....graphql.core.connection import CountableConnection
 from ....graphql.core.context import ChannelContext
-from ....graphql.core.scalars import PositiveDecimal
 from ....graphql.core.types import ModelObjectType, NonNullList
 from ....graphql.product.types.collections import Collection
 from ....graphql.product.types.products import ProductVariant
 from ...containers import models, pricing
+from ..scalars import WsmDecimal
 from ..types import DOC_CATEGORY_WSM
 
 # Built from the models' own vocabulary rather than re-spelled: the wire name is
@@ -180,7 +180,7 @@ class WsmKitConfig(ModelObjectType[models.KitConfig]):
         required=True,
         description="Whether the saving is money off the kit or a share of it.",
     )
-    discount_amount = PositiveDecimal(
+    discount_amount = WsmDecimal(
         required=True,
         description="The saving off the members' own prices added up.",
     )

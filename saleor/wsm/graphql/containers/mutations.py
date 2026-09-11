@@ -26,11 +26,11 @@ from django.db import transaction
 
 from ....attribute import AttributeType
 from ....graphql.core.mutations import DeprecatedModelMutation, ModelDeleteMutation
-from ....graphql.core.scalars import PositiveDecimal
 from ....graphql.core.types import BaseInputObjectType, NonNullList
 from ....permission.enums import ProductPermissions
 from ...containers import models
 from ..errors import WsmError
+from ..scalars import WsmDecimal
 from ..types import DOC_CATEGORY_WSM
 from ..utils import error as _error
 from ..utils import pk_or_none as _pk_or_none
@@ -257,7 +257,7 @@ class WsmKitConfigCreateInput(BaseInputObjectType):
     discount_kind = WsmKitDiscountKind(
         description="Money off the kit, or a share of what its members add up to."
     )
-    discount_amount = PositiveDecimal(description="The saving off the members' prices.")
+    discount_amount = WsmDecimal(description="The saving off the members' prices.")
     freight_class = graphene.String(description="Freight class for the whole kit.")
     active = graphene.Boolean(description="Off takes the kit price away.")
     members = NonNullList(WsmKitMemberInput, description="The parts, and how many.")
@@ -271,7 +271,7 @@ class WsmKitConfigUpdateInput(BaseInputObjectType):
     discount_kind = WsmKitDiscountKind(
         description="Money off the kit, or a share of what its members add up to."
     )
-    discount_amount = PositiveDecimal(description="The saving off the members' prices.")
+    discount_amount = WsmDecimal(description="The saving off the members' prices.")
     freight_class = graphene.String(description="Freight class for the whole kit.")
     active = graphene.Boolean(description="Off takes the kit price away.")
     members = NonNullList(

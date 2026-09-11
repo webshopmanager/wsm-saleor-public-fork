@@ -22,13 +22,13 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from ....graphql.core.mutations import DeprecatedModelMutation, ModelDeleteMutation
-from ....graphql.core.scalars import Decimal, PositiveDecimal
 from ....graphql.core.types import BaseInputObjectType, NonNullList
 from ....graphql.core.utils import from_global_id_or_error
 from ....graphql.product.types import Product
 from ....permission.enums import ProductPermissions
 from ...compose import models
 from ..errors import WsmError
+from ..scalars import WsmDecimal
 from ..types import DOC_CATEGORY_WSM
 from ..utils import TypedIdMixin
 from .enums import WsmFeeBasisEnum, WsmFeeScopeEnum, WsmOptionSetPromptTypeEnum
@@ -235,7 +235,7 @@ class WsmDealerTierOptionPriceInput(BaseInputObjectType):
     tier_group = graphene.String(
         required=True, description="A DealerGroup code, not a global ID."
     )
-    price_delta = Decimal(
+    price_delta = WsmDecimal(
         required=True, description="Signed. Never above the retail delta."
     )
 
@@ -247,7 +247,7 @@ class WsmOptionValueInput(BaseInputObjectType):
     id = graphene.ID(description="Omit to create. Supply to edit the row in place.")
     name = graphene.String(required=True, description="What the shopper sees.")
     sku_fragment = graphene.String(description="Appended to the product SKU.")
-    price_delta = Decimal(description="Signed: a credit subtracts.")
+    price_delta = WsmDecimal(description="Signed: a credit subtracts.")
     image_url = graphene.String(description="Swatch or thumbnail URL.")
     sort_order = graphene.Int(description="Low numbers first.")
     tier_deltas = NonNullList(
@@ -383,9 +383,7 @@ class WsmFeeCreateInput(BaseInputObjectType):
     label = graphene.String(required=True, description="What the shopper sees.")
     sku = graphene.String(description="The merchant's own code for the charge.")
     basis = WsmFeeBasisEnum(description="Flat amount or percentage.")
-    amount = PositiveDecimal(
-        required=True, description="A flat charge, or the percentage."
-    )
+    amount = WsmDecimal(required=True, description="A flat charge, or the percentage.")
     apply_to = WsmFeeScopeEnum(description="Per item, or once per line.")
     required = graphene.Boolean(description="Always charged.")
     decline_label = graphene.String(description="Wording of the decline option.")
@@ -398,7 +396,7 @@ class WsmFeeUpdateInput(BaseInputObjectType):
     label = graphene.String(description="What the shopper sees.")
     sku = graphene.String(description="The merchant's own code for the charge.")
     basis = WsmFeeBasisEnum(description="Flat amount or percentage.")
-    amount = PositiveDecimal(description="A flat charge, or the percentage.")
+    amount = WsmDecimal(description="A flat charge, or the percentage.")
     apply_to = WsmFeeScopeEnum(description="Per item, or once per line.")
     required = graphene.Boolean(description="Always charged.")
     decline_label = graphene.String(description="Wording of the decline option.")

@@ -134,13 +134,13 @@ def test_the_detail_query_returns_the_question_its_answers_and_the_tier_deltas(
     assert [value["name"] for value in data["values"]] == ["Black", "Raw"]
     # SIGNED: a credit is a negative delta, which is why the scalar is Decimal
     # and not PositiveDecimal.
-    assert data["values"][1]["priceDelta"] == -1.0
+    assert data["values"][1]["priceDelta"] == "-1.00", "signed, and exact"
     deltas = data["values"][0]["tierDeltas"]
     assert deltas == [
         {
             "id": graphene.Node.to_global_id("WsmDealerTierOptionPrice", tier_delta.pk),
             "tierGroup": "dealer-1",
-            "priceDelta": 5.0,
+            "priceDelta": "5.00",
             "dealerGroup": {"code": "dealer-1", "name": "Dealer tier 1"},
         }
     ]

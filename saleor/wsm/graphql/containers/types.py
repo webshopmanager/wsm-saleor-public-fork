@@ -68,14 +68,43 @@ WsmContainerRefusalCode = graphene.Enum(
 WsmContainerRefusalCode.doc_category = DOC_CATEGORY_WSM
 
 
-def _collection(collection):
+def _collection(collection, channel_slug=None):
     """The stock Collection type, as the stock type expects to be handed one.
 
     `Collection` is a `ChannelContextType`, so its default resolver reads
-    `root.node`: a bare model instance renders every field as null. No channel,
-    because a merchant screen is not shopping in one.
+    `root.node`: a bare model instance renders every field as null. No channel
+    is the merchant screen, which is not shopping in one.
     """
-    return ChannelContext(node=collection, channel_slug=None)
+    return ChannelContext(node=collection, channel_slug=channel_slug or None)
+
+
+# The channel a shopper is asking in, carried from the root field down to the
+# leaf that needs it.
+#
+# Stock's answer to this is `ChannelContext`, and the leaf here IS stock's
+# `ProductVariant`, which returns null pricing without one
+# (`graphql/product/types/products.py:700`). What stock does in between is wrap
+# every intermediate node, which costs an unwrapping resolver on every field of
+# every type on the way down. These types are ours, their nodes are per-request
+# rows, and only the four resolvers that hand a child onward have to know, so
+# the slug rides on the row instead. Blank is the state this schema shipped in:
+# no price rather than a price from a channel nobody named.
+_CHANNEL_ATTR = "_wsm_channel_slug"
+
+
+def in_channel(node, channel_slug):
+    """Stamp a row on its way down. Returns it, so it reads inline."""
+    if node is not None:
+        setattr(node, _CHANNEL_ATTR, channel_slug or "")
+    return node
+
+
+def in_channel_all(nodes, channel_slug):
+    return [in_channel(node, channel_slug) for node in nodes]
+
+
+def channel_of(node):
+    return getattr(node, _CHANNEL_ATTR, "") or None
 
 
 class WsmSeriesConfig(ModelObjectType[models.SeriesConfig]):
@@ -211,11 +240,11 @@ class WsmContainerSlot(ModelObjectType[models.ContainerSlot]):
     def resolve_source_collection(root: models.ContainerSlot, _info):
         if root.source_collection_id is None:
             return None
-        return _collection(root.source_collection)
+        return _collection(root.source_collection, channel_of(root))
 
     @staticmethod
     def resolve_candidates(root: models.ContainerSlot, _info):
-        return root.candidates.all()
+        return in_channel_all(root.candidates.all(), channel_of(root))
 
 
 class WsmKitMember(ModelObjectType[models.KitMember]):
@@ -246,7 +275,7 @@ class WsmKitMember(ModelObjectType[models.KitMember]):
 
     @staticmethod
     def resolve_variant(root: models.KitMember, _info):
-        return ChannelContext(node=root.variant, channel_slug=None)
+        return ChannelContext(node=root.variant, channel_slug=channel_of(root))
 
 
 class WsmKitMemberRule(ModelObjectType[models.KitMemberRule]):
@@ -280,7 +309,7 @@ class WsmKitMemberRule(ModelObjectType[models.KitMemberRule]):
 
     @staticmethod
     def resolve_targets(root: models.KitMemberRule, _info):
-        return root.targets.all()
+        return in_channel_all(root.targets.all(), channel_of(root))
 
 
 class WsmKitConfig(ModelObjectType[models.KitConfig]):
@@ -351,15 +380,15 @@ class WsmKitConfig(ModelObjectType[models.KitConfig]):
 
     @staticmethod
     def resolve_collection(root: models.KitConfig, _info):
-        return _collection(root.collection)
+        return _collection(root.collection, channel_of(root))
 
     @staticmethod
     def resolve_members(root: models.KitConfig, _info):
-        return root.members.all()
+        return in_channel_all(root.members.all(), channel_of(root))
 
     @staticmethod
     def resolve_rules(root: models.KitConfig, _info):
-        return root.rules.all()
+        return in_channel_all(root.rules.all(), channel_of(root))
 
     @staticmethod
     def resolve_slots(root: models.KitConfig, _info):
@@ -368,7 +397,7 @@ class WsmKitConfig(ModelObjectType[models.KitConfig]):
         # for the fields they do select. ponytail: the ceiling is a list screen
         # that starts showing slot counts; the upgrade is one dataloader keyed
         # by kit id, next to the two already in `dataloaders.py`.
-        return root.slots.all()
+        return in_channel_all(root.slots.all(), channel_of(root))
 
     @staticmethod
     def resolve_currency_code(root: models.KitConfig, info):
@@ -444,7 +473,11 @@ class WsmResolvedCandidate(BaseObjectType):
 
     @staticmethod
     def resolve_variant(root, _info):
-        return ChannelContext(node=root.variant, channel_slug=None)
+        return ChannelContext(node=root.variant, channel_slug=root.channel_slug or None)
+
+    @staticmethod
+    def resolve_member(root, _info):
+        return in_channel(root.member, root.channel_slug)
 
     @staticmethod
     def resolve_product_id(root, _info):
@@ -507,3 +540,7 @@ class WsmContainerResolution(BaseObjectType):
         description = (
             "A container resolved for a vehicle: the assortment, or a refusal."
         )
+
+    @staticmethod
+    def resolve_kit(root: resolve.Resolution, _info):
+        return in_channel(root.kit, root.channel_slug)

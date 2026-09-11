@@ -480,3 +480,115 @@ def test_resolving_needs_manage_products(staff_api_client, belt_saver):
     )
 
     assert_no_permission(response)
+
+
+# --- the channel a shopper is asking in ---------------------------------------
+
+PRICED_RESOLVE = """
+    query Resolve($collection: ID!, $fitmentPairs: String, $channel: String) {
+      wsmContainerResolve(
+        collection: $collection, fitmentPairs: $fitmentPairs, channel: $channel
+      ) {
+        slots {
+          candidates {
+            variant { sku pricing { price { gross { amount currency } } } }
+          }
+          selected { variant { pricing { price { gross { amount } } } } }
+        }
+        kit { members { variant { pricing { price { gross { amount } } } } } }
+      }
+    }
+"""
+
+PRICED_SLOTS = """
+    query Slots($collection: ID!, $channel: String) {
+      wsmKitConfig(collection: $collection, channel: $channel) {
+        slots {
+          candidates {
+            variant { pricing { price { gross { amount } } } }
+          }
+        }
+      }
+    }
+"""
+
+
+def test_a_resolved_candidate_is_priced_in_the_channel_it_was_asked_in(
+    staff, belt_saver, stage_engine, channel_USD
+):
+    """A candidate with no price cannot be bought, which is the whole page.
+
+    Stock's `ProductVariant.pricing` returns null without a channel on its
+    `ChannelContext` (`graphql/product/types/products.py:700`), so a resolution
+    that names no channel hands a storefront an assortment it cannot put a
+    number against. The channel travels from this field's own argument, exactly
+    as it does on stock's `product(channel:)`.
+    """
+    response = staff.post_graphql(
+        PRICED_RESOLVE,
+        {
+            "collection": collection_id(belt_saver.collection),
+            "fitmentPairs": RZR_900,
+            "channel": channel_USD.slug,
+        },
+    )
+
+    resolution = get_graphql_content(response)["data"]["wsmContainerResolve"]
+    [slot] = resolution["slots"]
+    assert [
+        candidate["variant"]["pricing"]["price"]["gross"]["amount"]
+        for candidate in slot["candidates"]
+    ] == [10.0, 30.0]
+    assert {
+        candidate["variant"]["pricing"]["price"]["gross"]["currency"]
+        for candidate in slot["candidates"]
+    } == {"USD"}
+    # The picks are what goes in the cart, and the members are what the kit is
+    # made of: both reach the same leaf, so both are priced or neither is.
+    assert all(candidate["variant"]["pricing"] for candidate in slot["selected"])
+    assert all(member["variant"]["pricing"] for member in resolution["kit"]["members"])
+
+
+def test_a_slot_candidate_is_priced_in_the_channel_the_kit_was_read_in(
+    staff, belt_saver, channel_USD
+):
+    """The storefront reads its cards through `wsmKitConfig`, not the resolve.
+
+    Same defect, same fix, one hop shorter: the slug travels kit -> slot ->
+    candidate -> variant rather than resolution -> candidate -> variant.
+    """
+    response = staff.post_graphql(
+        PRICED_SLOTS,
+        {
+            "collection": collection_id(belt_saver.collection),
+            "channel": channel_USD.slug,
+        },
+    )
+
+    [slot] = get_graphql_content(response)["data"]["wsmKitConfig"]["slots"]
+    assert [
+        candidate["variant"]["pricing"]["price"]["gross"]["amount"]
+        for candidate in slot["candidates"]
+    ] == [10.0, 20.0, 30.0]
+
+
+def test_naming_no_channel_prices_nothing_and_refuses_nothing(
+    staff, belt_saver, stage_engine
+):
+    """Omitted is the merchant preview this field shipped as, unchanged.
+
+    A Dashboard screen is not shopping in a channel, so no channel is not an
+    error: the assortment still answers and the money is simply absent, which is
+    fail-SAFE. A storefront that forgets the argument shows no price rather than
+    the wrong one.
+    """
+    response = staff.post_graphql(
+        PRICED_RESOLVE,
+        {"collection": collection_id(belt_saver.collection), "fitmentPairs": RZR_900},
+    )
+
+    [slot] = get_graphql_content(response)["data"]["wsmContainerResolve"]["slots"]
+    assert len(slot["candidates"]) == 2
+    assert all(
+        candidate["variant"]["pricing"] is None for candidate in slot["candidates"]
+    )

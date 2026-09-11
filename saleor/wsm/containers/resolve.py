@@ -48,7 +48,7 @@ through returned 46,380 products on the stage instead of five.
 import base64
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import requests
 from django.conf import settings
@@ -123,6 +123,11 @@ class Candidate:
     # slot's `source_collection`, which is how a kit holds a series without
     # copying its members and going stale the next time the series grows.
     member: object | None = None
+    # The channel this candidate was resolved in, carried to the leaf that
+    # needs it: stock's `ProductVariant.pricing` answers null without one, and
+    # a candidate with no price is a candidate nobody can buy. Blank is the
+    # merchant preview, and blank prices nothing rather than pricing wrongly.
+    channel_slug: str = ""
 
     @property
     def variant_id(self) -> int:
@@ -170,6 +175,9 @@ class Resolution:
     slots: list = field(default_factory=list)
     refusal: object | None = None
     engine_calls: int = 0
+    # See `Candidate.channel_slug`. Held here as well because the kit's own
+    # members hang off the resolution and reach the same priced leaf.
+    channel_slug: str = ""
 
     @property
     def refused(self) -> bool:
@@ -336,7 +344,7 @@ def _derived_candidates(source_pks, database):
     return by_collection
 
 
-def _slot_candidates(slot, derived):
+def _slot_candidates(slot, derived, channel_slug=""):
     """What could fill this slot, and how many were unbuyable. Its own rows win.
 
     A slot that both lists candidates and names a source collection is a
@@ -356,6 +364,7 @@ def _slot_candidates(slot, derived):
                 sort_order=member.sort_order,
                 fitment=UNFILTERED,
                 member=member,
+                channel_slug=channel_slug,
             )
             for member in rows
         ], 0
@@ -376,6 +385,7 @@ def _slot_candidates(slot, derived):
                 sort_order=order,
                 fitment=UNFILTERED,
                 member=None,
+                channel_slug=channel_slug,
             )
         )
     return candidates, unbuyable
@@ -392,7 +402,7 @@ def _fitment_of(product_id, known, fitting) -> str:
     return UNIVERSAL if known[product_id].get("fitment_unknown") else ""
 
 
-def resolve(collection, fitment_pairs="", database=None) -> Resolution:
+def resolve(collection, fitment_pairs="", database=None, channel="") -> Resolution:
     """The container on this collection, resolved for this vehicle.
 
     `fitment_pairs` is the storefront's own vehicle string, `1:18,2:2008,3:2784`,
@@ -403,8 +413,14 @@ def resolve(collection, fitment_pairs="", database=None) -> Resolution:
     `database` is the connection every read here names. A GraphQL caller passes
     the replica it was routed to; the REST kit path and a management command
     pass nothing and get the writer, which is what they already use.
+
+    `channel` is the channel slug the shopper is asking in. It selects nothing
+    and filters nothing here: it rides along so the GraphQL leaf can hand stock
+    its own `ChannelContext` and stock can price the variant. Blank is the
+    merchant preview and prices nothing, which is the fail-SAFE side.
     """
     database = database or settings.DATABASE_CONNECTION_DEFAULT_NAME
+    channel = channel or ""
     try:
         collection_pk = _numeric_pk(getattr(collection, "pk", collection))
     except ValueError as problem:
@@ -412,6 +428,7 @@ def resolve(collection, fitment_pairs="", database=None) -> Resolution:
             kit=None,
             vehicle=fitment_pairs or "",
             refusal=Refusal(REFUSAL_BAD_COLLECTION_ID, str(problem)),
+            channel_slug=channel,
         )
 
     kit = _load_container(collection_pk, database)
@@ -422,6 +439,7 @@ def resolve(collection, fitment_pairs="", database=None) -> Resolution:
             refusal=Refusal(
                 REFUSAL_NOT_A_CONTAINER, "this collection is not sold as a container"
             ),
+            channel_slug=channel,
         )
 
     slots = list(kit.slots.all())
@@ -439,10 +457,11 @@ def resolve(collection, fitment_pairs="", database=None) -> Resolution:
             kit=kit,
             vehicle=fitment_pairs or "",
             refusal=Refusal(REFUSAL_BAD_COLLECTION_ID, bad_source),
+            channel_slug=channel,
         )
 
     derived = _derived_candidates(source_pks, database)
-    per_slot = [(slot, *_slot_candidates(slot, derived)) for slot in slots]
+    per_slot = [(slot, *_slot_candidates(slot, derived, channel)) for slot in slots]
 
     engine_calls = 0
     known: dict = {}
@@ -473,6 +492,7 @@ def resolve(collection, fitment_pairs="", database=None) -> Resolution:
                     kit.miss_message or DEFAULT_MISS_MESSAGE,
                 ),
                 engine_calls=engine_calls,
+                channel_slug=channel,
             )
 
     resolved_slots = []
@@ -489,16 +509,11 @@ def resolve(collection, fitment_pairs="", database=None) -> Resolution:
             if not verdict:
                 excluded += 1
                 continue
-            survivors.append(
-                Candidate(
-                    variant=candidate.variant,
-                    product_id=candidate.product_id,
-                    quantity=candidate.quantity,
-                    sort_order=candidate.sort_order,
-                    fitment=verdict,
-                    member=candidate.member,
-                )
-            )
+            # `replace` rather than a re-listing of every field: a candidate
+            # that survives is the same candidate with the engine's verdict on
+            # it, and a field added to `Candidate` must not have to be
+            # remembered in a second place to survive the vehicle.
+            survivors.append(replace(candidate, fitment=verdict))
         if slot.required and not survivors:
             return Resolution(
                 kit=kit,
@@ -509,6 +524,7 @@ def resolve(collection, fitment_pairs="", database=None) -> Resolution:
                     slot_label=slot.label,
                 ),
                 engine_calls=engine_calls,
+                channel_slug=channel,
             )
         resolved_slots.append(
             ResolvedSlot(slot=slot, candidates=survivors, excluded=excluded)
@@ -519,4 +535,5 @@ def resolve(collection, fitment_pairs="", database=None) -> Resolution:
         vehicle=fitment_pairs or "",
         slots=resolved_slots,
         engine_calls=engine_calls,
+        channel_slug=channel,
     )

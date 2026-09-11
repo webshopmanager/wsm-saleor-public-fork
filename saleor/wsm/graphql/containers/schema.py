@@ -30,9 +30,21 @@ from .types import (
     WsmKitConfigCountableConnection,
     WsmSeriesConfig,
     WsmSeriesConfigCountableConnection,
+    in_channel,
 )
 
 CONTAINER_PERMISSIONS = [ProductPermissions.MANAGE_PRODUCTS]
+
+
+# What a channel argument means on a container field, said once. Stock spells
+# it `channel` on `product`, `collection` and `productVariant` and means the
+# same thing there: the channel whose listings the money comes from.
+CHANNEL_ARGUMENT = (
+    "The channel a shopper is asking in. The candidates' own prices come from "
+    "its listings, exactly as on `product(channel:)`. Omitted is the merchant "
+    "preview: the container still answers and the money is simply absent, "
+    "which is the fail-SAFE side of getting it wrong."
+)
 
 
 def _by_id_or_collection(info: ResolveInfo, manager, type_name, id, collection):
@@ -83,6 +95,7 @@ class WsmContainersQueries(graphene.ObjectType):
         collection=graphene.Argument(
             graphene.ID, description="ID of the collection sold as a kit."
         ),
+        channel=graphene.Argument(graphene.String, description=CHANNEL_ARGUMENT),
         description="Look up a kit by row ID, or by collection.",
         permissions=CONTAINER_PERMISSIONS,
         doc_category=DOC_CATEGORY_WSM,
@@ -108,6 +121,7 @@ class WsmContainersQueries(graphene.ObjectType):
                 "engine call, which is the price-range state."
             ),
         ),
+        channel=graphene.Argument(graphene.String, description=CHANNEL_ARGUMENT),
         description=(
             "Resolve a container for a vehicle: which candidates fit each slot, "
             "or the merchant's refusal. Two engine round trips with a vehicle, "
@@ -139,10 +153,18 @@ class WsmContainersQueries(graphene.ObjectType):
 
     @staticmethod
     def resolve_wsm_kit_config(
-        _root, info: ResolveInfo, /, *, id=None, collection=None
+        _root, info: ResolveInfo, /, *, id=None, collection=None, channel=None
     ):
-        return _by_id_or_collection(
-            info, models.KitConfig.objects, "WsmKitConfig", id, collection
+        # ponytail: the channel is on the SINGULAR lookup only. The list field
+        # beside it is the Dashboard's kit index, which selects no variant and
+        # therefore no money; giving it one means stamping every node of a
+        # connection slice. Ceiling: a list screen that starts showing prices.
+        # Upgrade: stamp in `resolve_wsm_kit_configs` after the slice is built.
+        return in_channel(
+            _by_id_or_collection(
+                info, models.KitConfig.objects, "WsmKitConfig", id, collection
+            ),
+            channel,
         )
 
     @staticmethod
@@ -159,7 +181,7 @@ class WsmContainersQueries(graphene.ObjectType):
 
     @staticmethod
     def resolve_wsm_container_resolve(
-        _root, info: ResolveInfo, /, *, collection, fitment_pairs=None
+        _root, info: ResolveInfo, /, *, collection, fitment_pairs=None, channel=None
     ):
         """Staff-only, on purpose.
 
@@ -176,6 +198,7 @@ class WsmContainersQueries(graphene.ObjectType):
             int(pk),
             fitment_pairs or "",
             database=get_database_connection_name(info.context),
+            channel=channel or "",
         )
 
 

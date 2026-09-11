@@ -29,6 +29,12 @@ This fork has been bitten by exactly that class once already (the
 catalogue-promotion double-take fixed at 08b221ec). A digest per patch turns it
 into a startup error.
 
+`METHODS` is the fifth ledger, for MP6 (`saleor/wsm/dealer/gate_enforce.py`),
+which wraps a RESOLVER on a core graphene type rather than a module-level
+function. `binding_sites` sweeps module attributes and a method is an attribute
+of a class, so `PINNED` could not hold it and `installed()` could not see it;
+`methods_installed()` discovers it the same way, off the class.
+
 `EXTENDED` is the fourth ledger, for the fourth thing. MP4
 (`saleor/wsm/graphql/compose/product_extension.py`) does not wrap a function: it
 APPENDS fields to stock's `Product` graphene type, which `installed()` cannot
@@ -98,7 +104,38 @@ PINNED = {
     "saleor.checkout.calculations._fetch_checkout_prices_if_expired": (
         "saleor.checkout.calculations",
     ),
+    # MP7, saleor/wsm/dealer/gate_enforce.py: a gated product is never written
+    # into a cart by someone who may not buy it. The one function every cart
+    # write goes through, stock mutations and the fork's own REST endpoints
+    # alike, which is why there is no per-mutation copy of that rule.
+    "saleor.checkout.utils.add_variants_to_checkout": (
+        "saleor.checkout.utils",
+        "saleor.graphql.checkout.mutations.checkout_create",
+        "saleor.graphql.checkout.mutations.checkout_create_from_order",
+        "saleor.graphql.checkout.mutations.checkout_lines_add",
+    ),
 }
+
+# MP6, saleor/wsm/dealer/gate_enforce.py: the two public price surfaces answer
+# a gated product with the null they are already declared to allow. A METHOD on
+# a core graphene type, not a module-level function, so `PINNED` cannot hold it:
+# `binding_sites` sweeps module attributes and a method is an attribute of a
+# CLASS, bound in exactly one place by construction. The ledger is therefore the
+# name alone, and `methods_installed()` discovers the real set the same way
+# every other ledger here does.
+#
+# No `SOURCE` digest, deliberately. MP1 to MP3 pin their originals because their
+# wrappers were written around what those bodies DO. This one returns before the
+# original runs or delegates to it whole, so the only thing it assumes is that
+# the field is nullable, and `gate_enforce._assert_pricing_is_nullable` asserts
+# that at boot. A hash here would redden on upstream lines this wrapper cannot
+# be affected by.
+METHODS = frozenset(
+    {
+        "saleor.graphql.product.types.products.Product.resolve_pricing",
+        "saleor.graphql.product.types.products.ProductVariant.resolve_pricing",
+    }
+)
 
 # MP4, saleor/wsm/graphql/compose/product_extension.py: the product page hosts
 # a Compose tab, so stock's `Product` type carries three more fields. Additive,
@@ -106,12 +143,23 @@ PINNED = {
 # edit and what it costs); ledgered here because it changes a class defined in
 # `saleor/graphql/product/types/products.py` from outside that file.
 # Value: the field names, as `Product._meta.fields` keys.
+#
+# `wsm_gate` and `wsm_gated` are the gated catalogue's two
+# (`saleor/wsm/graphql/dealer/product_extension.py`). They go through the SAME
+# appender for the same ordering guarantee, so they are two more names here and
+# not a sixth ledger.
 EXTENDED = {
     "saleor.graphql.product.types.products.Product": (
         "wsm_compliance",
         "wsm_fees",
+        "wsm_gate",
+        "wsm_gated",
         "wsm_option_sets",
     ),
+    # The gated catalogue's second type. 5.0 gates SECTIONS as well as products
+    # (76 tenants login-gate a category or page, 40 scope one by group), so the
+    # merchant sets the rule where they set everything else about a category.
+    "saleor.graphql.product.types.categories.Category": ("wsm_gate",),
 }
 
 # MP5, saleor/wsm/graphql/cost.py: one module ATTRIBUTE repointed, so the query
@@ -150,6 +198,9 @@ SOURCE = {
     ),
     "saleor.checkout.calculations._fetch_checkout_prices_if_expired": (
         "e2d2731d30d0a8adf66587846aaf4e3f1578fce65f080fcfa6865f0a31c5c131"
+    ),
+    "saleor.checkout.utils.add_variants_to_checkout": (
+        "b7636a53acdc1df3873efa17c8f9237ac8432a8dd416597bb962ce0d12adee51"
     ),
 }
 
@@ -227,6 +278,69 @@ def extensions_installed() -> dict[str, tuple[str, ...]]:
             if owned:
                 found[f"{value.__module__}.{value.__qualname__}"] = owned
     return found
+
+
+def methods_installed() -> frozenset[str]:
+    """Every core graphene-type METHOD a `saleor/wsm/` wrapper stands in for.
+
+    MP6's half of `installed()`. That sweep reads module attributes, and a
+    resolver lives on a CLASS, so it cannot see one. Same discipline: discover
+    off the loaded core modules, by the code object's file rather than by the
+    `__module__` `functools.wraps` copies from the original.
+
+    `klass.__module__ != name` skips the same class reached through every module
+    that imported it, so one wrapped method is one entry and not one per import.
+    `vars(klass)` rather than `getattr`, because a class attribute may be a
+    descriptor whose `__get__` does work, and this runs over every core class.
+    """
+    found = set()
+    for name, module in list(sys.modules.items()):
+        if not name.startswith("saleor.") or name.startswith("saleor.wsm"):
+            continue
+        for klass in list(vars(module).values()):
+            if not isinstance(klass, type) or klass.__module__ != name:
+                continue
+            for attribute, value in list(vars(klass).items()):
+                function = getattr(value, "__func__", value)
+                original = getattr(function, "__wrapped__", None)
+                code = getattr(function, "__code__", None)
+                if original is None or not isinstance(code, types.CodeType):
+                    continue
+                if "/saleor/wsm/" in code.co_filename.replace("\\", "/"):
+                    found.add(f"{name}.{klass.__qualname__}.{attribute}")
+    return frozenset(found)
+
+
+def install_method_guard(name, guard):
+    """Wrap the core graphene resolver `name` and rebind it on its class.
+
+    `name` is its key in `METHODS`: module, class qualname, attribute. Installed
+    from `ready()`, so the wrapper is on the class BEFORE any schema is built
+    and both the stock schema and the composed one this fork serves carry it. A
+    guard that depended on which schema answered would not be default deny.
+    """
+    if name not in METHODS:
+        raise ImproperlyConfigured(
+            f"{name} is patched but not named in saleor/wsm/patches.py METHODS. "
+            "Add it there and to docs/wsm/CORE-TOUCHES.md."
+        )
+    path, _, attribute = name.rpartition(".")
+    module_name, _, class_name = path.rpartition(".")
+    importlib.import_module(module_name)
+    klass = getattr(sys.modules[module_name], class_name)
+    declared = vars(klass).get(attribute)
+    if declared is None:
+        raise ImproperlyConfigured(
+            f"{class_name} no longer declares {attribute!r} itself, so this "
+            "patch would wrap an INHERITED method and rebind it on the subclass "
+            "only. Read the upstream diff for that class."
+        )
+    # A `staticmethod` (every resolver on a Saleor graphene type is one) hands
+    # back the plain function through `__func__`; a plain function is itself.
+    original = getattr(declared, "__func__", declared)
+    guarded = guard(original)
+    setattr(klass, attribute, staticmethod(guarded))
+    return guarded
 
 
 def rebindings_installed() -> frozenset[str]:

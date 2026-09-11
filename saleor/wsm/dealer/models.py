@@ -110,6 +110,35 @@ class DealerCustomer(models.Model):
             "yours to hold on file; nothing here checks for one."
         ),
     )
+    access_groups = models.ManyToManyField(
+        DealerGroup,
+        blank=True,
+        related_name="access_customers",
+        help_text=(
+            "Extra groups whose products this shopper may SEE, on top of the "
+            "one above. Visibility only: they never change what this shopper "
+            "pays. Leave empty unless a dealer belongs to more than one trade "
+            "tier."
+        ),
+    )
+
+    def group_codes(self) -> set:
+        """Every group this shopper is in: the price group plus the rest.
+
+        Access is the UNION (Dana, 2026-09-11) while price stays the single
+        `group`, because "the dealer price" has to be unambiguous on every line.
+        5.0's `customer_group_link` is many-to-many on 28 tenants and 2,533
+        customers; ds has 156 customers in the link table against 96 on the
+        legacy single-group column, so the union is the common case, not an edge.
+
+        ponytail: two queries, because this is the convenience reader for a
+        screen or a shell. The hot path does not call it:
+        `gate.buyer_groups_for` asks the same question in ONE query from a user
+        id and never fetches a row.
+        """
+        return {self.group.code} | set(
+            self.access_groups.values_list("code", flat=True)
+        )
 
     class Meta:
         ordering = ("pk",)
@@ -222,6 +251,15 @@ class DealerSettings(models.Model):
             "combine with dealer prices."
         ),
     )
+    catalogue_gated = models.BooleanField(
+        default=False,
+        help_text=(
+            "On: a shopper who is not signed in as a dealer sees no prices and "
+            "cannot add anything to the cart. They can still browse and search. "
+            "Off (the default): the store prices and sells to everyone, and only "
+            "the products you gate individually are hidden."
+        ),
+    )
 
     class Meta:
         verbose_name_plural = "dealer settings"
@@ -262,3 +300,125 @@ class DealerSettings(models.Model):
         """
         row = cls.objects.order_by("pk").first()
         return bool(row and row.discount_stacking)
+
+    @classmethod
+    def catalogue_gated_enabled(cls, *, database_connection_name=None) -> bool:
+        """Is the whole store behind a dealer login? One read of one row.
+
+        Named by KEY rather than ordered-first, and read off the connection the
+        caller names, because the browse path asks this on the replica and the
+        cart path asks it on the writer it is about to write the line to.
+
+        No row is the default, and the default is UNGATED: a store nobody has
+        configured is a normal store. Everything that is default-DENY about this
+        feature is per product and per buyer (`saleor/wsm/dealer/gate.py`).
+        """
+        rows = cls.objects
+        if database_connection_name:
+            rows = rows.using(database_connection_name)
+        return bool(rows.filter(pk=1).values_list("catalogue_gated", flat=True).first())
+
+
+class DealerProductGate(models.Model):
+    """One product's own answer to "who may see the price and buy this".
+
+    A row is the merchant SPEAKING about this product, so it wins over the store
+    switch in both directions: ds gates 2,731 of its 2,732 products and publishes
+    the one, which is a row with `login_required` false against a gated store.
+    No row means the store switch decides.
+
+    `groups` is how "trade tiers are visibility only" is expressed: empty means
+    any dealer group may see it, and naming groups means only those may. It is
+    never a price. Prices are `TierPrice`, and the two are deliberately separate
+    tables: ds's five groups decide VISIBILITY and its two price books (FOB and
+    CIF) decide money, and a merchant can move one without touching the other.
+    """
+
+    product = models.OneToOneField(
+        "product.Product",
+        related_name="wsm_gate",
+        on_delete=models.CASCADE,
+        help_text="The product this rule is about.",
+    )
+    login_required = models.BooleanField(
+        default=True,
+        help_text=(
+            "On: only a signed-in dealer sees this product's price and can buy "
+            "it. Off: this product is priced and sold to everyone, even when "
+            "the whole store is gated."
+        ),
+    )
+    groups = models.ManyToManyField(
+        DealerGroup,
+        blank=True,
+        related_name="gated_products",
+        help_text=(
+            "Leave empty to let any dealer group see this product. Name groups "
+            "to let only those groups see it. Visibility only: what each group "
+            "PAYS is its tier prices."
+        ),
+    )
+
+    class Meta:
+        ordering = ("product_id",)
+
+    def __str__(self):
+        # The product by NAME, because the id is the only other thing this row
+        # carries and a delete confirmation headed by a row number names nobody.
+        answer = "dealers only" if self.login_required else "public"
+        return f"{self.product.name}: {answer}"
+
+
+class DealerCategoryGate(models.Model):
+    """The same two answers, for a whole branch of the category tree.
+
+    5.0 gates categories directly and scopes them by group, and it does it at
+    scale: 76 tenants login-gate a category or page (127 rows) and 40 scope
+    content by group (210 rows). ds alone carries 15 category visibility rows
+    and 5 category login gates, every one of which a product-only gate dropped.
+
+    A branch, not a single category: the rule applies to this category and
+    everything under it, because that is what a merchant means by gating a
+    section and it is what 5.0 does. The NEAREST gated ancestor wins, and a
+    product's own `DealerProductGate` beats all of them
+    (`saleor/wsm/dealer/gate.py`).
+
+    Mirrors `DealerProductGate` field for field rather than generalising both
+    onto a content type, because two small tables with one FK each are fewer
+    lines than one table with a generic key plus the per-type resolvers a
+    generic key still needs. PAGES are the same shape again and are NOT here:
+    one row on ds, and a `Page` gate needs its own resolver on the page type,
+    which is its own change rather than a field on this one.
+    """
+
+    category = models.OneToOneField(
+        "product.Category",
+        related_name="wsm_gate",
+        on_delete=models.CASCADE,
+        help_text="The category this rule is about, and everything under it.",
+    )
+    login_required = models.BooleanField(
+        default=True,
+        help_text=(
+            "On: only a signed-in dealer sees prices in this section and can "
+            "buy from it. Off: this section is priced and sold to everyone, "
+            "even when the whole store is gated."
+        ),
+    )
+    groups = models.ManyToManyField(
+        DealerGroup,
+        blank=True,
+        related_name="gated_categories",
+        help_text=(
+            "Leave empty to let any dealer group see this section. Name groups "
+            "to let only those groups see it. Visibility only: what each group "
+            "PAYS is its tier prices."
+        ),
+    )
+
+    class Meta:
+        ordering = ("category_id",)
+
+    def __str__(self):
+        answer = "dealers only" if self.login_required else "public"
+        return f"{self.category.name}: {answer}"

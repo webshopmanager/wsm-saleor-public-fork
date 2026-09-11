@@ -60,6 +60,14 @@ class WsmErrorCode(Enum):
     TIER_AMOUNT_BELOW_ONE_CENT = "tier_amount_below_one_cent"
     TIER_AMOUNT_TOO_MANY_DECIMALS = "tier_amount_too_many_decimals"
     DUPLICATE_GROUP_CODE = "duplicate_group_code"
+    # The gated catalogue's one refusal, raised in `dealer/gate.py` as
+    # `GATED_CODE` and returned by every WSM surface that can be handed a
+    # product the requester may not buy. The STOCK checkout mutations cannot
+    # carry it: `checkoutLinesAdd` returns `CheckoutError`, whose code is a
+    # different enum in a core file this fork does not edit, so that surface
+    # gets the same sentence under stock's own `product_unavailable`. See
+    # `gate.stock_refusal`.
+    CATALOGUE_GATED = "catalogue_gated"
     CUSTOMER_ALREADY_ASSIGNED = "customer_already_assigned"
     GROUP_IN_USE = "group_in_use"
     # A paste is capped on stock's own bulk-create shape (`MAX_ORDERS`,

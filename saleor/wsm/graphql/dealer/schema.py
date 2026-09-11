@@ -29,10 +29,16 @@ from ....permission.enums import DiscountPermissions, ProductPermissions
 from ...dealer import models
 from ..types import DOC_CATEGORY_WSM
 from ..utils import by_global_id, connection_slice, reader
+from . import product_extension  # noqa: F401  (appends wsmGated/wsmGate to Product)
 from .filters import (
     WsmDealerCustomerFilterInput,
     WsmDealerGroupFilterInput,
     WsmTierPriceFilterInput,
+)
+from .gate_mutations import (
+    WsmCategoryGateSet,
+    WsmProductGateBulkSet,
+    WsmProductGateSet,
 )
 from .mutations import (
     DEALER_PERMISSIONS,
@@ -167,7 +173,7 @@ def _customers(info: ResolveInfo):
     return (
         reader(models.DealerCustomer, info)
         .select_related("user")
-        .prefetch_related(Prefetch("group", queryset=_groups(info)))
+        .prefetch_related("access_groups", Prefetch("group", queryset=_groups(info)))
     )
 
 
@@ -310,3 +316,6 @@ class WsmDealerMutations(graphene.ObjectType):
     wsm_tier_price_bulk_create = WsmTierPriceBulkCreate.Field()
     wsm_tier_price_bulk_update = WsmTierPriceBulkUpdate.Field()
     wsm_dealer_settings_update = WsmDealerSettingsUpdate.Field()
+    wsm_product_gate_set = WsmProductGateSet.Field()
+    wsm_product_gate_bulk_set = WsmProductGateBulkSet.Field()
+    wsm_category_gate_set = WsmCategoryGateSet.Field()

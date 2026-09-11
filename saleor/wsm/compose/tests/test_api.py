@@ -141,6 +141,7 @@ def test_option_sets_returns_the_contract_shape(
             "prompt_type": "choice_many",
             "required": True,
             "note": "Credits for parts the customer already owns.",
+            "deselect_prompt": "",
             "values": [
                 {
                     "id": values[0].pk,
@@ -148,6 +149,8 @@ def test_option_sets_returns_the_contract_shape(
                     "sku_fragment": "NOFF",
                     "price_delta": "-29.99",
                     "image_url": "",
+                    "help_text": "",
+                    "is_default": False,
                 },
                 {
                     "id": values[1].pk,
@@ -155,6 +158,8 @@ def test_option_sets_returns_the_contract_shape(
                     "sku_fragment": "NOFL",
                     "price_delta": "-30.00",
                     "image_url": "",
+                    "help_text": "",
+                    "is_default": False,
                 },
                 {
                     "id": values[2].pk,
@@ -162,6 +167,8 @@ def test_option_sets_returns_the_contract_shape(
                     "sku_fragment": "NOPA",
                     "price_delta": "-445.00",
                     "image_url": "",
+                    "help_text": "",
+                    "is_default": False,
                 },
             ],
         }
@@ -1002,3 +1009,103 @@ def test_a_configured_add_still_serves_the_buyer_the_checkout_belongs_to(
     )
 
     assert response.status_code == 200, response.content
+
+
+# --- (e) option-set parity wave A: help text, the default, the deselect prompt
+
+
+@pytest.fixture
+def tuner(stage_2_kit):
+    """An OPTIONAL question whose pre-picked answer costs 250.00.
+
+    The shape the fleet sweep counted 429 times: a default that moves the
+    quoted price, not just the radio button.
+    """
+    option_set = OptionSet.objects.create(
+        product=stage_2_kit.product,
+        name="Tuner",
+        label="Add a tuner",
+        prompt_type="choice_one",
+        required=False,
+        deselect_prompt="Skip the tuner",
+    )
+    plain = OptionValue.objects.create(
+        option_set=option_set,
+        name="No tuner",
+        price_delta=Decimal("0.00"),
+        sort_order=0,
+    )
+    default = OptionValue.objects.create(
+        option_set=option_set,
+        name="Stage 2 tuner",
+        sku_fragment="ST2",
+        price_delta=Decimal("250.00"),
+        help_text="Fits 2019 and newer only",
+        is_default=True,
+        sort_order=1,
+    )
+    return option_set, plain, default
+
+
+def test_the_pdp_read_serves_the_help_text_the_default_and_the_prompt(
+    client, stage_2_kit, tuner
+):
+    option_set, plain, default = tuner
+
+    body = client.get(
+        OPTION_SETS_URL.format(gid("Product", stage_2_kit.product_id))
+    ).json()
+
+    served = next(s for s in body["data"] if s["id"] == option_set.pk)
+    assert served["deselect_prompt"] == "Skip the tuner"
+    assert [(v["name"], v["help_text"], v["is_default"]) for v in served["values"]] == [
+        ("No tuner", "", False),
+        ("Stage 2 tuner", "Fits 2019 and newer only", True),
+    ]
+
+
+def test_an_add_that_never_mentions_the_tuner_is_charged_the_default(
+    client, checkout, stage_2_kit, tuner
+):
+    """The money assertion: the CART line, not the response alone."""
+    option_set, plain, default = tuner
+
+    response = post_line(client, checkout, stage_2_kit, selections=[])
+
+    assert response.status_code == 200, response.content
+    line = checkout.lines.get()
+    assert line.price_override == BASE_PRICE + Decimal("250.00")
+    assert line.metadata[META_SKU].endswith("ST2")
+
+
+def test_a_shopper_who_takes_the_deselect_option_pays_the_base_price(
+    client, checkout, stage_2_kit, tuner
+):
+    """Skip the tuner posts the set with no values: said no, not said nothing."""
+    option_set, plain, default = tuner
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": []}],
+    )
+
+    assert response.status_code == 200, response.content
+    assert checkout.lines.get().price_override == BASE_PRICE
+
+
+def test_a_shopper_who_picks_the_cheaper_answer_is_not_charged_the_default(
+    client, checkout, stage_2_kit, tuner
+):
+    option_set, plain, default = tuner
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": [plain.pk]}],
+    )
+
+    assert response.status_code == 200, response.content
+    assert checkout.lines.get().price_override == BASE_PRICE

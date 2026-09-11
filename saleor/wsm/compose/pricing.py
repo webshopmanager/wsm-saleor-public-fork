@@ -133,6 +133,11 @@ class Value:
     name: str = ""
     sku_fragment: str = ""
     price_delta: int = 0
+    # The merchant pre-picked this answer, so a caller who sends nothing for an
+    # optional question is quoted it. Here and not left to the browser because
+    # 429 of the fleet's defaults carry money: a storefront that forgot to
+    # preselect would quote a price the merchant never set.
+    is_default: bool = False
     sort_order: int = 0
     tier_deltas: tuple[TierDelta, ...] = ()
 
@@ -225,6 +230,52 @@ def delta_for(value: Value, tier_group: str | None) -> tuple[int, bool]:
     return value.price_delta, False
 
 
+def default_value(option_set) -> Value | None:
+    """The pre-picked answer, in catalog order, or None.
+
+    FIRST in catalog order and not "the" default: two defaults on one question
+    is a merchant-data bug the screens refuse, and a pair written past them must
+    still price to the same number twice rather than raise on a buy button.
+    """
+    for value in sorted(option_set.values, key=lambda v: (v.sort_order, v.id)):
+        if value.is_default:
+            return value
+    return None
+
+
+def apply_defaults(sets_by_id, picked) -> None:
+    """Quote the merchant's pre-picked answer where the caller said nothing.
+
+    Every OPTIONAL choice-one question with a default and no selection. Mutates
+    `picked`.
+
+    OMITTED is the trigger, never an empty selection: a shopper who takes the
+    deselect option sends the set with no values, which is the difference
+    between "did not answer" and "answered no". Without that difference a
+    priced default could not be refused at all, and 429 of the fleet's defaults
+    carry a price.
+
+    REQUIRED sets are left alone on purpose. A required question with no answer
+    still refuses (`MissingRequiredError`); the default is what the storefront
+    OPENS on, not a licence to sell a configuration nobody picked. Fail closed:
+    the cost of the other reading is a silent sale of the merchant's guess.
+
+    CHOICE_MANY is left alone too: "pick any number" has no single answer to
+    pre-pick, and filling one in would quietly charge for a box a shopper never
+    ticked.
+    """
+    for option_set in sets_by_id.values():
+        if option_set.id in picked or option_set.required:
+            continue
+        if option_set.prompt_type != CHOICE_ONE:
+            continue
+        value = default_value(option_set)
+        if value is not None:
+            picked[option_set.id] = Selection(
+                set_id=option_set.id, value_ids=(value.id,)
+            )
+
+
 def _percent_of(base_cents: int, rate: int) -> int:
     """Rate hundredths-of-a-percent of base, rounded HALF-UP away from zero.
 
@@ -270,10 +321,19 @@ def _validate(sets_by_id, picked, fees_by_id, accepted):
                 raise UnknownValueError(
                     f"unknown value {value_id} for option {option_set.display_name!r}"
                 )
-        if option_set.prompt_type == CHOICE_ONE and len(selection.value_ids) != 1:
-            raise ComposeRefusal(
-                f"option {option_set.display_name!r} takes exactly one value"
-            )
+        if option_set.prompt_type == CHOICE_ONE:
+            # An OPTIONAL question may be answered "none", and an empty
+            # selection is how that arrives: the set's `deselect_prompt` is the
+            # wording the shopper clicked. That is the difference between "said
+            # no" and "said nothing", and without it a pre-picked priced answer
+            # could never be declined, because saying nothing quotes the default
+            # (`apply_defaults`). A required question still takes exactly one,
+            # and more than one is a bug on either.
+            allowed = (1,) if option_set.required else (0, 1)
+            if len(selection.value_ids) not in allowed:
+                raise ComposeRefusal(
+                    f"option {option_set.display_name!r} takes exactly one value"
+                )
         if option_set.prompt_type == CHOICE_MANY and not selection.value_ids:
             raise MissingRequiredError(
                 f"option {option_set.display_name!r} needs at least one value"
@@ -392,6 +452,8 @@ def price_configured(
             )
         picked[selection.set_id] = selection
 
+    apply_defaults(sets_by_id, picked)
+
     fees = list(fees)
     _validate(sets_by_id, picked, {f.id: f for f in fees}, accepted)
 
@@ -433,6 +495,15 @@ def price_configured(
                 }
             )
 
+    # Recorded from `picked` and not from `lines`, because the whole point is
+    # that these produced no line. Catalog order, like everything else in the
+    # snapshot, so the same choices always serialise the same way.
+    declined = sorted(
+        set_id
+        for set_id, selection in picked.items()
+        if not selection.value_ids and sets_by_id[set_id].prompt_type == CHOICE_ONE
+    )
+
     # AT OR BELOW nothing (requirement 1.3). A configured unit that comes to
     # exactly 0 is a broken catalog row, not a free product, and a positive fee
     # must not be able to carry it into a sale.
@@ -452,6 +523,16 @@ def price_configured(
         snapshot={
             "version": SNAPSHOT_VERSION,
             "base_unit_cents": base_unit_cents,
+            # The questions the shopper answered with NOTHING. They add no
+            # money and write no line, so without this key the snapshot cannot
+            # tell "said no" from "said nothing" and anything that re-prices
+            # from it (`wsm/reprice.py`) hands the engine a set it never
+            # mentions, which `apply_defaults` answers with the merchant's
+            # default. A shopper who declined a priced default at the buy
+            # button was charged for it by the next cart read. Absent on a
+            # snapshot written before this key existed, which is correct: no
+            # default could be applied then either.
+            "declined": declined,
             "tier_group": tier_group or None,
             # A tier_group that matched nothing prices at retail, which is
             # invisible in the money alone: the dealer is charged retail and the

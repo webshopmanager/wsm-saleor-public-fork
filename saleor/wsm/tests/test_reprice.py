@@ -27,8 +27,10 @@ from saleor.checkout.fetch import fetch_checkout_info, fetch_checkout_lines
 from saleor.checkout.models import CheckoutLine
 from saleor.plugins.manager import get_plugins_manager
 from saleor.wsm.compose.lines import META_OPTIONS as OPTIONS_KEY
+from saleor.wsm.compose.lines import META_SKU as OPTIONS_SKU_KEY
 from saleor.wsm.compose.models import OptionValue
 from saleor.wsm.compose.tests.test_api import (  # noqa: F401
+    BASE_PRICE,
     CONFIGURED_UNIT,
     FEE_AMOUNT,
     buckle,
@@ -39,6 +41,7 @@ from saleor.wsm.compose.tests.test_api import (  # noqa: F401
     omit_parts,
     post_line,
     stage_2_kit,
+    tuner,
 )
 from saleor.wsm.dealer.no_stacking import LINE_METADATA_KEY as DEALER_KEY
 from saleor.wsm.dealer.tests.test_views import (  # noqa: F401
@@ -856,3 +859,62 @@ def test_a_dealers_configured_base_survives_the_stock_quantity_stepper(
     assert line.price_override == Decimal("3208.00")
     assert json.loads(line.private_metadata[OPTIONS_KEY])["tier_applied"] is True
     assert DEALER_KEY in line.private_metadata
+
+
+# --- exploit 6: the pre-picked default a shopper declined, charged back ------
+
+
+def test_a_declined_default_stays_declined_on_the_next_cart_read(
+    client, checkout, stage_2_kit, tuner
+):
+    """A choice of NOTHING has to leave a record, or it is not a choice.
+
+    The snapshot is the only thing a recalculation knows about what the shopper
+    picked (`reprice._selections_from`), and a declined optional question wrote
+    no snapshot row at all: there is no value to write one about. On the next
+    read the rebuilt selections were missing that set entirely, which is the
+    shape `price_configured` treats as "said nothing" and answers with the
+    merchant's default. The shopper declined a 250.00 tuner at the buy button
+    and was charged for it by the cart.
+
+    Driven through the real endpoint and the real reprice, and asserted on the
+    STORED line, because the add's own response was right all along: it was the
+    line underneath that moved.
+    """
+    option_set, plain, default = tuner
+
+    response = post_line(
+        client,
+        checkout,
+        stage_2_kit,
+        selections=[{"set_id": option_set.pk, "value_ids": []}],
+    )
+    assert response.status_code == 200, response.content
+    line = CheckoutLine.objects.get(checkout_id=checkout.pk)
+    assert line.price_override == BASE_PRICE
+
+    checkout_info, lines = checkout_info_for(checkout)
+    reprice(checkout_info, lines)
+
+    line.refresh_from_db()
+    assert line.price_override == BASE_PRICE
+    assert default.name not in json.dumps(line.private_metadata)
+    assert default.sku_fragment not in line.metadata[OPTIONS_SKU_KEY]
+
+
+def test_an_accepted_default_survives_the_next_cart_read(
+    client, checkout, stage_2_kit, tuner
+):
+    """The other half, so the fix above cannot be "never apply the default"."""
+    option_set, plain, default = tuner
+
+    post_line(client, checkout, stage_2_kit, selections=[])
+    line = CheckoutLine.objects.get(checkout_id=checkout.pk)
+    assert line.price_override == BASE_PRICE + Decimal("250.00")
+
+    checkout_info, lines = checkout_info_for(checkout)
+    reprice(checkout_info, lines)
+
+    line.refresh_from_db()
+    assert line.price_override == BASE_PRICE + Decimal("250.00")
+    assert line.metadata[OPTIONS_SKU_KEY].endswith(default.sku_fragment)

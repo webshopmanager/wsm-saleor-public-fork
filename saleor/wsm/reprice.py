@@ -941,8 +941,18 @@ def _selections_from(snapshot):
     One entry per option set, values gathered: a multi-choice axis wrote one
     snapshot row per value, and handing the engine one Selection per row would
     trip its own duplicate-selection refusal.
+
+    A question answered with NOTHING wrote no row, so it is read from the
+    snapshot's own `declined` list instead. Omitting it here is not neutral: an
+    optional question the engine is never handed is one it answers with the
+    merchant's pre-picked default, so the shopper is charged for the very thing
+    they declined, on every cart read, quietly.
     """
     picked: dict[int, dict] = {}
+    for set_id in snapshot.get("declined") or []:
+        if not isinstance(set_id, int) or isinstance(set_id, bool):
+            raise Unrepriceable("an option recorded on a configured line has no id")
+        picked.setdefault(set_id, {"value_ids": [], "text": ""})
     for row in snapshot.get("lines") or []:
         set_id = row.get("option_set_id")
         if not isinstance(set_id, int) or isinstance(set_id, bool):

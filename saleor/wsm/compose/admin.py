@@ -62,7 +62,7 @@ from .models import (
     OptionValue,
     ProductCompliance,
 )
-from .search import rank_by_sku, whole_token  # noqa: F401
+from .search import rank_by_sku
 
 # The merchant console mounts on the same host as the public API, so
 # `/admin/login/` is a crawlable 200. One header on the way out keeps the whole

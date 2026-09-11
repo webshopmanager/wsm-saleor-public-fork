@@ -15,6 +15,12 @@ model of it. A failure raises, the block unwinds, and nothing is left behind.
 The alternative, threading `pending_values` / `removed_value_pks` through every
 check, is the same answer for more code and one more thing to keep in step with
 the admin.
+
+What makes that order safe is that no `post_save` receiver is registered on any
+of these tables: a receiver would OBSERVE rows the failing check then unwinds,
+and a receiver that writes outside the transaction (a webhook, a search push)
+would act on an edit that never happened. The first one added has to move the
+validation ahead of the save, and this paragraph is the note that says so.
 """
 
 import graphene

@@ -248,3 +248,50 @@ def test_the_guard_names_a_planted_patch_even_beside_a_test_double():
             calculations, "wsm_guard_probe_patch", undocumented, create=True
         ):
             assert planted in patches.installed()
+
+
+def test_the_installed_core_class_extensions_are_the_documented_ones():
+    """MP4 is not a wrapped function, so the patch sweep above cannot see it.
+
+    `saleor/wsm/graphql/compose/product_extension.py` appends fields to stock's
+    `Product` graphene type at import: additive, idempotent and ordered, but a
+    mutation of a core CLASS all the same, and the ledger said "three patches,
+    nothing here adds one". It is the fourth entry now, with the same shape of
+    tripwire the other three have: the real set is DISCOVERED off the core
+    types and compared against the pin, so an extension that lands without a
+    line here reddens this test in the run that adds it.
+    """
+    discovered = patches.extensions_installed()
+
+    assert discovered, "no core class extension was discovered, so this proved nothing"
+    assert discovered == patches.EXTENDED, (
+        f"core class extensions {sorted(discovered.items())} do not match the "
+        f"pin {sorted(patches.EXTENDED.items())}. Update saleor/wsm/patches.py "
+        "EXTENDED and docs/wsm/CORE-TOUCHES.md."
+    )
+
+
+def test_the_core_attributes_this_fork_rebinds_are_the_documented_ones():
+    """MP5: one module attribute repointed, discovered rather than declared.
+
+    `saleor/graphql/views.py` parses a document with the VIEW's schema and costs
+    it against the module global it imported from `saleor.graphql.api`. On stock
+    Saleor those are one object; on this fork the view serves the composed
+    schema, so the complexity guard was weighing a schema with no `Wsm*` field
+    in it. `saleor/wsm/graphql/cost.py` repoints that one name. The pin below is
+    compared against what is actually bound, so a second rebind cannot arrive
+    quietly.
+    """
+    # The composed schema is built, and the rebind installed, on import.
+    from saleor.wsm.graphql import schema as wsm_schema
+
+    assert wsm_schema.schema is not None
+
+    discovered = patches.rebindings_installed()
+
+    assert discovered, "no rebinding was discovered, so this test proved nothing"
+    assert discovered == patches.REBOUND, (
+        f"core attributes {sorted(discovered)} do not match the pin "
+        f"{sorted(patches.REBOUND)}. Update saleor/wsm/patches.py REBOUND and "
+        "docs/wsm/CORE-TOUCHES.md."
+    )

@@ -29,6 +29,12 @@ class WsmErrorCode(Enum):
     GRAPHQL_ERROR = "graphql_error"
     INVALID = "invalid"
     NOT_FOUND = "not_found"
+    # Not one stock produces from a ValidationError: stock refuses a whole
+    # mutation with a top-level `PermissionDenied`. This layer needs the FIELD
+    # shape as well, for a mutation the caller IS allowed to run that carries
+    # one input field they are not (`tierDeltas`, dealer money on a catalog
+    # mutation), so the screen can refuse the column and keep the save.
+    PERMISSION_DENIED = "permission_denied"
     REQUIRED = "required"
     UNIQUE = "unique"
 

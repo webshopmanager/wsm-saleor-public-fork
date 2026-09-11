@@ -81,6 +81,24 @@ def validate_tier_group_code(code):
         )
 
 
+# The three values `DealerCustomer.account_status` takes, as 5.0 spells them.
+# 5.0's `customer_account_status` enum is Active/Probation/Hold, identical on
+# 300 of 300 tenants, and ds's own data holds Active 331 and Probation 1 with no
+# Hold at all (measured 2026-09-11). PROBATION is carried so an importer does
+# not have to rewrite a merchant's own word for an account, and it BUYS exactly
+# as ACTIVE buys: Dana's default of 2026-09-11 on WSM6-2480 is that only HOLD
+# stops a checkout. Nothing in the order path reads PROBATION, which is what
+# `test_a_probation_account_buys_exactly_as_an_active_one_does` says.
+ACCOUNT_STATUS_ACTIVE = "active"
+ACCOUNT_STATUS_PROBATION = "probation"
+ACCOUNT_STATUS_HOLD = "hold"
+ACCOUNT_STATUS_CHOICES = [
+    (ACCOUNT_STATUS_ACTIVE, "Active"),
+    (ACCOUNT_STATUS_PROBATION, "Probation"),
+    (ACCOUNT_STATUS_HOLD, "Hold"),
+]
+
+
 class DealerCustomer(models.Model):
     """The link from a signed-in shopper to their group.
 
@@ -110,6 +128,34 @@ class DealerCustomer(models.Model):
             "yours to hold on file; nothing here checks for one."
         ),
     )
+    invoice_payment = models.BooleanField(
+        default=False,
+        help_text=(
+            "Let this shopper place orders without paying, to be invoiced. They "
+            "get a second choice at the payment step, Pay on account, and the "
+            "order arrives authorized and unpaid. Off by default: an account "
+            "nobody has approved for terms pays like everyone else."
+        ),
+    )
+    account_number = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text=(
+            "This dealer's account number in your own books or ERP. Printed on "
+            "their orders so an invoice can be matched without a lookup."
+        ),
+    )
+    account_status = models.CharField(
+        max_length=10,
+        choices=ACCOUNT_STATUS_CHOICES,
+        default=ACCOUNT_STATUS_ACTIVE,
+        help_text=(
+            "Hold stops this shopper placing ANY order, by card as well as on "
+            "account, until you set it back to Active. It does not touch their "
+            "sign-in, their prices or their past orders. Probation is a note to "
+            "yourself: it buys exactly as Active does."
+        ),
+    )
 
     class Meta:
         ordering = ("pk",)
@@ -125,6 +171,11 @@ class DealerCustomer(models.Model):
 # will be charged at. Named because the field validator, the table constraint
 # and the pricing floor are three statements of the same rule.
 MIN_TIER_AMOUNT = Decimal("0.01")
+
+# What the reference on an account order is called when a merchant has not said
+# otherwise. Named because the column default, the resolver fallback and the
+# storefront's own fallback are three statements of one string.
+DEFAULT_PO_LABEL = "PO number"
 
 
 class TierPrice(models.Model):
@@ -222,6 +273,25 @@ class DealerSettings(models.Model):
             "combine with dealer prices."
         ),
     )
+    po_label = models.CharField(
+        max_length=50,
+        default="PO number",
+        help_text=(
+            "What you call the reference on an account order. Shown above the "
+            "box at checkout and on the order. ds calls it one thing, another "
+            "merchant calls it a job number or a release; the default is "
+            '"PO number".'
+        ),
+    )
+    po_required = models.BooleanField(
+        default=False,
+        help_text=(
+            "On: a shopper paying on account must give a purchase order number "
+            "before the order can be placed. Off (the default): the box is "
+            "still offered and still stored, it is just not demanded. 27 of the "
+            "108 tenants that invoice on 5.0 require one."
+        ),
+    )
 
     class Meta:
         verbose_name_plural = "dealer settings"
@@ -262,3 +332,25 @@ class DealerSettings(models.Model):
         """
         row = cls.objects.order_by("pk").first()
         return bool(row and row.discount_stacking)
+
+    @classmethod
+    def po_required_for_store(cls) -> bool:
+        """Whether a PO number is demanded of an order placed on account.
+
+        The same shape as `stacking_enabled` and for the same reason: no row
+        means the default, which is not demanding one, so a fresh install asks
+        for nothing it was never configured to ask for.
+        """
+        row = cls.objects.order_by("pk").first()
+        return bool(row and row.po_required)
+
+    @classmethod
+    def po_label_for_store(cls) -> str:
+        """The merchant's own word for the box, or the default.
+
+        Never an empty string: a blank label is a box with no question above it,
+        and the field is what a merchant has to fill in to change the default,
+        not to remove it.
+        """
+        row = cls.objects.order_by("pk").first()
+        return (row.po_label.strip() if row else "") or DEFAULT_PO_LABEL

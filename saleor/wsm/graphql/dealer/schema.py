@@ -22,13 +22,18 @@ from django.db.models.functions import Coalesce
 from graphql.language.ast import FragmentSpread, InlineFragment
 
 from ....graphql.core import ResolveInfo
-from ....graphql.core.fields import FilterConnectionField, PermissionsField
+from ....graphql.core.fields import (
+    BaseField,
+    FilterConnectionField,
+    PermissionsField,
+)
 from ....graphql.core.utils import from_global_id_or_error
 from ....graphql.core.validators import validate_one_of_args_is_in_query
 from ....permission.enums import DiscountPermissions, ProductPermissions
 from ...dealer import models
 from ..types import DOC_CATEGORY_WSM
 from ..utils import by_global_id, connection_slice, reader
+from .checkout import WsmCheckoutCompleteOnTerms
 from .filters import (
     WsmDealerCustomerFilterInput,
     WsmDealerGroupFilterInput,
@@ -59,6 +64,7 @@ from .types import (
     WsmDealerGroup,
     WsmDealerGroupCountableConnection,
     WsmDealerSettings,
+    WsmMyDealerTerms,
     WsmTierPrice,
     WsmTierPriceCountableConnection,
 )
@@ -251,6 +257,41 @@ class WsmDealerQueries(graphene.ObjectType):
         doc_category=DOC_CATEGORY_WSM,
     )
 
+    # The one dealer read that is NOT behind MANAGE_DISCOUNTS, because it
+    # answers only about the caller. A plain `graphene.Field`, not a
+    # `PermissionsField`: there is no permission to ask for, and the session is
+    # the whole gate. See `WsmMyDealerTerms`.
+    wsm_my_dealer_terms = BaseField(
+        WsmMyDealerTerms,
+        description=(
+            "What the signed-in shopper's own dealer account allows. Null when "
+            "they are not signed in or have no dealer account."
+        ),
+        doc_category=DOC_CATEGORY_WSM,
+    )
+
+    @staticmethod
+    def resolve_wsm_my_dealer_terms(_root, info: ResolveInfo):
+        user = info.context.user
+        # `not user`, never `user is None`: an anonymous request carries a
+        # SimpleLazyObject WRAPPING None, so the identity test is False and the
+        # attribute access under it raises AttributeError on every anonymous
+        # checkout page. Stock's own idiom, and measured here 2026-09-11.
+        if not user or not user.is_authenticated:
+            return None
+        account = reader(models.DealerCustomer, info).filter(user_id=user.pk).first()
+        if account is None:
+            return None
+        settings_row = reader(models.DealerSettings, info).order_by("pk").first()
+        return WsmMyDealerTerms(
+            invoice_payment=account.invoice_payment,
+            account_number=account.account_number,
+            account_status=account.account_status,
+            po_required=bool(settings_row and settings_row.po_required),
+            po_label=((settings_row.po_label or "").strip() if settings_row else "")
+            or models.DEFAULT_PO_LABEL,
+        )
+
     @staticmethod
     def resolve_wsm_dealer_group(_root, info: ResolveInfo, /, *, id=None, code=None):
         validate_one_of_args_is_in_query("id", id, "code", code, use_camel_case=True)
@@ -310,3 +351,7 @@ class WsmDealerMutations(graphene.ObjectType):
     wsm_tier_price_bulk_create = WsmTierPriceBulkCreate.Field()
     wsm_tier_price_bulk_update = WsmTierPriceBulkUpdate.Field()
     wsm_dealer_settings_update = WsmDealerSettingsUpdate.Field()
+    # The one PUBLIC mutation in this layer: a shopper pressing "Place order",
+    # not a merchant editing a price. Its gate is five questions in the mutation
+    # body rather than a permission; see its module docstring.
+    wsm_checkout_complete_on_terms = WsmCheckoutCompleteOnTerms.Field()

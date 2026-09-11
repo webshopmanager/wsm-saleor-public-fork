@@ -17,11 +17,11 @@ import graphene
 from ....graphql.account.types import User
 from ....graphql.core.connection import CountableConnection
 from ....graphql.core.context import ChannelContext
-from ....graphql.core.types import ModelObjectType
+from ....graphql.core.types import BaseObjectType, ModelObjectType
 from ....graphql.product.types.products import ProductVariant
 from ...dealer import models
 from ..scalars import WsmDecimal
-from ..types import WsmDocCategory
+from ..types import DOC_CATEGORY_WSM, WsmDocCategory
 
 # The names the list resolvers annotate their counts under. Read off the row
 # when it is there and counted per row when it is not, because a mutation
@@ -66,6 +66,28 @@ class WsmDealerGroup(WsmDocCategory, ModelObjectType[models.DealerGroup]):
         return root.customers.count() if count is None else count
 
 
+class WsmDealerAccountStatus(graphene.Enum):
+    """Whether this account may place orders at all.
+
+    Declared here rather than derived from the model's choices because a
+    graphene enum built from a Django `choices` list names its members after
+    the stored string, and the merchant screen and the storefront both read
+    these names.
+    """
+
+    ACTIVE = models.ACCOUNT_STATUS_ACTIVE
+    HOLD = models.ACCOUNT_STATUS_HOLD
+
+    @property
+    def description(self):
+        if self == WsmDealerAccountStatus.HOLD:
+            return "On hold: this shopper can place no order, by any method."
+        return "Active: this shopper can place orders."
+
+
+WsmDealerAccountStatus.doc_category = DOC_CATEGORY_WSM
+
+
 class WsmDealerCustomer(WsmDocCategory, ModelObjectType[models.DealerCustomer]):
     id = graphene.GlobalID(required=True, description="ID of the assignment.")
     user = graphene.Field(
@@ -83,11 +105,77 @@ class WsmDealerCustomer(WsmDocCategory, ModelObjectType[models.DealerCustomer]):
             "the merchant's to hold on file; nothing here checks for one."
         ),
     )
+    invoice_payment = graphene.Boolean(
+        required=True,
+        description=(
+            "This shopper may place orders without paying, to be invoiced. A "
+            "payment method the account enables alongside dealer pricing, never "
+            "instead of it: the lines still carry their dealer prices."
+        ),
+    )
+    account_number = graphene.String(
+        required=True,
+        description=(
+            "This dealer's account number in the merchant's own books or ERP. "
+            "Empty when they have not given one."
+        ),
+    )
+    account_status = WsmDealerAccountStatus(
+        required=True,
+        description="Whether this account may place orders at all.",
+    )
 
     class Meta:
         model = models.DealerCustomer
         interfaces = [graphene.relay.Node]
         description = "The link from a signed-in shopper to their buyer group."
+
+
+class WsmMyDealerTerms(WsmDocCategory, BaseObjectType):
+    """What the SIGNED-IN shopper is allowed to do, answered to themselves.
+
+    The storefront has to know three things before it can draw a payment step:
+    whether to offer paying on account at all, whether to demand a PO number,
+    and whether this account is on hold. Every other dealer query in this layer
+    is behind MANAGE_DISCOUNTS, because every other one answers about SOMEBODY
+    ELSE; this one answers only about the caller, so the gate is the session and
+    there is nothing to authorize.
+
+    A plain `ObjectType` rather than a `ModelObjectType` on `DealerCustomer`, on
+    purpose: a model type carries a Node id and a `group`, and a shopper has no
+    business resolving another shopper's assignment from an id they guessed.
+    Four scalars, and nothing to walk from.
+
+    Null for a shopper who is not signed in and for one with no dealer record,
+    which are the same answer to the only question being asked.
+    """
+
+    invoice_payment = graphene.Boolean(
+        required=True,
+        description="Whether this shopper may place an order to be invoiced.",
+    )
+    account_number = graphene.String(
+        required=True,
+        description="Their account number with the merchant. Empty when unset.",
+    )
+    account_status = WsmDealerAccountStatus(
+        required=True,
+        description=(
+            "HOLD means no order can be placed by any payment method, so the "
+            "storefront says so at the address step rather than at the end."
+        ),
+    )
+    po_required = graphene.Boolean(
+        required=True,
+        description=(
+            "Whether the merchant demands a purchase order number on an account "
+            "order. The store-wide setting, repeated here so a checkout needs "
+            "one round trip rather than two."
+        ),
+    )
+
+    class Meta:
+        description = "What the signed-in shopper's dealer account allows."
 
 
 class WsmTierPrice(WsmDocCategory, ModelObjectType[models.TierPrice]):
@@ -183,6 +271,14 @@ class WsmDealerSettings(WsmDocCategory, ModelObjectType[models.DealerSettings]):
         description=(
             "When false (the default), a line already at a dealer price takes "
             "no voucher, promotion or order-level discount on top."
+        ),
+    )
+    po_required = graphene.Boolean(
+        required=True,
+        description=(
+            "When true, a shopper paying on account must give a purchase order "
+            "number before the order is placed. False (the default) still "
+            "offers and stores the box, it just does not demand it."
         ),
     )
 

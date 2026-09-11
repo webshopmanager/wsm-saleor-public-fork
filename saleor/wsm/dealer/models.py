@@ -81,6 +81,19 @@ def validate_tier_group_code(code):
         )
 
 
+# The two values `DealerCustomer.account_status` takes, as 5.0 spells them.
+# 5.0's `customer_account_status` enum is Active/Probation/Hold, identical on
+# 300 of 300 tenants; Probation is not carried here because nothing on 5.0
+# BEHAVES differently for it, and a status a merchant can set that changes
+# nothing is a support call waiting to happen. It maps to ACTIVE on import.
+ACCOUNT_STATUS_ACTIVE = "active"
+ACCOUNT_STATUS_HOLD = "hold"
+ACCOUNT_STATUS_CHOICES = [
+    (ACCOUNT_STATUS_ACTIVE, "Active"),
+    (ACCOUNT_STATUS_HOLD, "Hold"),
+]
+
+
 class DealerCustomer(models.Model):
     """The link from a signed-in shopper to their group.
 
@@ -108,6 +121,33 @@ class DealerCustomer(models.Model):
         help_text=(
             "Charge this shopper no sales tax. Their exemption certificate is "
             "yours to hold on file; nothing here checks for one."
+        ),
+    )
+    invoice_payment = models.BooleanField(
+        default=False,
+        help_text=(
+            "Let this shopper place orders without paying, to be invoiced. They "
+            "get a second choice at the payment step, Pay on account, and the "
+            "order arrives authorized and unpaid. Off by default: an account "
+            "nobody has approved for terms pays like everyone else."
+        ),
+    )
+    account_number = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text=(
+            "This dealer's account number in your own books or ERP. Printed on "
+            "their orders so an invoice can be matched without a lookup."
+        ),
+    )
+    account_status = models.CharField(
+        max_length=10,
+        choices=ACCOUNT_STATUS_CHOICES,
+        default=ACCOUNT_STATUS_ACTIVE,
+        help_text=(
+            "Hold stops this shopper placing ANY order, by card as well as on "
+            "account, until you set it back to Active. It does not touch their "
+            "sign-in, their prices or their past orders."
         ),
     )
 
@@ -222,6 +262,15 @@ class DealerSettings(models.Model):
             "combine with dealer prices."
         ),
     )
+    po_required = models.BooleanField(
+        default=False,
+        help_text=(
+            "On: a shopper paying on account must give a purchase order number "
+            "before the order can be placed. Off (the default): the box is "
+            "still offered and still stored, it is just not demanded. 27 of the "
+            "108 tenants that invoice on 5.0 require one."
+        ),
+    )
 
     class Meta:
         verbose_name_plural = "dealer settings"
@@ -262,3 +311,14 @@ class DealerSettings(models.Model):
         """
         row = cls.objects.order_by("pk").first()
         return bool(row and row.discount_stacking)
+
+    @classmethod
+    def po_required_for_store(cls) -> bool:
+        """Whether a PO number is demanded of an order placed on account.
+
+        The same shape as `stacking_enabled` and for the same reason: no row
+        means the default, which is not demanding one, so a fresh install asks
+        for nothing it was never configured to ask for.
+        """
+        row = cls.objects.order_by("pk").first()
+        return bool(row and row.po_required)

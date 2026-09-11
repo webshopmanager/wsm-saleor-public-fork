@@ -66,6 +66,18 @@ class WsmErrorCode(Enum):
     # `saleor/graphql/order/bulk_mutations/order_bulk_create.py:86`), and
     # this is stock's name for that refusal (`saleor/order/error_codes.py:86`).
     BULK_LIMIT = "bulk_limit"
+    # --- dealer terms checkout, `saleor/wsm/graphql/dealer/checkout.py`. Four
+    # refusals on the one PUBLIC mutation this layer has, so each one is a
+    # sentence a storefront can render next to the field it is about rather
+    # than a generic INVALID the shopper cannot act on.
+    TERMS_NOT_ENABLED = "terms_not_enabled"
+    PO_REQUIRED = "po_required"
+    NOT_CHECKOUT_OWNER = "not_checkout_owner"
+    # Hold is enforced for EVERY payment method by
+    # `saleor/wsm/dealer/plugin.py`, which raises a stock CheckoutError on the
+    # card paths. This is the same refusal reaching the same shopper through
+    # the terms mutation, named rather than flattened to INVALID.
+    ACCOUNT_ON_HOLD = "account_on_hold"
 
 
 # `from_enum` names the GraphQL type after the PYTHON class, so the type in the

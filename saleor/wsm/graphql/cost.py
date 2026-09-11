@@ -83,6 +83,9 @@ DEALER_COST = {
         "wsmTierPrices": PER_PAGE,
         # One row or none, and nothing to page through.
         "wsmDealerSettings": PER_OBJECT,
+        # The caller's own account. Four scalars off one indexed read,
+        # asked once per checkout page, and nothing to page through.
+        "wsmMyDealerTerms": PER_OBJECT,
     },
 }
 

@@ -56,6 +56,7 @@ from ..utils import (
     reader,
 )
 from .types import (
+    WsmDealerAccountStatus,
     WsmDealerCustomer,
     WsmDealerGroup,
     WsmDealerSettings,
@@ -288,11 +289,29 @@ class WsmDealerCustomerAssignInput(WsmDocCategory, BaseInputObjectType):
     user = graphene.ID(required=True, description="The shopper's account.")
     group = graphene.ID(required=True, description="The group whose prices they get.")
     tax_exempt = graphene.Boolean(description="Charge this shopper no sales tax.")
+    invoice_payment = graphene.Boolean(
+        description="Let this shopper place orders to be invoiced, not paid for."
+    )
+    account_number = graphene.String(
+        description="This dealer's account number in your own books or ERP."
+    )
+    account_status = WsmDealerAccountStatus(
+        description="Hold stops this shopper placing any order, by any method."
+    )
 
 
 class WsmDealerCustomerUpdateInput(WsmDocCategory, BaseInputObjectType):
     group = graphene.ID(description="Move this shopper to another group.")
     tax_exempt = graphene.Boolean(description="Charge this shopper no sales tax.")
+    invoice_payment = graphene.Boolean(
+        description="Let this shopper place orders to be invoiced, not paid for."
+    )
+    account_number = graphene.String(
+        description="This dealer's account number in your own books or ERP."
+    )
+    account_status = WsmDealerAccountStatus(
+        description="Hold stops this shopper placing any order, by any method."
+    )
 
 
 class WsmDealerCustomerAssign(WsmMutationMeta, TypedIdMixin, DeprecatedModelMutation):
@@ -849,6 +868,16 @@ class WsmDealerSettingsInput(WsmDocCategory, BaseInputObjectType):
             "False: a dealer-priced line takes no further discount. True: "
             "discounts combine with dealer prices."
         ),
+    )
+    # Not required, unlike `discountStacking` above. That field predates this
+    # one and every caller already sends it; making this one required would
+    # turn the existing settings save into a schema error the moment this
+    # branch lands, on a Dashboard build that has not shipped yet.
+    po_required = graphene.Boolean(
+        description=(
+            "True: an order placed on account must name a purchase order "
+            "number. False (the default): the box is offered, not demanded."
+        )
     )
 
 

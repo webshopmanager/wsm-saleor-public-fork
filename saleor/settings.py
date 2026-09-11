@@ -1021,6 +1021,10 @@ BUILTIN_PLUGINS = [
     # product in it is not serviced for. A native plugin hook rather than a
     # fourth monkey patch; see saleor/wsm/compose/plugin.py and CORE-TOUCHES 9.
     "saleor.wsm.compose.plugin.ComposeCompliancePlugin",
+    # WSM-FORK: an account the merchant put on hold places no order, by any
+    # payment method. Same native hook and same reasoning as the line above;
+    # see saleor/wsm/dealer/plugin.py.
+    "saleor.wsm.dealer.plugin.DealerAccountHoldPlugin",
 ]
 
 # Plugin discovery

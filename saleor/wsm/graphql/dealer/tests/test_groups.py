@@ -20,6 +20,7 @@ import pytest
 
 from .....graphql.tests.utils import assert_no_permission, get_graphql_content
 from ....dealer.models import DealerCustomer, DealerGroup, TierPrice
+from ...utils import BULK_LIMIT
 
 pytestmark = pytest.mark.django_db
 
@@ -471,3 +472,21 @@ def test_a_group_read_pays_only_for_the_counts_it_was_asked_for(
         if groups in q["sql"] and "JOIN" in q["sql"]
     ]
     assert not joins, joins
+
+
+def test_bulk_delete_refuses_more_ids_than_the_cap(
+    staff_api_client, permission_manage_discounts, dealer_group
+):
+    """Bounded before a single id is decoded, and nothing is deleted."""
+    ids = [group_gid(dealer_group)] * (BULK_LIMIT + 1)
+
+    response = staff_api_client.post_graphql(
+        BULK_DELETE, {"ids": ids}, permissions=[permission_manage_discounts]
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmDealerGroupBulkDelete"]
+    assert [(e["field"], e["code"]) for e in payload["errors"]] == [
+        ("ids", "BULK_LIMIT")
+    ]
+    assert payload["count"] == 0
+    assert DealerGroup.objects.filter(pk=dealer_group.pk).exists()

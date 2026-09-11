@@ -21,6 +21,7 @@ from saleor.wsm.compose.models import (
     OptionSet,
     OptionValue,
 )
+from saleor.wsm.graphql.utils import BULK_LIMIT
 
 DETAIL = """
     query WsmOptionSet($id: ID!) {
@@ -399,9 +400,7 @@ def test_update_refuses_dealer_prices_from_a_catalog_manager(
                         "id": value_id(black),
                         "name": "Black",
                         "priceDelta": "10.00",
-                        "tierDeltas": [
-                            {"tierGroup": "dealer-1", "priceDelta": "5.00"}
-                        ],
+                        "tierDeltas": [{"tierGroup": "dealer-1", "priceDelta": "5.00"}],
                     }
                 ]
             },
@@ -459,9 +458,7 @@ def test_create_refuses_dealer_prices_from_a_catalog_manager(
                     {
                         "name": "Black",
                         "priceDelta": "10.00",
-                        "tierDeltas": [
-                            {"tierGroup": "dealer-1", "priceDelta": "5.00"}
-                        ],
+                        "tierDeltas": [{"tierGroup": "dealer-1", "priceDelta": "5.00"}],
                     }
                 ],
             }
@@ -490,9 +487,7 @@ def test_update_stores_a_dealer_price_for_a_caller_who_has_the_permission(
                         "id": value_id(black),
                         "name": "Black",
                         "priceDelta": "10.00",
-                        "tierDeltas": [
-                            {"tierGroup": "dealer-1", "priceDelta": "5.00"}
-                        ],
+                        "tierDeltas": [{"tierGroup": "dealer-1", "priceDelta": "5.00"}],
                     }
                 ]
             },
@@ -676,3 +671,18 @@ def test_bulk_delete_removes_only_the_rows_it_was_given(
     assert payload["errors"] == []
     assert payload["count"] == 1
     assert list(OptionSet.objects.values_list("pk", flat=True)) == [spared.pk]
+
+
+@pytest.mark.django_db
+def test_bulk_delete_refuses_more_ids_than_the_cap(merchant_api_client, option_set):
+    """Bounded before a single id is decoded, and nothing is deleted."""
+    ids = [set_id(option_set)] * (BULK_LIMIT + 1)
+
+    response = merchant_api_client.post_graphql(BULK_DELETE, {"ids": ids})
+
+    payload = get_graphql_content(response)["data"]["wsmOptionSetBulkDelete"]
+    assert [(e["field"], e["code"]) for e in payload["errors"]] == [
+        ("ids", "BULK_LIMIT")
+    ]
+    assert payload["count"] == 0
+    assert OptionSet.objects.filter(pk=option_set.pk).exists()

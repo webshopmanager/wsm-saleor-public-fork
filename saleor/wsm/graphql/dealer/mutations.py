@@ -46,7 +46,14 @@ from ...money import to_money
 from ..errors import WsmError
 from ..scalars import WsmDecimal
 from ..types import DOC_CATEGORY_WSM
-from ..utils import TypedIdMixin, error, pk_or_none
+from ..utils import (
+    BULK_LIMIT,
+    BulkLimitMixin,
+    TypedIdMixin,
+    check_bulk_limit,
+    error,
+    pk_or_none,
+)
 from .types import (
     WsmDealerCustomer,
     WsmDealerGroup,
@@ -63,28 +70,6 @@ from .types import (
 # point the existing `create_wsm_permissions` receiver already creates the
 # `wsm_*` permission rows those codenames would bind to.
 DEALER_PERMISSIONS = (DiscountPermissions.MANAGE_DISCOUNTS,)
-
-# One call is one paste. Stock caps its own bulk create the same way
-# (`MAX_ORDERS = 50`, `saleor/graphql/order/bulk_mutations/order_bulk_create.py:86`)
-# and 50 is the shape of an order import, not of a price list: live data is 304
-# tier rows on one group (`dealer/admin.py:32`), so the cap is set above the
-# paste this mutation exists for and below the payload that would hold the
-# request open building instances nobody can read back.
-MAX_TIER_PRICES = 500
-
-
-def _check_bulk_limit(rows) -> None:
-    """One paste is one call, and the refusal is the same on every bulk path."""
-    if len(rows) > MAX_TIER_PRICES:
-        raise ValidationError(
-            {
-                "tierPrices": error(
-                    f"{len(rows)} rows in one call, and the limit is "
-                    f"{MAX_TIER_PRICES}. Split the paste.",
-                    "bulk_limit",
-                )
-            }
-        )
 
 
 def _clean_amount(amount, field: str) -> Decimal:
@@ -294,7 +279,9 @@ class WsmDealerGroupDelete(GroupDeleteMixin, ModelDeleteMutation):
         doc_category = DOC_CATEGORY_WSM
 
 
-class WsmDealerGroupBulkDelete(GroupDeleteMixin, ModelBulkDeleteMutation):
+class WsmDealerGroupBulkDelete(
+    GroupDeleteMixin, BulkLimitMixin, ModelBulkDeleteMutation
+):
     class Arguments:
         ids = NonNullList(
             graphene.ID, required=True, description="IDs of the groups to delete."
@@ -532,7 +519,7 @@ class WsmTierPriceDelete(ModelDeleteMutation):
         doc_category = DOC_CATEGORY_WSM
 
 
-class WsmTierPriceBulkDelete(ModelBulkDeleteMutation):
+class WsmTierPriceBulkDelete(BulkLimitMixin, ModelBulkDeleteMutation):
     class Arguments:
         ids = NonNullList(
             graphene.ID, required=True, description="IDs of the tier prices."
@@ -621,7 +608,7 @@ class WsmTierPriceBulkCreate(BaseMutation):
         """
         from ....product.models import ProductVariant
 
-        _check_bulk_limit(rows)
+        check_bulk_limit(rows, "tierPrices")
 
         database = get_database_connection_name(info.context)
         errors: dict = {}
@@ -790,7 +777,7 @@ class WsmTierPriceBulkUpdate(BaseMutation):
             # One statement for the whole grid. `batch_size` equals the cap, so
             # a legal call is one round trip; raising the cap must not widen it.
             models.TierPrice.objects.bulk_update(
-                rows, ["amount", "min_quantity"], batch_size=MAX_TIER_PRICES
+                rows, ["amount", "min_quantity"], batch_size=BULK_LIMIT
             )
         return cls(errors=[], count=len(rows), tier_prices=rows)
 
@@ -803,7 +790,7 @@ class WsmTierPriceBulkUpdate(BaseMutation):
         string to a grid CELL: a refusal with no index is a red banner over a
         300-row grid with nothing highlighted in it.
         """
-        _check_bulk_limit(rows)
+        check_bulk_limit(rows, "tierPrices")
 
         database = get_database_connection_name(info.context)
         errors: dict = {}

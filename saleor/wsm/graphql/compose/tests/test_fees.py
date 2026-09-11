@@ -118,7 +118,7 @@ def test_the_detail_query_returns_the_charge(merchant_api_client, fee):
     assert data["label"] == "Freight crating"
     assert data["sku"] == "CRATE"
     assert data["basis"] == "FIXED"
-    assert data["amount"] == 149.0
+    assert data["amount"] == "149.00", "exact, and not a float"
     assert data["applyTo"] == "PER_LINE"
     assert data["currencyCode"] == "USD"
     assert data["variant"] is None, "the carrier variant is written on first buy"
@@ -175,7 +175,7 @@ def test_create_stores_the_charge(merchant_api_client, product):
 
     payload = get_graphql_content(response)["data"]["wsmFeeCreate"]
     assert payload["errors"] == []
-    assert payload["fee"]["amount"] == 149.0
+    assert payload["fee"]["amount"] == "149", "the value as typed, exactly"
     stored = Fee.objects.get()
     assert stored.apply_to == pricing.PER_LINE
     assert stored.amount == Decimal("149.00")

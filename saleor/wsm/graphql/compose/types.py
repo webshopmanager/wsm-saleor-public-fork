@@ -11,13 +11,13 @@ import graphene
 
 from ....graphql.core.connection import CountableConnection
 from ....graphql.core.context import ChannelContext
-from ....graphql.core.scalars import Decimal, PositiveDecimal
 from ....graphql.core.types import ModelObjectType, NonNullList
 from ....graphql.product.dataloaders import ProductByIdLoader
 from ....graphql.product.types import Product, ProductVariant
 from ....graphql.shipping.types import ShippingZone
 from ...compose import models
 from ..dealer.types import WsmDealerGroup
+from ..scalars import WsmDecimal
 from ..types import DOC_CATEGORY_WSM
 from . import dataloaders as loaders
 from .enums import WsmFeeBasisEnum, WsmFeeScopeEnum, WsmOptionSetPromptTypeEnum
@@ -55,7 +55,7 @@ class WsmDealerTierOptionPrice(ModelObjectType[models.DealerTierOptionPrice]):
             "price without joining wsm_dealer."
         ),
     )
-    price_delta = Decimal(
+    price_delta = WsmDecimal(
         required=True,
         description=(
             "Signed, and never above the retail priceDelta floored at zero. A "
@@ -101,7 +101,7 @@ class WsmOptionValue(ModelObjectType[models.OptionValue]):
             "string allowed."
         ),
     )
-    price_delta = Decimal(
+    price_delta = WsmDecimal(
         required=True,
         description=(
             "Signed. Decimal, not PositiveDecimal: a credit is a negative delta."
@@ -192,7 +192,7 @@ class WsmFee(ModelObjectType[models.Fee]):
     label = graphene.String(required=True, description="What the shopper sees.")
     sku = graphene.String(required=True, description="The merchant's own code.")
     basis = WsmFeeBasisEnum(required=True, description="Flat amount or percentage.")
-    amount = PositiveDecimal(
+    amount = WsmDecimal(
         required=True,
         description=(
             "Money when basis is FIXED, a percentage when it is PERCENT (8.25 "

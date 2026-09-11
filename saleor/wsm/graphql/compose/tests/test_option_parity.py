@@ -7,11 +7,9 @@ and a field that is SERVED, and the Dashboard reads these over the wire.
 """
 
 import graphene
-import pytest
 
 from saleor.graphql.tests.utils import get_graphql_content
-from saleor.wsm.compose import pricing
-from saleor.wsm.compose.models import INVALID, OptionSet, OptionValue
+from saleor.wsm.compose.models import INVALID, OptionSet
 
 CREATE = """
     mutation WsmOptionSetCreate($input: WsmOptionSetCreateInput!) {
@@ -89,14 +87,14 @@ def test_create_round_trips_all_three_columns(merchant_api_client, product):
             "name": "No tuner",
             "helpText": "",
             "isDefault": False,
-            "priceDelta": 0.0,
+            "priceDelta": "0.00",
         },
         {
             "id": data["optionSet"]["values"][1]["id"],
             "name": "Stage 2 tuner",
             "helpText": "Fits 2019 and newer only",
             "isDefault": True,
-            "priceDelta": 250.0,
+            "priceDelta": "250.00",
         },
     ]
     stored = OptionSet.objects.get(name="Tuner")

@@ -1009,7 +1009,7 @@ def test_a_configured_add_still_serves_the_buyer_the_checkout_belongs_to(
     )
 
     assert response.status_code == 200, response.content
-\n
+
 
 # --- (e) option-set parity wave A: help text, the default, the deselect prompt
 
@@ -1030,7 +1030,10 @@ def tuner(stage_2_kit):
         deselect_prompt="Skip the tuner",
     )
     plain = OptionValue.objects.create(
-        option_set=option_set, name="No tuner", price_delta=Decimal("0.00"), sort_order=0
+        option_set=option_set,
+        name="No tuner",
+        price_delta=Decimal("0.00"),
+        sort_order=0,
     )
     default = OptionValue.objects.create(
         option_set=option_set,
@@ -1078,7 +1081,7 @@ def test_an_add_that_never_mentions_the_tuner_is_charged_the_default(
 def test_a_shopper_who_takes_the_deselect_option_pays_the_base_price(
     client, checkout, stage_2_kit, tuner
 ):
-    """"Skip the tuner" posts the set with no values: said no, not said nothing."""
+    """Skip the tuner posts the set with no values: said no, not said nothing."""
     option_set, plain, default = tuner
 
     response = post_line(

@@ -244,8 +244,10 @@ def default_value(option_set) -> Value | None:
 
 
 def apply_defaults(sets_by_id, picked) -> None:
-    """Fill the merchant's pre-picked answer in for every OPTIONAL choice-one
-    question the caller said nothing about. Mutates `picked`.
+    """Quote the merchant's pre-picked answer where the caller said nothing.
+
+    Every OPTIONAL choice-one question with a default and no selection. Mutates
+    `picked`.
 
     OMITTED is the trigger, never an empty selection: a shopper who takes the
     deselect option sends the set with no values, which is the difference

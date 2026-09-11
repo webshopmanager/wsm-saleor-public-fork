@@ -4,25 +4,34 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('wsm_compose', '0001_initial'),
+        ("wsm_compose", "0001_initial"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='optionset',
-            name='deselect_prompt',
-            field=models.CharField(blank=True, help_text="What the shopper sees to choose nothing, on a question they are allowed to skip. Blank shows the storefront's own wording. Ignored while the question is required, because then there is nothing to choose.", max_length=120),
+            model_name="optionset",
+            name="deselect_prompt",
+            field=models.CharField(
+                blank=True,
+                help_text="What the shopper sees to choose nothing, on a question they are allowed to skip. Blank shows the storefront's own wording. Ignored while the question is required, because then there is nothing to choose.",
+                max_length=120,
+            ),
         ),
         migrations.AddField(
-            model_name='optionvalue',
-            name='help_text',
-            field=models.TextField(blank=True, help_text='One sentence under this choice, in the merchant\'s own words: "Fits 2019 and newer only". Shown to the shopper, never used to price anything.'),
+            model_name="optionvalue",
+            name="help_text",
+            field=models.TextField(
+                blank=True,
+                help_text='One sentence under this choice, in the merchant\'s own words: "Fits 2019 and newer only". Shown to the shopper, never used to price anything.',
+            ),
         ),
         migrations.AddField(
-            model_name='optionvalue',
-            name='is_default',
-            field=models.BooleanField(default=False, help_text='Pre-picked for the shopper, and PRICED: a default that costs money is in the quote before anyone touches the question. At most one per question.'),
+            model_name="optionvalue",
+            name="is_default",
+            field=models.BooleanField(
+                default=False,
+                help_text="Pre-picked for the shopper, and PRICED: a default that costs money is in the quote before anyone touches the question. At most one per question.",
+            ),
         ),
     ]

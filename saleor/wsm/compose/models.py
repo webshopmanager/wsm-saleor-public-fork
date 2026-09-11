@@ -493,7 +493,7 @@ class OptionValue(models.Model):
         blank=True,
         help_text=(
             "One sentence under this choice, in the merchant's own words: "
-            "\"Fits 2019 and newer only\". Shown to the shopper, never used to "
+            '"Fits 2019 and newer only". Shown to the shopper, never used to '
             "price anything."
         ),
     )

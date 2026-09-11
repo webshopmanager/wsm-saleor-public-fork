@@ -71,7 +71,7 @@ def test_an_omitted_optional_set_with_no_default_quotes_nothing():
 
 
 def test_a_shopper_who_declines_an_optional_set_is_not_charged_its_default():
-    """"Said no" and "said nothing" are different answers.
+    """Saying no and saying nothing are different answers.
 
     An empty selection is the deselect prompt being clicked. Without this the
     priced default could never be refused, because saying nothing quotes it.
@@ -103,8 +103,10 @@ def test_a_required_set_with_a_default_still_refuses_an_unanswered_add():
 
 
 def test_a_pick_any_number_set_never_pre_ticks_a_box():
-    """No single answer to pre-pick, so filling one in would charge for a box
-    nobody ticked."""
+    """No single answer to pre-pick.
+
+    Filling one in would charge for a box nobody ticked.
+    """
     priced = price_configured(
         BASE, [_set(PLAIN, PRICED_DEFAULT, prompt=pricing.CHOICE_MANY)], []
     )
@@ -114,7 +116,9 @@ def test_a_pick_any_number_set_never_pre_ticks_a_box():
 
 def test_two_defaults_price_to_the_first_in_catalog_order_and_never_raise():
     """Rows written past both merchant screens must not break a buy button."""
-    second = Value(id=13, name="Stage 3", price_delta=40_000, is_default=True, sort_order=2)
+    second = Value(
+        id=13, name="Stage 3", price_delta=40_000, is_default=True, sort_order=2
+    )
 
     priced = price_configured(BASE, [_set(PLAIN, PRICED_DEFAULT, second)], [])
 
@@ -134,7 +138,9 @@ def test_a_required_choice_one_still_takes_exactly_one():
 def test_no_choice_one_set_ever_takes_two_values():
     with pytest.raises(pricing.ComposeRefusal):
         price_configured(
-            BASE, [_set(PLAIN, PRICED_DEFAULT)], [Selection(set_id=1, value_ids=(11, 12))]
+            BASE,
+            [_set(PLAIN, PRICED_DEFAULT)],
+            [Selection(set_id=1, value_ids=(11, 12))],
         )
 
 

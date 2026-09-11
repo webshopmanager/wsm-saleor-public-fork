@@ -429,8 +429,11 @@ def _is_tier_row(row, price_groups):
     value: reading prose as a tier is what dropped 221 of `udd`'s 244 choices on
     2026-09-09, and the fleet sweep counts 40,079 such sentences on 83 tenants.
     """
-    desc = (row.get("desc") or "").strip()
-    return bool(desc) and desc != RETAIL_DESC and desc in price_groups
+    desc = row.get("desc") or ""
+    # Matched RAW against the group names, never stripped: 5.0 group names carry
+    # their own whitespace ("Dealer Tier 1 West Coast Distributor ") and a
+    # trimmed compare turns a real tier row into a value.
+    return bool(desc.strip()) and desc.strip() != RETAIL_DESC and desc in price_groups
 
 
 def _import_values(option_set, rows, price_groups, image_base, report):
@@ -441,7 +444,7 @@ def _import_values(option_set, rows, price_groups, image_base, report):
         if not _is_tier_row(row, price_groups):
             continue
         tiers[(row["name"], row.get("sku") or "")].append(
-            ((row.get("desc") or "").strip(), row["price"])
+            (row.get("desc") or "", row["price"])
         )
 
     seen = set()

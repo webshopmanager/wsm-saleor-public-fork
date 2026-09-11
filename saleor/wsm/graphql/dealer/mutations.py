@@ -58,8 +58,8 @@ from .types import (
 # the Dashboard's own permission-group screens. Ceiling: anyone who can edit a
 # voucher can edit a dealer price. Upgrade path: append a `WsmPermissions` class
 # to `PERMISSIONS_ENUMS` from `ready()` before the schema is built, at which
-# point the existing `create_wsm_permissions` receiver and the
-# `wsm_merchant_role` command already carry the rows and the group.
+# point the existing `create_wsm_permissions` receiver already creates the
+# `wsm_*` permission rows those codenames would bind to.
 DEALER_PERMISSIONS = (DiscountPermissions.MANAGE_DISCOUNTS,)
 
 # Two places, because that is what a merchant means by a price. The column

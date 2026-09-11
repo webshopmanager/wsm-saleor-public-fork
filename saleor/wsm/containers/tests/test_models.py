@@ -204,26 +204,6 @@ def test_deleting_a_series_leaves_other_metadata_alone(collection, product_list)
     assert collection.metadata == {"someone.elses": "key"}
 
 
-def test_the_merchant_screens_register(db):
-    """The screens are on the ONE AdminSite the compose unit mounts at /admin/.
-
-    Asserted against the real site rather than a probe now that both units sit
-    on one branch: registering onto a throwaway AdminSite would still pass if
-    the import at the bottom of admin.py were deleted.
-    """
-    from saleor.wsm.compose.admin import site
-
-    assert {SeriesConfig, KitConfig} <= set(site._registry)
-    # Autocomplete, not raw id: the picker admins in saleor/wsm/admin_pickers.py
-    # give the widget a Collection and a ProductVariant list to resolve against,
-    # which is what a bare id box never had.
-    assert site._registry[SeriesConfig].autocomplete_fields == ("collection",)
-    kit_admin = site._registry[KitConfig]
-    assert kit_admin.autocomplete_fields == ("collection",)
-    assert kit_admin.inlines[0].model is KitMember
-    assert kit_admin.inlines[0].autocomplete_fields == ("variant",)
-
-
 def test_queryset_update_restamps_the_collection(collection, product_list):
     """`update()` never calls `save()`, so the stamp has to live one layer lower.
 

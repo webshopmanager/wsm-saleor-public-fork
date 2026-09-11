@@ -3,6 +3,7 @@
 
 import pytest
 from django.urls import resolve
+from django.urls.exceptions import Resolver404
 
 from .. import schema as wsm_schema
 
@@ -40,8 +41,17 @@ def test_core_routes_still_resolve_through_the_included_saleor_urls(path, name):
     assert resolve(path).url_name == name
 
 
-def test_the_merchant_admin_is_still_mounted():
-    assert resolve("/admin/login/").url_name == "login"
+@pytest.mark.parametrize("path", ["/admin/", "/admin/login/"])
+def test_the_django_admin_is_gone(path):
+    """A 200 on a deleted admin is the false green this whole unit is about.
+
+    The merchant UI is native Saleor Dashboard screens over
+    `saleor/wsm/graphql` (ruling Dana 2026-09-10), so the second login page on
+    the API host must not resolve at all. `saleor.urls` is included below us
+    and never carried an admin, so a pass here is the whole map answering.
+    """
+    with pytest.raises(Resolver404):
+        resolve(path)
 
 
 def test_graphql_is_served_by_the_composed_schema_not_stock():

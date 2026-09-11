@@ -29,10 +29,11 @@ one resolver swap Bill's secondary-categories patch performs from
 FKs into core tables; core migrations are untouched, and the one migration
 section 7 brings in is state-only.
 
-Sections 1 to 4, 6, 8 to 10, 12 and 13 are this branch's own work and touch
-ONE core file, `saleor/settings.py`. Section 5 is gone and its line with it:
-section 13 turned the fork's urlconf into the root one, which took
-`saleor/urls.py` back to upstream byte-for-byte. Section 7 is the six WSM
+Sections 1 to 4, 6, 8 to 10 and 13 are this branch's own work and touch ONE
+core file, `saleor/settings.py`. Sections 5 and 12 are withdrawn and their
+lines are gone: section 13 turned the fork's urlconf into the root one, which
+took `saleor/urls.py` back to upstream byte-for-byte, and the Django admin
+deletion took the three `MIDDLEWARE` entries with it. Section 7 is the six WSM
 patches that already existed before the fork, merged in from
 `wsm/bakeoff-rebase-probe`; they are the reason the guard test's allow-list is
 longer than one entry.
@@ -132,47 +133,74 @@ Compose.
 
 ---
 
-## 2. `saleor/settings.py`, +33 lines, 13 of them code (U2, 2026-09-08)
+## 2. `saleor/settings.py`, +10 lines, 2 of them code (U2, 2026-09-08; cut back 2026-09-10)
 
-The merchant UI is the Django admin (design section 6), and the admin will not
-start on a Saleor that amputated `django.contrib.auth`. Every line here exists
-to satisfy one of its dependencies. Grouped, with what breaks without it:
+**The Django admin this section existed for is gone.** The merchant UI is now
+native screens in the Saleor Dashboard over `saleor/wsm/graphql`, ruling Dana
+2026-09-10. Deleted with it: the 13 `ModelAdmin` registrations, the three
+`admin.py` files, `saleor/wsm/admin_pickers.py`, `ComposeAdminSite` and its
+mixins, the throttled admin login form, the `^admin/` mount in
+`saleor/wsm/urls.py`, `saleor/wsm/middleware.py` (section 12, now empty) and
+the admin's own form layer, `saleor/wsm/compose/forms.py`.
 
-| Lines | What | Without it |
+Four `INSTALLED_APPS` entries went with them, restoring this list to upstream's
+for those four names:
+
+| Removed | Why it was there |
+|---|---|
+| `django.contrib.admin` | the admin itself |
+| `django.contrib.sessions`, `django.contrib.messages` | the two apps the admin requires |
+| `django.forms` | Saleor sets `FORM_RENDERER = TemplatesSetting`, so admin widget templates resolved through the loaders |
+
+Removing `django.forms` is what proved the form layer had no consumer left: the
+one test that still built an inline formset raised
+`TemplateDoesNotExist: django/forms/errors/list/default.html` on
+`non_form_errors()` and nothing else moved. The rules it was asserting are
+model rules (`configured_floor_cents`, `duplicate_fragment_error` in
+`saleor/wsm/compose/models.py`) and the GraphQL option-set mutation calls the
+same two, across the whole submitted list, with its own tests. So the module
+went rather than the `INSTALLED_APPS` entry coming back. `currency_for`,
+`money` and `CENT` lived there too and had exactly one caller each, all of them
+in the deleted `admin.py` files; a later reader who wants a currency helper
+should put it in `saleor/wsm/money.py`, which already owns the rounding rule.
+
+`django.contrib.sites`, `django.contrib.staticfiles` and `django.contrib.postgres`
+are NOT fork additions: upstream `a1ab3a23a3f5` installs all three and stock
+Saleor imports them (`saleor/core/notification/utils.py`,
+`saleor/checkout/complete_checkout.py`, `STATICFILES_FINDERS`). They stay.
+`TEMPLATES` is byte-identical to upstream and always was; the old version of
+this table claimed three added context processors that are not in the file.
+
+**What is still here, and its consumer.**
+
+| Lines | What | Read by |
 |---|---|---|
-| `INSTALLED_APPS`: `saleor.wsm.compose.apps.WsmAuthConfig` | `django.contrib.auth`, relabelled `django_auth` | `admin.E403`: the admin refuses to load |
-| `INSTALLED_APPS`: `django.contrib.sessions`, `django.contrib.messages`, `django.contrib.admin` | the admin itself and the two apps it requires | no admin |
-| `INSTALLED_APPS`: `django.forms` | Saleor sets `FORM_RENDERER = TemplatesSetting`, which resolves widget templates through the loaders | `TemplateDoesNotExist` on every admin form |
-| `MIDDLEWARE`: session, authentication, message, each a `/admin/`-scoped subclass since section 12 | admin checks `admin.E40x` | admin refuses to load |
-| `TEMPLATES` context processors: `auth`, `messages`, `request` | same checks, plus `admin.W411` for the sidebar | admin refuses to load |
-| `AUTHENTICATION_BACKENDS`: `saleor.wsm.compose.auth.AdminPasswordBackend` | email + password login, and permissions read from Saleor's renamed `permission_permission` | no way to log in as a merchant |
-| `MIGRATION_MODULES = {"django_auth": "saleor.wsm.compose.django_auth_migrations"}` | `saleor.auth` already owns the `auth` label and holds the 13 historical auth migrations | duplicate migration history, `migrate` fails |
+| `INSTALLED_APPS`: `saleor.wsm.compose.apps.WsmAuthConfig` | `django.contrib.auth`, relabelled `django_auth` | the two state-only migrations below, and `Permission` rows the backend answers from. Stays BELOW `saleor.account` so auth's `createsuperuser` cannot shadow Saleor's (section 10) |
+| `AUTHENTICATION_BACKENDS`: `saleor.wsm.compose.auth.AdminPasswordBackend` | password sign-in, and `wsm_*` permissions out of Saleor's renamed `permission_permission` | every `authenticate()` and every `has_perm()` in the process |
+| `MIGRATION_MODULES = {"django_auth": "saleor.wsm.compose.django_auth_migrations"}` | `saleor.auth` already owns the `auth` label | `migrate`; without it, duplicate migration history |
 
 Why a relabelled `django.contrib.auth` rather than the stock one: `saleor.auth`
 is a models-free shim occupying the `auth` label whose `0013` deletes Group,
 Permission and User from migration state. Two apps cannot share a label, so the
 one we add takes `django_auth`. Its `AppConfig.ready()` is a no-op so that
 Django's `create_permissions` receiver is never connected: `wsm_compose`
-permission rows are created by our own `post_migrate` receiver, into
-`saleor.permission.models.Permission`.
+permission rows are created by our own `post_migrate` receiver
+(`create_wsm_permissions`), into `saleor.permission.models.Permission`.
 
 `MIGRATION_MODULES` points `django_auth` at a FORK-OWNED migration package,
-`saleor.wsm.compose.django_auth_migrations`, not at `None`. It holds two
-migrations, `0001_initial` and `0002_auth_models_state_only`, and both are
-state-only: they create no table and touch no row, they exist so that
-`makemigrations --check` sees a history for an app that has three models in the
-registry and none of its own tables. `None` was the shape U2 first wrote and the
-shape this table used to claim; the code has said otherwise since
-`0002_auth_models_state_only` landed on the merge branch.
+`saleor.wsm.compose.django_auth_migrations`. It holds two migrations,
+`0001_initial` and `0002_auth_models_state_only`, and both are state-only: they
+create no table and touch no row, they exist so that `makemigrations --check`
+sees a history for an app that has three models in the registry and none of its
+own tables.
 
 Read the `AUTHENTICATION_BACKENDS` row as the app-wide change it is. A backend in
-that list is consulted on EVERY `authenticate()` call in the process, not only on
-/admin/, so this one password backend is part of the shop's whole sign-in path.
-Since review wave A it therefore honours the merchant's own
-`SiteSettings.password_login_mode`: `DISABLED` refuses everyone and
-`CUSTOMERS_ONLY` refuses staff, which is what the same switch means to Saleor's
-own backends (`saleor/wsm/compose/auth.py`, and its tests in
-`saleor/wsm/compose/tests/test_auth.py`).
+that list is consulted on EVERY `authenticate()` call in the process, so this one
+password backend is part of the shop's whole sign-in path. Since review wave A it
+therefore honours the merchant's own `SiteSettings.password_login_mode`:
+`DISABLED` refuses everyone and `CUSTOMERS_ONLY` refuses staff, which is what the
+same switch means to Saleor's own backends (`saleor/wsm/compose/auth.py`, and its
+tests in `saleor/wsm/compose/tests/test_auth.py`).
 
 App-wide covers every `has_perm()` too, not only every `authenticate()`. Django's
 `_user_has_perm` walks `AUTHENTICATION_BACKENDS` until one says yes, and this
@@ -192,6 +220,16 @@ did not change, only what they cost. Held by
 `test_a_wsm_permission_is_still_read_from_the_grant` in
 `saleor/wsm/compose/tests/test_auth.py`, the first of which is red without the
 short-circuit and the second red if it is widened.
+
+**Open, and deliberately not settled here.** Nothing calls
+`AdminPasswordBackend.authenticate()` now that the admin login view is gone, and
+the only reader of the `wsm_*` grant rows was the admin's own permission checks.
+Whether that whole stack (this backend, `create_wsm_permissions`,
+`django.contrib.auth` and its two state-only migrations) survives depends on
+decision D1 in `ARCHITECTURE-dashboard-merchant-screens.md`: per-model `wsm_*`
+permissions on the GraphQL layer keep it, reusing `MANAGE_PRODUCTS` and
+`MANAGE_DISCOUNTS` deletes it. It was left in place because deleting it means
+deleting migrations, which this branch does not do on a live schema.
 
 Removal cost: delete the block. Nothing outside `saleor/wsm/` imports any of it.
 
@@ -286,8 +324,10 @@ at that point; MP2 arrived after it, in U7.
   `add_variants_to_checkout`, the same function `checkoutLinesAdd` calls, with
   `price_override` computed in this process. A kit is never a Saleor object
   beyond the Collection.
-- **No `django.contrib.admin` registration in settings.** `saleor/wsm/containers/admin.py`
-  registers onto the AdminSite that U2 mounts; on a containers-only branch there
+- **No `django.contrib.admin` registration in settings.** (Historical: all
+  three `admin.py` files were deleted on 2026-09-10, section 2.)
+  `saleor/wsm/containers/admin.py`
+  registered onto the AdminSite that U2 mounted; on a containers-only branch there
   is nothing to register onto and the screens are exercised by calling
   `admin.register(AdminSite())` in a test. When U2 and U4 sit on one branch the
   screens appear with no further edit. The `post_migrate` permission receiver in
@@ -505,57 +545,38 @@ together with the whole of `test_transaction_initialize.py`,
 and `saleor/tests/e2e/gift_cards/`: 271 passed, so the gate's own proofs still
 hold.
 
-## 12. `saleor/settings.py`, three `MIDDLEWARE` entries repointed, +5 comment lines (fork regression sweep, 2026-09-09)
+## 12. `saleor/settings.py`, `MIDDLEWARE` back to upstream's three (fork regression sweep 2026-09-09; REMOVED 2026-09-10)
 
-`django.contrib.sessions.middleware.SessionMiddleware`,
-`django.contrib.auth.middleware.AuthenticationMiddleware` and
-`django.contrib.messages.middleware.MessageMiddleware` are replaced by
-`AdminSessionMiddleware`, `AdminAuthenticationMiddleware` and
-`AdminMessageMiddleware` from the new fork-owned file `saleor/wsm/middleware.py`.
-Each is a subclass of the Django one that runs its hooks only when
-`request.path` starts with `/admin/`, which is where `saleor/wsm/urls.py` mounts
-the merchant admin. No entry was added or removed, and inside `/admin/` the
-behaviour is Django's, unchanged.
+**Nothing left. This section is now a record of a touch that no longer exists.**
 
-**The regression it fixes.** `saleor/core/tests/test_dataloaders.py` passed 2/2
-on upstream `a1ab3a23a3f5` and failed 2/2 on `wsm/bakeoff`. Both assert the
-plugin requestor contract: `test_plugins_manager_loader_loads_requestor_in_plugin`
-wants the authenticated `User`, and got
-`SimpleLazyObject(AnonymousUser)`;
-`test_plugins_manager_loader_requestor_in_plugin_when_no_app_and_user_in_req_is_none`
-wants nothing at all, and got the same truthy lazy object.
-`AuthenticationMiddleware.process_request` assigns `request.user`
-unconditionally, so with the admin block listed unscoped it overwrote whatever
-was there on EVERY request in the process. `plugin_manager_promise`
-(`saleor/graphql/plugins/dataloaders.py:51`) reads exactly that attribute:
-`requestor = app or user`. So the fork was handing every plugin in the manager
-an `AnonymousUser` where upstream hands a `User` or `None`, on the live GraphQL
-API and not only under pytest. Evaluating that lazy object for its truthiness
-also loads it, which is a `django_session` read charged to a request that never
-asked for a session.
+The fork put `SessionMiddleware`, `AuthenticationMiddleware` and
+`MessageMiddleware` in `MIDDLEWARE` because the Django admin hard-requires them.
+Listed unscoped they ran on EVERY request the process serves, and
+`AuthenticationMiddleware` overwrote `request.user` with a lazy `AnonymousUser`,
+which broke upstream's plugin-requestor contract on the live GraphQL API
+(`saleor/core/tests/test_dataloaders.py`, 2/2 red on the fork, 2/2 green on
+upstream `a1ab3a23a3f5`). The 09-09 fix repointed the three at
+`/admin/`-scoped subclasses in `saleor/wsm/middleware.py`.
 
-**Why the fix is here and not in the requestor resolution.** The broken value is
-"which requests these three middlewares run on", and `MIDDLEWARE` is the list
-that owns it. Teaching `plugin_manager_promise` to read an anonymous lazy user
-as `None` would be a core edit inside upstream's own contract, and it would fix
-one reader while leaving `request.user` wrong for every other one; the fork
-would keep paying the session cost on the API path either way. Scoping the
-three restores upstream behaviour for the whole process outside `/admin/`, which
-is the class, not the instance.
+The admin is gone (section 2, ruling Dana 2026-09-10), so the three entries and
+`saleor/wsm/middleware.py` are gone with it. `MIDDLEWARE` is byte-identical to
+upstream's again:
 
-**Why subclasses rather than wrapper functions.** `django.contrib.admin`'s own
-system checks (`admin.E408`, `E409`, `E410`) look for a `MIDDLEWARE` entry that
-is a SUBCLASS of each of these three, so a subclass keeps the admin's
-configuration valid where a wrapper function would report it broken;
-`manage.py check` returns "no issues" on this branch. A subclass also keeps
-`MiddlewareMixin`'s sync and async capability, which a plain function drops.
+```python
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "saleor.core.middleware.jwt_refresh_token_middleware",
+]
+```
 
-**Verified by** the two upstream tests above, red then green on a fresh test DB,
-run together with `saleor/wsm/compose/tests/test_admin.py` and
-`test_auth.py`, which drive the merchant admin over real HTTP
-(`client.force_login`, then the index, the changelists and a change-form POST)
-and would go red if the scope were tighter than the admin needs: 36 passed. Plus
-`manage.py check`, for the `admin.E40x` family the scoping could have tripped.
+This is the prize the deletion bought: the section existed only because the
+admin needed three middlewares the API did not, and deleting the admin deleted
+the reason rather than the symptom.
+
+**Verified by** the same two upstream tests, which pass on a `MIDDLEWARE` with
+no fork entry in it at all, and by `manage.py check`, which no longer has an
+`admin.E40x` family to trip.
 
 # Monkey patches
 

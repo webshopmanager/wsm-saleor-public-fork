@@ -32,9 +32,11 @@ UPSTREAM = "a1ab3a2"
 # set is the fork's deviation budget, so growing it is a decision someone has to
 # make in a diff, never something a patch can do by arriving.
 ALLOWED_CORE_FILES = {
-    # Fork app registration (U1-U4).
+    # Fork app registration (U1-U4) and the ROOT_URLCONF seam that mounts the
+    # composed GraphQL schema. `saleor/urls.py` used to be here; the fork's
+    # urlconf includes it now instead of the other way round, so it is back to
+    # upstream byte-for-byte and this budget is one file shorter.
     "saleor/settings.py",
-    "saleor/urls.py",
     # WSM6-1978, legacy WSM5 password hashers, upgraded on first sign-in.
     "saleor/core/hashers.py",
     "saleor/core/tests/test_hashers.py",

@@ -185,6 +185,14 @@ class WsmDealerSettings(WsmDocCategory, ModelObjectType[models.DealerSettings]):
             "no voucher, promotion or order-level discount on top."
         ),
     )
+    catalogue_gated = graphene.Boolean(
+        required=True,
+        description=(
+            "When true, a shopper who is not signed in as a dealer sees no "
+            "prices and cannot add anything to the cart. Browsing and search "
+            "still work. False is the default."
+        ),
+    )
 
     class Meta:
         model = models.DealerSettings
@@ -195,6 +203,46 @@ class WsmDealerSettings(WsmDocCategory, ModelObjectType[models.DealerSettings]):
         if root.pk is None:
             return None
         return graphene.Node.to_global_id("WsmDealerSettings", root.pk)
+
+
+class WsmProductGate(WsmDocCategory, ModelObjectType[models.DealerProductGate]):
+    """One product's own answer to who may see its price and buy it.
+
+    Null on a product with no row: the store switch decides that one, and a type
+    that invented a row would tell a merchant they had configured something they
+    had not.
+    """
+
+    id = graphene.GlobalID(required=True, description="ID of the gate.")
+    login_required = graphene.Boolean(
+        required=True,
+        description=(
+            "True: only a signed-in dealer sees this product's price and can "
+            "buy it. False: this product is priced and sold to everyone, even "
+            "when the whole store is gated."
+        ),
+    )
+    groups = graphene.List(
+        graphene.NonNull(WsmDealerGroup),
+        required=True,
+        description=(
+            "Empty means any dealer group may see this product. Naming groups "
+            "means only those groups may. Visibility only: what a group PAYS is "
+            "its tier prices."
+        ),
+    )
+
+    class Meta:
+        model = models.DealerProductGate
+        interfaces = [graphene.relay.Node]
+        description = "Who may see this product's price and buy it."
+
+    @staticmethod
+    def resolve_groups(root: models.DealerProductGate, _info):
+        # `.all()` on a prefetched manager reads the cache; every resolver that
+        # hands back a gate prefetches `groups`, for the reason `currencyCode`
+        # above is prefetched: this renders one row per product on a list.
+        return root.groups.all()
 
 
 class WsmDealerGroupCountableConnection(WsmDocCategory, CountableConnection):

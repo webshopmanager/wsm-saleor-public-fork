@@ -850,6 +850,13 @@ class WsmDealerSettingsInput(WsmDocCategory, BaseInputObjectType):
             "discounts combine with dealer prices."
         ),
     )
+    catalogue_gated = graphene.Boolean(
+        description=(
+            "True: shoppers who are not signed in as dealers see no prices and "
+            "cannot add anything to the cart. They can still browse and search. "
+            "Omit to leave it as it is; false is the default."
+        ),
+    )
 
 
 class WsmDealerSettingsUpdate(WsmMutationMeta, DeprecatedModelMutation):

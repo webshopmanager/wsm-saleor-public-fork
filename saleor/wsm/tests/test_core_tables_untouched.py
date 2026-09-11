@@ -271,6 +271,50 @@ def test_the_installed_core_class_extensions_are_the_documented_ones():
     )
 
 
+def test_the_installed_resolver_patches_are_the_documented_ones():
+    """MP6 wraps a METHOD, which `installed()` sweeps right past.
+
+    `installed()` reads module attributes and a graphene resolver is an
+    attribute of a CLASS, so the gated catalogue's two price guards were
+    invisible to every ledger here until `methods_installed()` existed. Subset,
+    not equality, for the same reason as the patch test above: METHODS names the
+    patches of every branch in flight.
+    """
+    installed = patches.methods_installed()
+    pinned = frozenset(patches.METHODS)
+
+    assert installed, "no resolver patch was discovered, so this test proved nothing"
+    assert installed <= pinned, (
+        f"undocumented resolver patch: {sorted(installed - pinned)}. Add it to "
+        "saleor/wsm/patches.py METHODS and to docs/wsm/CORE-TOUCHES.md."
+    )
+
+
+def test_the_resolver_guard_names_a_planted_patch():
+    """The tripwire, tripped. A pin nobody has watched go off is decoration."""
+    import functools
+
+    from saleor.graphql.product.types.products import Product
+
+    original = Product.resolve_url
+
+    @functools.wraps(original)
+    def undocumented(*args, **kwargs):  # pragma: no cover - never called
+        return original(*args, **kwargs)
+
+    planted = "saleor.graphql.product.types.products.Product.resolve_url"
+    assert planted not in frozenset(patches.METHODS), (
+        "this test needs a resolver the fork does NOT patch"
+    )
+    assert planted not in patches.methods_installed()
+
+    Product.resolve_url = staticmethod(undocumented)
+    try:
+        assert planted in patches.methods_installed()
+    finally:
+        Product.resolve_url = staticmethod(original)
+
+
 def test_the_core_attributes_this_fork_rebinds_are_the_documented_ones():
     """MP5: one module attribute repointed, discovered rather than declared.
 

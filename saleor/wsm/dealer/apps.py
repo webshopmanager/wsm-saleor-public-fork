@@ -22,3 +22,12 @@ class DealerConfig(AppConfig):
         # MP2: the same ruling for ENTIRE_ORDER vouchers and order promotions,
         # which are checkout-level discounts and never reach a line at all.
         no_stacking_order_level.install()
+        # MP6 and MP7: a gated catalogue shows no price and takes no cart write
+        # from a shopper who may not buy. Installed HERE rather than between the
+        # two schema builds, so the guard is on the class before either is
+        # built and neither schema can answer a price the other would refuse.
+        # See gate_enforce.py and the "Monkey patches" heading in
+        # docs/wsm/CORE-TOUCHES.md.
+        from . import gate_enforce
+
+        gate_enforce.install()

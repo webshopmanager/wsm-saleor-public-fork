@@ -1021,6 +1021,11 @@ BUILTIN_PLUGINS = [
     # product in it is not serviced for. A native plugin hook rather than a
     # fourth monkey patch; see saleor/wsm/compose/plugin.py and CORE-TOUCHES 9.
     "saleor.wsm.compose.plugin.ComposeCompliancePlugin",
+    # WSM-FORK: the backstop under MP7. A product behind the dealer gate
+    # never becomes an order, whatever put the line in the cart. A native
+    # plugin hook, so no monkey patch. See saleor/wsm/dealer/plugin.py and
+    # docs/wsm/CORE-TOUCHES.md.
+    "saleor.wsm.dealer.plugin.DealerGatePlugin",
 ]
 
 # Plugin discovery

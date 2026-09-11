@@ -34,6 +34,8 @@ from .filters import (
     WsmDealerGroupFilterInput,
     WsmTierPriceFilterInput,
 )
+from . import product_extension  # noqa: F401  (appends wsmGated/wsmGate to Product)
+from .gate_mutations import WsmProductGateBulkSet, WsmProductGateSet
 from .mutations import (
     DEALER_PERMISSIONS,
     WsmDealerCustomerAssign,
@@ -310,3 +312,5 @@ class WsmDealerMutations(graphene.ObjectType):
     wsm_tier_price_bulk_create = WsmTierPriceBulkCreate.Field()
     wsm_tier_price_bulk_update = WsmTierPriceBulkUpdate.Field()
     wsm_dealer_settings_update = WsmDealerSettingsUpdate.Field()
+    wsm_product_gate_set = WsmProductGateSet.Field()
+    wsm_product_gate_bulk_set = WsmProductGateBulkSet.Field()

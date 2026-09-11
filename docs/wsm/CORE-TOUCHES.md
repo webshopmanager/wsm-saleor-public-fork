@@ -19,14 +19,18 @@ cannot see `CHANGELOG.md`, which this branch also edits and which
 `make vendor-delta` counts. One file, outside the only command this ledger
 offered to find it (Wild West finding 12).
 
-Core touches from outside `saleor/wsm/`: **three wrapped functions, one
-core-class extension and one module-attribute rebind.** MP1 (added by U3), MP2 (U7) and MP3 (H1) replace core
-FUNCTIONS; the design doc budgeted zero, and those entries say why the stock
-levers do not exist. MP4 (section 14) appends three fields to stock's `Product`
-GRAPHENE TYPE, which is not a wrapped function and so was invisible to both the
+Core touches from outside `saleor/wsm/`: **four wrapped functions, two wrapped
+RESOLVERS, one core-class extension and one module-attribute rebind.** MP1
+(added by U3), MP2 (U7), MP3 (H1) and MP7 (the gated catalogue, section 17)
+replace core FUNCTIONS; the design doc budgeted zero, and those entries say why
+the stock levers do not exist. MP4 (section 14) appends FIVE fields to stock's
+`Product` GRAPHENE TYPE (three for the Compose tab, two for the gated
+catalogue), which is not a wrapped function and so was invisible to both the
 count and the boot guard until 2026-09-11. MP5 (section 15) repoints one module
 ATTRIBUTE, `saleor.graphql.views.schema`, so the query complexity guard weighs
-the schema this fork actually serves. The compliance PLUGIN in section 9 is
+the schema this fork actually serves. MP6 (section 16) wraps two graphene
+RESOLVERS, which are attributes of a class rather than of a module and so needed
+a fifth ledger, `METHODS`, to be discoverable at all. The compliance PLUGIN in section 9 is
 a native hook, argued there, and is deliberately none of the four. Plus
 one resolver swap Bill's secondary-categories patch performs from
 `saleor/wsm/apps.py` (section 7). Core table edits: **zero.** Our tables carry
@@ -1187,3 +1191,145 @@ and the five, which asserts the TABLES, so adding a query reddens it by name.
 `test_a_dealer_priced_checkout_costs_one_more_query_for_the_whole_cart` pins the
 sixth: a checkout carrying dealer-priced configured lines reads the tier ladder
 that decides their base once for all of them, never once per line.
+
+## 16. MP6. The two public price surfaces answer a gated product with null (ds gated catalogue, 2026-09-11)
+
+`saleor/wsm/dealer/gate_enforce.py` `install()` wraps
+`Product.resolve_pricing` and `ProductVariant.resolve_pricing`
+(`saleor/graphql/product/types/products.py:697` and `:1249`) and rebinds each on
+its own class, from `DealerConfig.ready()`. No file under `saleor/graphql/` is
+edited.
+
+**Why it exists.** ds (diversifiedshaftssolutions.com) is the next store to go
+live on 6.0, and it is a gated catalogue: 2,731 of its 2,732 products carry
+5.0's `login_required` with a public price of 0. The public browses and
+searches; only a signed-in dealer sees a price or a buy button. Stock Saleor has
+no lever for that. `available_for_purchase_at` and `visible_in_listings` are per
+product and per channel, so they say "nobody may buy this" or "nobody may see
+this" and never "this buyer may and that one may not"; and a channel per trade
+tier is a whole config object per tier, which is the shape Dana ruled out on
+2026-09-01 ("channels are not pricing tiers, never model a tier or a gate as a
+channel"). These two fields are the only public surfaces that hand a shopper a
+number, so they are the two places the answer has to change.
+
+**Why a null and not a new shape.** Both fields are already declared NULLABLE
+and both already return `None` when a channel listing is missing, so a gated
+product is answered with a shape every storefront already renders.
+`Product.wsmGated` (MP4's field list, section 14) says WHY, so a storefront can
+render "Sign in for dealer pricing" instead of a blank.
+
+**Why it is not in `PINNED`.** `binding_sites` sweeps MODULE attributes for the
+function by identity. A graphene resolver is an attribute of a CLASS, bound in
+exactly one place by construction, so there is no site set to discover and
+`installed()` cannot see it either. `METHODS` in `saleor/wsm/patches.py` is the
+pin, `patches.methods_installed()` DISCOVERS the real set off the loaded core
+classes, and `test_the_installed_resolver_patches_are_the_documented_ones`
+compares them. `test_the_resolver_guard_names_a_planted_patch` trips that
+tripwire on purpose, because a pin nobody has watched go off is decoration.
+
+**Why no `SOURCE` digest.** MP1 to MP3 pin their originals because their
+wrappers were written around what those bodies DO. This one returns before the
+original runs, or delegates to it whole; what it assumes is that the field is
+nullable, and `gate_enforce._assert_pricing_is_nullable` asserts exactly that at
+boot. A hash here would redden on upstream lines this wrapper cannot be affected
+by, which is the kind of tripwire people learn to re-pin without reading.
+
+**Ordering, and why it is not MP4's.** Installed from `ready()`, so the wrapper
+is on the class before EITHER schema is built and the STOCK schema carries it
+too. MP4's trick (append between the two builds) would have guarded only the
+schema `ROOT_URLCONF` serves, and a gate that depends on which URL matched first
+is not default deny.
+
+**Cost.** Nothing per product. One dataloader per request; two queries for a
+whole listing page, and none at all beyond the settings read on a store that has
+gated nothing. The full budget is the cost paragraph in
+`saleor/wsm/dealer/gate.py`.
+
+**Removal cost.** Delete the first loop of `gate_enforce.install()` and the
+`METHODS` entries. Prices come back for everyone, which is the behaviour before
+this feature.
+
+## 17. MP7. `add_variants_to_checkout` refuses a gated variant (ds gated catalogue, 2026-09-11)
+
+`saleor/wsm/dealer/gate_enforce.py` wraps
+`saleor.checkout.utils.add_variants_to_checkout` through the existing
+`install_guard`, so it is a normal `PINNED` entry with four sites and a `SOURCE`
+digest.
+
+**Why it exists.** Hiding a price is not refusing a sale. A gated variant's id
+is in the page source, so a shopper who wants one can post
+`checkoutLinesAdd` for it, and on a store whose public price is 0 that is a free
+order. Default deny means the refusal lives on the server.
+
+**Why this function.** It is the ONE function every write into a cart goes
+through: `checkoutCreate`, `checkoutLinesAdd`, `checkoutLinesUpdate` (which
+subclasses `CheckoutLinesAdd`), `checkoutCreateFromOrder`, and the fork's own
+REST endpoints, which call it directly. Wrapping it once is why there is no
+per-mutation copy of this rule and no fifth place for it to drift.
+
+**Who the buyer is.** `checkout.user_id`. On a cart that IS the requester, and
+an anonymous checkout has none, so the wrapper needs nothing from the request.
+
+**Only lines that ADD.** A shopper whose cart already holds a line the merchant
+has since gated must still be able to take it out, and `checkoutLinesUpdate`
+removes by sending quantity 0 through this same function, so only line data with
+a positive quantity is weighed.
+
+**The error code, and the one place the design defaults could not be met.**
+`checkoutLinesAdd` and `checkoutCreate` return `CheckoutError`, whose `code` is
+`CheckoutErrorCode`: a different enum, declared in a core file this fork does
+not edit, and required. A value that enum does not know is not an unknown-code
+error, it is a GraphQL serialization failure that replaces the whole `errors`
+list with a top-level error, so the shopper would read nothing at all. That
+surface therefore carries stock's own `product_unavailable_for_purchase`, the code
+`validate_variants_available_for_purchase` raises two lines away for the same
+meaning, and the SENTENCE the shopper reads is ours either way.
+`WsmErrorCode.CATALOGUE_GATED` is the code on every surface this fork owns.
+`gate.refusal` and `gate.stock_refusal` are the two, named, in one file.
+
+**Cost.** Two queries on a cart write against a store that has gated nothing
+(the settings row and the gate rows), and one more for the buyer's group only
+when something might be gated. Nothing on any browse or PDP request.
+
+**Removal cost.** Delete the `install_guard` call, the `PINNED` entry and its
+`SOURCE` digest. Gated products become buyable again.
+
+## 18. `saleor/settings.py`, +5 lines, 1 of them code (ds gated catalogue, 2026-09-11)
+
+`BUILTIN_PLUGINS` gains `saleor.wsm.dealer.plugin.DealerGatePlugin`, beside the
+compose compliance plugin added in section 9 and for the same reason: on the
+`preprocess_order_creation` hook a plugin can REFUSE an order, which is the only
+thing a gate wants at completion. It is the backstop under MP7, for every way a
+line can be in a cart that MP7 never saw: added before the merchant gated the
+product, a checkout that changed hands, a direct write by another app. A native
+platform hook, so it costs one settings line and no monkey patch, and it runs
+once per order creation and never on a browse, a PDP or a cart page.
+
+**Tables.** The gated catalogue adds one column to `wsm_dealer_dealersettings`
+(`catalogue_gated`, default false) and two tables,
+`wsm_dealer_dealerproductgate` and its group link table. Core tables: still
+zero.
+
+## 19. The shape this was built against (ds, measured read-only 2026-09-11)
+
+Numbers, so the next person does not have to re-measure them. Source: `wsm_live_ds`
+on wds1, counts and aggregates only.
+
+- `product.login_required` is set on **2,731 of 2,732** products. Exactly ONE is
+  public, which is why `DealerProductGate.login_required` can be false against a
+  gated store: without that, ds cannot be imported.
+- Per-group catalogue visibility is **already in use**: `customer_group_access_link`
+  carries **2,748 rows across 3 of the 5 groups** (WD Pallet 1,371, Jobber 1,370,
+  Container 7). FOB and CIF carry none; they are pure price books, 872 tier rows
+  each. So the `groups` M2M on the gate is a must-build, not a nicety, and it is
+  what `import_dealer_gates` maps that table onto.
+- There is no site-wide gate column in 5.0. The store-wide switch
+  (`DealerSettings.catalogue_gated`) is a 6.0 configuration layer on top of the
+  per-product flag, which is why a per-product row OVERRIDES it in both
+  directions rather than only tightening it.
+- Pricing authority on ds is split and mostly NOT the tier books: roughly 141 of
+  its 156 dealers (WD Pallet and Jobber) reach money through option-value prices
+  and only about 15 (FOB 6, CIF 9) through `product_tiered_price`. Nothing here
+  changes that; it is the reason a gated PDP must still render the Compose
+  configurator and its dealer deltas to a member, and why the proof run includes
+  an optioned product.

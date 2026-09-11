@@ -109,6 +109,26 @@ def extend_product_type():
             _resolve_compliance,
         ),
     }
+    return append_product_fields(fields)
+
+
+def append_product_fields(fields):
+    """Append `{name: (field, resolver)}` to stock's `Product`. Idempotent.
+
+    The loop, named, because MP4 is not one domain's business any more: the
+    dealer app appends the gated-catalogue fields to the same core type through
+    this function (`saleor/wsm/graphql/dealer/product_extension.py`), and a
+    second copy of this loop would be a second `_assert_free` and a second
+    chance to forget the `_wsm_owned` marker the ledger discovers by.
+
+    ponytail: the ceiling is that the ORDERING guarantee (stock's schema is
+    built first, by the `saleor.graphql.api` import at the top of this module)
+    lives in the compose package while a dealer module depends on it. The
+    upgrade, the first time a third domain extends `Product`, is to lift this
+    function and that import into `saleor/wsm/graphql/product_extension.py`,
+    which is the layer that actually owns "fields on stock's Product"; nothing
+    but the import lines would move.
+    """
     for name, (field, resolver) in fields.items():
         _assert_free(name)
         field._wsm_owned = True
@@ -122,4 +142,4 @@ extend_product_type()
 
 # Re-exported so a test can assert the extension without importing graphene's
 # internals itself.
-__all__ = ["WSM_PRODUCT_FIELDS", "extend_product_type"]
+__all__ = ["WSM_PRODUCT_FIELDS", "append_product_fields", "extend_product_type"]

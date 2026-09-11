@@ -222,6 +222,15 @@ class DealerSettings(models.Model):
             "combine with dealer prices."
         ),
     )
+    catalogue_gated = models.BooleanField(
+        default=False,
+        help_text=(
+            "On: a shopper who is not signed in as a dealer sees no prices and "
+            "cannot add anything to the cart. They can still browse and search. "
+            "Off (the default): the store prices and sells to everyone, and only "
+            "the products you gate individually are hidden."
+        ),
+    )
 
     class Meta:
         verbose_name_plural = "dealer settings"
@@ -262,3 +271,72 @@ class DealerSettings(models.Model):
         """
         row = cls.objects.order_by("pk").first()
         return bool(row and row.discount_stacking)
+
+    @classmethod
+    def catalogue_gated_enabled(cls, *, database_connection_name=None) -> bool:
+        """Is the whole store behind a dealer login? One read of one row.
+
+        Named by KEY rather than ordered-first, and read off the connection the
+        caller names, because the browse path asks this on the replica and the
+        cart path asks it on the writer it is about to write the line to.
+
+        No row is the default, and the default is UNGATED: a store nobody has
+        configured is a normal store. Everything that is default-DENY about this
+        feature is per product and per buyer (`saleor/wsm/dealer/gate.py`).
+        """
+        rows = cls.objects
+        if database_connection_name:
+            rows = rows.using(database_connection_name)
+        return bool(
+            rows.filter(pk=1).values_list("catalogue_gated", flat=True).first()
+        )
+
+
+class DealerProductGate(models.Model):
+    """One product's own answer to "who may see the price and buy this".
+
+    A row is the merchant SPEAKING about this product, so it wins over the store
+    switch in both directions: ds gates 2,731 of its 2,732 products and publishes
+    the one, which is a row with `login_required` false against a gated store.
+    No row means the store switch decides.
+
+    `groups` is how "trade tiers are visibility only" is expressed: empty means
+    any dealer group may see it, and naming groups means only those may. It is
+    never a price. Prices are `TierPrice`, and the two are deliberately separate
+    tables: ds's five groups decide VISIBILITY and its two price books (FOB and
+    CIF) decide money, and a merchant can move one without touching the other.
+    """
+
+    product = models.OneToOneField(
+        "product.Product",
+        related_name="wsm_gate",
+        on_delete=models.CASCADE,
+        help_text="The product this rule is about.",
+    )
+    login_required = models.BooleanField(
+        default=True,
+        help_text=(
+            "On: only a signed-in dealer sees this product's price and can buy "
+            "it. Off: this product is priced and sold to everyone, even when "
+            "the whole store is gated."
+        ),
+    )
+    groups = models.ManyToManyField(
+        DealerGroup,
+        blank=True,
+        related_name="gated_products",
+        help_text=(
+            "Leave empty to let any dealer group see this product. Name groups "
+            "to let only those groups see it. Visibility only: what each group "
+            "PAYS is its tier prices."
+        ),
+    )
+
+    class Meta:
+        ordering = ("product_id",)
+
+    def __str__(self):
+        # The product by NAME, because the id is the only other thing this row
+        # carries and a delete confirmation headed by a row number names nobody.
+        answer = "dealers only" if self.login_required else "public"
+        return f"{self.product.name}: {answer}"

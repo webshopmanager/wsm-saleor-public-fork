@@ -116,6 +116,14 @@ class WsmDealerCustomer(WsmDocCategory, ModelObjectType[models.DealerCustomer]):
             "instead of it: the lines still carry their dealer prices."
         ),
     )
+    no_free_shipping = graphene.Boolean(
+        required=True,
+        description=(
+            "This dealer is never offered a shipping method that costs "
+            "nothing. Their freight is their own, or billed to their carrier "
+            "account."
+        ),
+    )
     account_number = graphene.String(
         required=True,
         description=(

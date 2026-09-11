@@ -27,6 +27,7 @@ ASSIGN = """
         dealerCustomer {
           id
           taxExempt
+          noFreeShipping
           user { id email }
           group { id code }
         }
@@ -38,7 +39,7 @@ ASSIGN = """
 UPDATE = """
     mutation Update($id: ID!, $input: WsmDealerCustomerUpdateInput!) {
       wsmDealerCustomerUpdate(id: $id, input: $input) {
-        dealerCustomer { id taxExempt group { code } }
+        dealerCustomer { id taxExempt noFreeShipping group { code } }
         errors { field code message }
       }
     }
@@ -56,7 +57,7 @@ UNASSIGN = """
 DETAIL = """
     query Detail($id: ID, $user: ID) {
       wsmDealerCustomer(id: $id, user: $user) {
-        id taxExempt user { email } group { code }
+        id taxExempt noFreeShipping user { email } group { code }
       }
     }
 """
@@ -236,6 +237,93 @@ def test_updating_moves_a_shopper_to_another_group(
     assert row.group_id == other.pk
     assert row.tax_exempt is True
     assert DealerCustomer.objects.count() == 1
+
+
+def test_the_no_free_shipping_flag_is_carried_onto_the_account(
+    staff_api_client, permission_manage_discounts, customer_user, dealer_group
+):
+    """Four ds accounts pay their own freight, and six at lsl (measured 2026-09-11).
+
+    Asserted on the ROW as well as on the payload: a mutation that echoes a flag
+    back and stores nothing is a failure the merchant only meets at a checkout,
+    weeks later, on somebody else's order.
+    """
+    response = staff_api_client.post_graphql(
+        ASSIGN,
+        {
+            "input": {
+                "user": user_gid(customer_user),
+                "group": group_gid(dealer_group),
+                "noFreeShipping": True,
+            }
+        },
+        permissions=[permission_manage_discounts],
+    )
+
+    content = get_graphql_content(response)
+    payload = content["data"]["wsmDealerCustomerAssign"]
+    assert payload["errors"] == []
+    assert payload["dealerCustomer"]["noFreeShipping"] is True
+    assert DealerCustomer.objects.get().no_free_shipping is True
+
+
+def test_an_account_the_merchant_never_flagged_keeps_its_free_shipping(
+    staff_api_client, permission_manage_discounts, customer_user, dealer_group
+):
+    """Default deny, the other way round: the DEFAULT here is the merchant's own.
+
+    Free shipping is a thing a merchant already sells, so the safe answer is to
+    leave it alone. An assignment that names nothing leaves the account exactly
+    as every other shopper's, and the flag is a decision somebody has to make.
+    """
+    response = staff_api_client.post_graphql(
+        ASSIGN,
+        {
+            "input": {
+                "user": user_gid(customer_user),
+                "group": group_gid(dealer_group),
+            }
+        },
+        permissions=[permission_manage_discounts],
+    )
+
+    content = get_graphql_content(response)
+    payload = content["data"]["wsmDealerCustomerAssign"]
+    assert payload["errors"] == []
+    assert payload["dealerCustomer"]["noFreeShipping"] is False
+    assert DealerCustomer.objects.get().no_free_shipping is False
+
+
+def test_the_flag_goes_back_off_the_same_way_it_went_on(
+    staff_api_client, permission_manage_discounts, customer_user, dealer_group
+):
+    """A merchant who flags the wrong account has to be able to undo it.
+
+    Both directions in one test, because a serializer that only ever writes
+    `True` passes a test that only ever sets it.
+    """
+    row = DealerCustomer.objects.create(user=customer_user, group=dealer_group)
+    # Granted once, here, rather than once per call: passing permissions to
+    # the client asserts the call is REFUSED before it grants them, so the
+    # second call in one test would be asserting a refusal the first call has
+    # already bought off.
+    staff_api_client.user.user_permissions.add(permission_manage_discounts)
+
+    def update(flag):
+        response = staff_api_client.post_graphql(
+            UPDATE,
+            {"id": customer_gid(row), "input": {"noFreeShipping": flag}},
+        )
+        content = get_graphql_content(response)
+        payload = content["data"]["wsmDealerCustomerUpdate"]
+        assert payload["errors"] == []
+        row.refresh_from_db()
+        return payload["dealerCustomer"]["noFreeShipping"]
+
+    assert update(True) is True
+    assert row.no_free_shipping is True
+    assert update(False) is False
+    assert row.no_free_shipping is False
 
 
 # --- unassign ----------------------------------------------------------------

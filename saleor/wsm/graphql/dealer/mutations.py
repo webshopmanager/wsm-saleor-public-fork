@@ -292,6 +292,9 @@ class WsmDealerCustomerAssignInput(WsmDocCategory, BaseInputObjectType):
     invoice_payment = graphene.Boolean(
         description="Let this shopper place orders to be invoiced, not paid for."
     )
+    no_free_shipping = graphene.Boolean(
+        description="Offer this dealer no shipping method that costs nothing."
+    )
     account_number = graphene.String(
         description="This dealer's account number in your own books or ERP."
     )
@@ -305,6 +308,9 @@ class WsmDealerCustomerUpdateInput(WsmDocCategory, BaseInputObjectType):
     tax_exempt = graphene.Boolean(description="Charge this shopper no sales tax.")
     invoice_payment = graphene.Boolean(
         description="Let this shopper place orders to be invoiced, not paid for."
+    )
+    no_free_shipping = graphene.Boolean(
+        description="Offer this dealer no shipping method that costs nothing."
     )
     account_number = graphene.String(
         description="This dealer's account number in your own books or ERP."

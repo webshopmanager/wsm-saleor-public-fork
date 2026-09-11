@@ -76,12 +76,15 @@ class WsmDealerAccountStatus(graphene.Enum):
     """
 
     ACTIVE = models.ACCOUNT_STATUS_ACTIVE
+    PROBATION = models.ACCOUNT_STATUS_PROBATION
     HOLD = models.ACCOUNT_STATUS_HOLD
 
     @property
     def description(self):
         if self == WsmDealerAccountStatus.HOLD:
             return "On hold: this shopper can place no order, by any method."
+        if self == WsmDealerAccountStatus.PROBATION:
+            return "On probation: a note to the merchant. Buys exactly as ACTIVE."
         return "Active: this shopper can place orders."
 
 

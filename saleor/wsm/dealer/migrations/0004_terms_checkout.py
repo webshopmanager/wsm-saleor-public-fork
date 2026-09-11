@@ -52,13 +52,33 @@ class Migration(migrations.Migration):
             model_name="dealercustomer",
             name="account_status",
             field=models.CharField(
-                choices=[("active", "Active"), ("hold", "Hold")],
+                choices=[
+                    ("active", "Active"),
+                    ("probation", "Probation"),
+                    ("hold", "Hold"),
+                ],
                 default="active",
                 max_length=10,
                 help_text=(
                     "Hold stops this shopper placing ANY order, by card as well "
                     "as on account, until you set it back to Active. It does "
-                    "not touch their sign-in, their prices or their past orders."
+                    "not touch their sign-in, their prices or their past "
+                    "orders. Probation is a note to yourself: it buys exactly "
+                    "as Active does."
+                ),
+            ),
+        ),
+        migrations.AddField(
+            model_name="dealersettings",
+            name="po_label",
+            field=models.CharField(
+                default="PO number",
+                max_length=50,
+                help_text=(
+                    "What you call the reference on an account order. Shown "
+                    "above the box at checkout and on the order. ds calls it "
+                    "one thing, another merchant calls it a job number or a "
+                    'release; the default is "PO number".'
                 ),
             ),
         ),

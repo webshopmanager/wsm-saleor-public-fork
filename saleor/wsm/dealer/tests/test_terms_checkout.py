@@ -36,6 +36,7 @@ from .. import terms
 from ..models import (
     ACCOUNT_STATUS_ACTIVE,
     ACCOUNT_STATUS_HOLD,
+    ACCOUNT_STATUS_PROBATION,
     DealerCustomer,
     DealerGroup,
     DealerSettings,
@@ -525,3 +526,36 @@ def test_an_account_with_no_number_stamps_neither_copy(
     order = Order.objects.get()
     assert terms.ACCOUNT_NUMBER_KEY not in order.metadata
     assert terms.PRIVATE_ACCOUNT_NUMBER_KEY not in order.private_metadata
+
+
+# --- probation: a merchant's note to themselves, not a gate -----------------
+
+
+def test_a_probation_account_buys_exactly_as_an_active_one_does(
+    user_api_client, placeable, on_terms, hold_plugin
+):
+    """Dana, 2026-09-11 (WSM6-2480): only HOLD stops a checkout.
+
+    ds's own data is Active 331 and Probation 1 with no Hold at all, so an
+    importer that had to flatten Probation onto Active would be rewriting the
+    merchant's own word for an account. It is carried, and it buys.
+
+    `hold_plugin` is named here on purpose: the plugin that refuses HOLD is
+    loaded for this run, so a passing test means it looked at PROBATION and let
+    it through rather than never having run at all.
+    """
+    on_terms.account_status = ACCOUNT_STATUS_PROBATION
+    on_terms.save()
+
+    payload = call(user_api_client, placeable, po="DS-TEST-001")
+
+    assert payload["errors"] == []
+    assert Order.objects.get().authorize_status == "full"
+
+
+def test_a_probation_account_reads_back_as_probation_not_as_active(
+    user_api_client, on_terms
+):
+    on_terms.account_status = ACCOUNT_STATUS_PROBATION
+    on_terms.save()
+    assert my_terms(user_api_client)["accountStatus"] == "PROBATION"

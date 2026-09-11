@@ -44,6 +44,18 @@ class WsmErrorCode(Enum):
     FEE_AMOUNT_NEGATIVE = "fee_amount_negative"
     FEE_PERCENT_ABOVE_100 = "fee_percent_above_100"
     UNKNOWN_US_STATE_CODE = "unknown_us_state_code"
+    # --- dealer: six rules, each with the line that enforces it. Two of them
+    # are the same money column from two directions, because a tier amount is
+    # what gets CHARGED: the one-cent floor
+    # (CheckConstraint wsm_dealer_tier_amount_at_least_a_cent,
+    # dealer/models.py:185), and the two decimal places a merchant is allowed
+    # to type into a three-place column (dealer/admin.py:106).
+    DUPLICATE_TIER_BREAK = "duplicate_tier_break"
+    TIER_AMOUNT_BELOW_ONE_CENT = "tier_amount_below_one_cent"
+    TIER_AMOUNT_TOO_MANY_DECIMALS = "tier_amount_too_many_decimals"
+    DUPLICATE_GROUP_CODE = "duplicate_group_code"
+    CUSTOMER_ALREADY_ASSIGNED = "customer_already_assigned"
+    GROUP_IN_USE = "group_in_use"
 
 
 # `from_enum` names the GraphQL type after the PYTHON class, so the type in the

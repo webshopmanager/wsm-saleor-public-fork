@@ -54,10 +54,27 @@ class ProductGatedLoader(DataLoader):
             return [False] * len(keys)
         verdicts = gate.gated_products(
             keys,
-            buyer_group=gate.buyer_group_for_request(self.context),
+            buyer_groups=gate.buyer_groups_for_request(self.context),
             database_connection_name=self.database_connection_name,
         )
         return [verdicts.get(key, True) for key in keys]
+
+
+class CategoryGateByCategoryIdLoader(DataLoader):
+    """The merchant-facing gate ROW of a category, or None. Two queries."""
+
+    context_key = "wsm_category_gate_by_category_id"
+
+    def batch_load(self, keys):
+        gates = {
+            row.category_id: row
+            for row in models.DealerCategoryGate.objects.using(
+                self.database_connection_name
+            )
+            .filter(category_id__in=keys)
+            .prefetch_related("groups")
+        }
+        return [gates.get(key) for key in keys]
 
 
 class ProductGateByProductIdLoader(DataLoader):

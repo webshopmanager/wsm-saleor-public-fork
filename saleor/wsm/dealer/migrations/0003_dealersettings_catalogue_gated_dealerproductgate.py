@@ -5,28 +5,60 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('product', '0205_merge_20260615_1308'),
-        ('wsm_dealer', '0002_dealersettings_is_one_row'),
+        ("product", "0205_merge_20260615_1308"),
+        ("wsm_dealer", "0002_dealersettings_is_one_row"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='dealersettings',
-            name='catalogue_gated',
-            field=models.BooleanField(default=False, help_text='On: a shopper who is not signed in as a dealer sees no prices and cannot add anything to the cart. They can still browse and search. Off (the default): the store prices and sells to everyone, and only the products you gate individually are hidden.'),
+            model_name="dealersettings",
+            name="catalogue_gated",
+            field=models.BooleanField(
+                default=False,
+                help_text="On: a shopper who is not signed in as a dealer sees no prices and cannot add anything to the cart. They can still browse and search. Off (the default): the store prices and sells to everyone, and only the products you gate individually are hidden.",
+            ),
         ),
         migrations.CreateModel(
-            name='DealerProductGate',
+            name="DealerProductGate",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('login_required', models.BooleanField(default=True, help_text="On: only a signed-in dealer sees this product's price and can buy it. Off: this product is priced and sold to everyone, even when the whole store is gated.")),
-                ('groups', models.ManyToManyField(blank=True, help_text='Leave empty to let any dealer group see this product. Name groups to let only those groups see it. Visibility only: what each group PAYS is its tier prices.', related_name='gated_products', to='wsm_dealer.dealergroup')),
-                ('product', models.OneToOneField(help_text='The product this rule is about.', on_delete=django.db.models.deletion.CASCADE, related_name='wsm_gate', to='product.product')),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                (
+                    "login_required",
+                    models.BooleanField(
+                        default=True,
+                        help_text="On: only a signed-in dealer sees this product's price and can buy it. Off: this product is priced and sold to everyone, even when the whole store is gated.",
+                    ),
+                ),
+                (
+                    "groups",
+                    models.ManyToManyField(
+                        blank=True,
+                        help_text="Leave empty to let any dealer group see this product. Name groups to let only those groups see it. Visibility only: what each group PAYS is its tier prices.",
+                        related_name="gated_products",
+                        to="wsm_dealer.dealergroup",
+                    ),
+                ),
+                (
+                    "product",
+                    models.OneToOneField(
+                        help_text="The product this rule is about.",
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="wsm_gate",
+                        to="product.product",
+                    ),
+                ),
             ],
             options={
-                'ordering': ('product_id',),
+                "ordering": ("product_id",),
             },
         ),
     ]

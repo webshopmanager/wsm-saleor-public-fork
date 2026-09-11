@@ -25,8 +25,8 @@ RESOLVERS, one core-class extension and one module-attribute rebind.** MP1
 replace core FUNCTIONS; the design doc budgeted zero, and those entries say why
 the stock levers do not exist. MP4 (section 14) appends FIVE fields to stock's
 `Product` GRAPHENE TYPE (three for the Compose tab, two for the gated
-catalogue), which is not a wrapped function and so was invisible to both the
-count and the boot guard until 2026-09-11. MP5 (section 15) repoints one module
+catalogue) and ONE to `Category` (section 20), which is not a wrapped function
+and so was invisible to both the count and the boot guard until 2026-09-11. MP5 (section 15) repoints one module
 ATTRIBUTE, `saleor.graphql.views.schema`, so the query complexity guard weighs
 the schema this fork actually serves. MP6 (section 16) wraps two graphene
 RESOLVERS, which are attributes of a class rather than of a module and so needed
@@ -1333,3 +1333,55 @@ on wds1, counts and aggregates only.
   changes that; it is the reason a gated PDP must still render the Compose
   configurator and its dealer deltas to a member, and why the proof run includes
   an optioned product.
+
+## 20. MP4 again. One field appended to stock's `Category` (ds gated catalogue, 2026-09-11)
+
+`saleor/wsm/graphql/dealer/product_extension.py` appends `wsmGate` to
+`saleor/graphql/product/types/categories.py::Category`, through the same
+`append_fields` seam and the same `EXTENDED` pin as the five on `Product`. No
+core file is edited, and `patches.extensions_installed()` now discovers two
+types rather than one.
+
+**Why it exists.** 5.0's gating does not stop at the product. It login-gates
+CATEGORIES and pages (76 tenants, 127 rows) and scopes them by customer group
+(40 tenants, 210 rows). ds alone carries 15 category visibility rows and 5
+category login gates, and a product-only gate dropped every one of them on day
+one. A merchant sets a section's rule where they set everything else about that
+section, so the field goes on the category.
+
+**Why there is no public `wsmGated` twin here.** The shopper-facing answer is on
+the PRODUCT, because that is where the gate is finally applied: a category gate
+reaches a product through `gate.category_gates_for_products`, and
+`Product.wsmGated` already tells a storefront the outcome. A second public field
+would be a second answer to one question. `Category.wsmGate` is MANAGE_DISCOUNTS
+and merchant-only.
+
+**Reach and precedence.** A category gate applies to that category and
+everything under it. Most specific wins: a product's own `DealerProductGate`
+beats any category, and the NEAREST gated ancestor beats a further one. MPTT is
+what makes that cheap: containment is an integer comparison on `tree_id` and
+`lft`, so the whole tree costs three queries for a page and none at all on a
+store that has gated no section.
+
+**Removal cost.** Delete `extend_category_type_with_gate()` and the `Category`
+line in `EXTENDED`. The model and the mutation can stay or go independently; the
+gate would simply stop being settable from the category page.
+
+## 21. Multi-group access (ds gated catalogue, 2026-09-11)
+
+`DealerCustomer.access_groups`, a many-to-many on our own table. No core touch,
+listed here because it changes what "the dealer" means everywhere else in this
+layer.
+
+5.0's `customer_group_link` is many-to-many and 28 tenants use it on 2,533
+customers; on ds 156 customers are in the link table against 96 on the legacy
+single-group column, and on `bmct` it is 1,376 of 1,400. Dana's ruling of
+2026-09-11: **a dealer's ACCESS is the union of every group they are in, and
+their PRICE stays the single group on `DealerCustomer.group`.** So
+`gate.buyer_groups_for` answers a SET in one query and `is_gated` passes on any
+overlap, while `pricing.tier_group_for` is untouched and still answers exactly
+one group, because "the dealer price" has to be unambiguous on every line.
+
+Open, and named rather than half-built: nothing yet WRITES `access_groups` from
+a merchant screen. `import_dealer_gates` and the ORM do, which is the path ds
+needs on day one; the Dashboard input and the mutation argument are a follow-up.

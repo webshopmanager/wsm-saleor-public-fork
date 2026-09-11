@@ -26,13 +26,13 @@ from django.db import transaction
 
 from ....graphql.core.mutations import BaseMutation
 from ....graphql.core.types import BaseInputObjectType, NonNullList
-from ....product.models import Product
+from ....product.models import Category, Product
 from ...dealer import models
 from ..errors import WsmError
 from ..types import DOC_CATEGORY_WSM
 from ..utils import check_bulk_limit, error, pk_or_none
 from .mutations import DEALER_PERMISSIONS
-from .types import WsmProductGate
+from .types import WsmCategoryGate, WsmProductGate
 
 
 def _resolved_pks(ids, type_name, model, field, errors, *, database):
@@ -64,19 +64,26 @@ def _resolved_pks(ids, type_name, model, field, errors, *, database):
     return {value: pk for value, pk in decoded.items() if pk in live}
 
 
-def _write_group_links(gate_pks_to_group_pks, *, database):
+def _write_group_links(gate_pks_to_group_pks, *, database, model=None):
     """Replace the group links of these gates. Two queries, whatever the size.
 
     Delete-then-insert rather than `.set()` per row: `.set()` is two queries PER
     GATE, which on a 500-row paste is a thousand round trips to write a column
     most of those rows leave empty.
+
+    `model` is the gate table, because the product gate and the category gate
+    are the same rule on two rows and one function is the only way the two stay
+    the same rule. The through column is derived rather than spelt, so neither
+    caller can name the wrong one.
     """
-    through = models.DealerProductGate.groups.through
+    model = model or models.DealerProductGate
+    through = model.groups.through
+    column = f"{model._meta.model_name}_id"
     through.objects.using(database).filter(
-        dealerproductgate_id__in=list(gate_pks_to_group_pks)
+        **{f"{column}__in": list(gate_pks_to_group_pks)}
     ).delete()
     links = [
-        through(dealerproductgate_id=gate_pk, dealergroup_id=group_pk)
+        through(**{column: gate_pk, "dealergroup_id": group_pk})
         for gate_pk, group_pks in gate_pks_to_group_pks.items()
         for group_pk in group_pks
     ]
@@ -207,9 +214,7 @@ class WsmProductGateBulkSet(BaseMutation):
         product_pks = _resolved_pks(
             list(seen), "Product", Product, "gates.product", errors, database=database
         )
-        group_ids = {
-            value for row in gates for value in (row.get("groups") or [])
-        }
+        group_ids = {value for row in gates for value in (row.get("groups") or [])}
         group_pks = _resolved_pks(
             sorted(group_ids),
             "WsmDealerGroup",
@@ -233,7 +238,9 @@ class WsmProductGateBulkSet(BaseMutation):
     @classmethod
     def _write(cls, rows):
         """Upsert every row, then replace every link. Five statements."""
-        wanted = {product_pk: (required, groups) for product_pk, required, groups in rows}
+        wanted = {
+            product_pk: (required, groups) for product_pk, required, groups in rows
+        }
         with transaction.atomic():
             stored = {
                 row.product_id: row
@@ -271,3 +278,83 @@ class WsmProductGateBulkSet(BaseMutation):
                 database="default",
             )
         return len(wanted)
+
+
+class WsmCategoryGateSet(BaseMutation):
+    """Set one category's gate. Creates the row or rewrites it.
+
+    The same upsert semantic as the product one, for the same reason: the
+    Dashboard toggle has to round-trip without a delete. What differs is REACH.
+    A category gate applies to that category and everything under it, so one row
+    covers a section, which is what 5.0 merchants actually configured: ds has 15
+    category visibility rows and 5 category login gates against 2,731 product
+    rows, because the sections carry the long tail and the products carry the
+    catalogue.
+
+    No bulk twin. Live data is 15 rows on ds and 61 on the widest tenant in the
+    fleet sweep, so a merchant sets these one at a time and the importer writes
+    them through `import_dealer_gates --categories`, not through a paste.
+    """
+
+    gate = graphene.Field(
+        WsmCategoryGate, description="The rule now stored for this category."
+    )
+
+    class Arguments:
+        category = graphene.ID(required=True, description="The section to rule on.")
+        login_required = graphene.Boolean(
+            required=True,
+            description=(
+                "True: only a signed-in dealer sees prices in this section and "
+                "can buy from it. False: public, even when the store is gated."
+            ),
+        )
+        groups = NonNullList(
+            graphene.ID,
+            description=(
+                "Leave empty for any dealer group. Name groups to let only "
+                "those groups see this section."
+            ),
+        )
+
+    class Meta:
+        description = "Set who may see a whole section of the catalogue."
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+
+    @classmethod
+    def perform_mutation(cls, _root, info, /, *, category, login_required, groups=None):
+        from ....graphql.core.context import get_database_connection_name
+
+        database = get_database_connection_name(info.context)
+        errors: dict = {}
+        category_pks = _resolved_pks(
+            [category], "Category", Category, "category", errors, database=database
+        )
+        group_pks = _resolved_pks(
+            list(groups or []),
+            "WsmDealerGroup",
+            models.DealerGroup,
+            "groups",
+            errors,
+            database=database,
+        )
+        if errors:
+            return cls.handle_errors(ValidationError(errors), gate=None)
+
+        with transaction.atomic():
+            row, _created = models.DealerCategoryGate.objects.update_or_create(
+                category_id=category_pks[category],
+                defaults={"login_required": login_required},
+            )
+            _write_group_links(
+                {row.pk: set(group_pks.values())},
+                database="default",
+                model=models.DealerCategoryGate,
+            )
+        stored = (
+            models.DealerCategoryGate.objects.prefetch_related("groups")
+            .filter(pk=row.pk)
+            .first()
+        )
+        return cls(errors=[], gate=stored)

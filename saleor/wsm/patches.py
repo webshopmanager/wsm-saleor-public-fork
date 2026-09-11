@@ -156,6 +156,10 @@ EXTENDED = {
         "wsm_gated",
         "wsm_option_sets",
     ),
+    # The gated catalogue's second type. 5.0 gates SECTIONS as well as products
+    # (76 tenants login-gate a category or page, 40 scope one by group), so the
+    # merchant sets the rule where they set everything else about a category.
+    "saleor.graphql.product.types.categories.Category": ("wsm_gate",),
 }
 
 # MP5, saleor/wsm/graphql/cost.py: one module ATTRIBUTE repointed, so the query

@@ -24,11 +24,17 @@ other read and write in this domain.
 import graphene
 
 from ....graphql.core.fields import PermissionsField
+from ....graphql.product.types.categories import Category
+from ....graphql.product.types.products import Product
 from ....permission.enums import DiscountPermissions
-from ..compose.product_extension import append_product_fields
+from ..compose.product_extension import append_fields
 from ..types import DOC_CATEGORY_WSM
-from .dataloaders import ProductGateByProductIdLoader, ProductGatedLoader
-from .types import WsmProductGate
+from .dataloaders import (
+    CategoryGateByCategoryIdLoader,
+    ProductGateByProductIdLoader,
+    ProductGatedLoader,
+)
+from .types import WsmCategoryGate, WsmProductGate
 
 WSM_DEALER_PRODUCT_FIELDS = ("wsm_gated", "wsm_gate")
 
@@ -41,9 +47,16 @@ def _resolve_gate(root, info, **_kwargs):
     return ProductGateByProductIdLoader(info.context).load(root.node.id)
 
 
+def _resolve_category_gate(root, info, **_kwargs):
+    # `Category` is a plain `ModelObjectType`, not a `ChannelContextType`, so
+    # the root IS the model here and there is no `.node` to unwrap.
+    return CategoryGateByCategoryIdLoader(info.context).load(root.id)
+
+
 def extend_product_type_with_gate():
     """Append `wsmGated` and `wsmGate` to stock's `Product`. Idempotent."""
-    return append_product_fields(
+    return append_fields(
+        Product,
         {
             "wsm_gated": (
                 # A mounted `Field`, not a bare `graphene.Boolean`: a scalar in
@@ -75,11 +88,44 @@ def extend_product_type_with_gate():
                 ),
                 _resolve_gate,
             ),
-        }
+        },
+    )
+
+
+def extend_category_type_with_gate():
+    """Append `wsmGate` to stock's `Category`. Idempotent.
+
+    A second core type on the same seam, for the same reason the first one is
+    there: 5.0 gates SECTIONS, not just products (76 tenants, 127 login rows;
+    40 tenants, 210 group-visibility rows), and a merchant editing a category
+    has to see and set its rule in the round trip that page already makes.
+    Merchant-only, so there is no public `wsmGated` twin here: the shopper-facing
+    answer is on the PRODUCT, which is where the gate is finally applied.
+    """
+    return append_fields(
+        Category,
+        {
+            "wsm_gate": (
+                PermissionsField(
+                    WsmCategoryGate,
+                    description=(
+                        "Who may see this section and everything under it. Null "
+                        "when this category has no rule of its own."
+                    ),
+                    permissions=[DiscountPermissions.MANAGE_DISCOUNTS],
+                ),
+                _resolve_category_gate,
+            ),
+        },
     )
 
 
 extend_product_type_with_gate()
+extend_category_type_with_gate()
 
 
-__all__ = ["WSM_DEALER_PRODUCT_FIELDS", "extend_product_type_with_gate"]
+__all__ = [
+    "WSM_DEALER_PRODUCT_FIELDS",
+    "extend_category_type_with_gate",
+    "extend_product_type_with_gate",
+]

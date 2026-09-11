@@ -15,6 +15,7 @@ import pytest
 
 from ....graphql.tests.utils import assert_no_permission, get_graphql_content
 from ...dealer.models import (
+    DealerCategoryGate,
     DealerCustomer,
     DealerGroup,
     DealerProductGate,
@@ -131,9 +132,11 @@ def ask(client, query, product, channel_USD, **extra):
 def test_an_anonymous_shopper_sees_no_price_on_a_gated_store(
     api_client, product, channel_USD, gated_store
 ):
-    """The requirement, in one assertion: the public may browse and sees no
-    price. Null is stock's own shape for "there is no pricing here", so no
-    storefront needs a new one."""
+    """The requirement, in one assertion: browse yes, price no.
+
+    Null is stock's own shape for "there is no pricing here", so no storefront
+    needs a new one.
+    """
     data = ask(api_client, PDP, product, channel_USD)["data"]["product"]
 
     assert data["wsmGated"] is True
@@ -186,7 +189,7 @@ def test_a_product_scoped_to_one_group_is_gated_for_the_other(
 def test_the_one_public_product_on_a_gated_store_is_still_priced(
     api_client, product, channel_USD, gated_store
 ):
-    """ds gates 2,731 of 2,732 products and publishes one."""
+    """Ds gates 2,731 of 2,732 products and publishes one."""
     DealerProductGate.objects.create(product=product, login_required=False)
 
     data = ask(api_client, PDP, product, channel_USD)["data"]["product"]
@@ -195,11 +198,12 @@ def test_the_one_public_product_on_a_gated_store_is_still_priced(
     assert data["pricing"] is not None
 
 
-def test_the_variant_price_is_null_too(
-    api_client, variant, channel_USD, gated_store
-):
-    """`ProductVariant.pricing` is the other public surface that hands a
-    shopper a number, so hiding one and not the other would hide nothing."""
+def test_the_variant_price_is_null_too(api_client, variant, channel_USD, gated_store):
+    """The variant surface is nulled too.
+
+    `ProductVariant.pricing` is the other public field that hands a shopper a
+    number, so hiding one and not the other would hide nothing.
+    """
     variables = {
         "id": graphene.Node.to_global_id("ProductVariant", variant.pk),
         "channel": channel_USD.slug,
@@ -230,9 +234,12 @@ def test_a_dealer_still_gets_their_tier_price_on_a_gated_store(
 def test_an_anonymous_add_to_cart_is_refused(
     api_client, variant_with_many_stocks, channel_USD, gated_store
 ):
-    """A variant WITH stock, deliberately: stock is validated in `clean_input`,
-    before the write this gate wraps, so an out-of-stock variant would prove
-    nothing about the gate."""
+    """A variant WITH stock, deliberately.
+
+    Stock is validated in `clean_input`, before the write this gate wraps, so
+    an out-of-stock variant would be refused for the wrong reason and would
+    prove nothing about the gate.
+    """
     variant = variant_with_many_stocks
     variables = {
         "channel": channel_USD.slug,
@@ -347,13 +354,14 @@ def test_the_gate_mutation_refuses_an_unknown_product(
     )
     errors = content["data"]["wsmProductGateSet"]["errors"]
 
-    assert errors and errors[0]["code"] == "NOT_FOUND"
+    assert errors
+    assert errors[0]["code"] == "NOT_FOUND"
 
 
 def test_the_bulk_mutation_gates_a_catalogue(
     staff_api_client, permission_manage_discounts, product_list
 ):
-    """ds needs 2,731 products gated, which is six calls of 500, not a job."""
+    """Ds needs 2,731 products gated, which is six calls of 500, not a job."""
     gates = [
         {"product": product_id(product), "loginRequired": True}
         for product in product_list
@@ -381,9 +389,7 @@ def test_the_bulk_mutation_is_an_upsert(
     ]
     staff_api_client.user.user_permissions.add(permission_manage_discounts)
     for _ in range(2):
-        get_graphql_content(
-            staff_api_client.post_graphql(GATE_BULK, {"gates": gates})
-        )
+        get_graphql_content(staff_api_client.post_graphql(GATE_BULK, {"gates": gates}))
 
     assert DealerProductGate.objects.count() == len(product_list)
 
@@ -393,9 +399,7 @@ def test_the_bulk_mutation_refuses_a_paste_over_the_cap(
 ):
     from ..utils import BULK_LIMIT
 
-    gates = [{"product": product_id(product), "loginRequired": True}] * (
-        BULK_LIMIT + 1
-    )
+    gates = [{"product": product_id(product), "loginRequired": True}] * (BULK_LIMIT + 1)
     content = get_graphql_content(
         staff_api_client.post_graphql(
             GATE_BULK, {"gates": gates}, permissions=[permission_manage_discounts]
@@ -462,3 +466,104 @@ def test_a_staff_token_that_manages_products_still_sees_prices(
 
     assert content["data"]["product"]["pricing"] is not None
     assert content["data"]["product"]["wsmGated"] is False
+
+
+CATEGORY_GATE_SET = """
+    mutation SetCategory($category: ID!, $required: Boolean!, $groups: [ID!]) {
+      wsmCategoryGateSet(
+        category: $category, loginRequired: $required, groups: $groups
+      ) {
+        gate { loginRequired category { name } groups { code } }
+        errors { field code message }
+      }
+    }
+"""
+
+CATEGORY_GATE_READ = """
+    query CategoryGate($id: ID!) {
+      category(id: $id) { wsmGate { loginRequired groups { code } } }
+    }
+"""
+
+
+def test_a_gated_category_gates_the_products_in_it(
+    api_client, product, category, channel_USD
+):
+    """5.0 gates SECTIONS, and ds loses 20 rows if this does not work.
+
+    76 tenants login-gate a category or a page (127 rows) and 40 scope one by
+    group (210 rows). The shopper-facing answer stays on the PRODUCT, which is
+    where the gate is finally applied.
+    """
+    DealerCategoryGate.objects.create(category=category, login_required=True)
+
+    data = ask(api_client, PDP, product, channel_USD)["data"]["product"]
+
+    assert data["wsmGated"] is True
+    assert data["pricing"] is None
+
+
+def test_a_product_published_by_its_own_row_beats_a_gated_category(
+    api_client, product, category, channel_USD
+):
+    """Most specific wins, in the permissive direction too."""
+    DealerCategoryGate.objects.create(category=category, login_required=True)
+    DealerProductGate.objects.create(product=product, login_required=False)
+
+    data = ask(api_client, PDP, product, channel_USD)["data"]["product"]
+
+    assert data["wsmGated"] is False
+    assert data["pricing"] is not None
+
+
+def test_the_category_gate_mutation_writes_and_reads_back(
+    staff_api_client, permission_manage_discounts, category, fob
+):
+    variables = {
+        "category": graphene.Node.to_global_id("Category", category.pk),
+        "required": True,
+        "groups": [graphene.Node.to_global_id("WsmDealerGroup", fob.pk)],
+    }
+    content = get_graphql_content(
+        staff_api_client.post_graphql(
+            CATEGORY_GATE_SET, variables, permissions=[permission_manage_discounts]
+        )
+    )
+    payload = content["data"]["wsmCategoryGateSet"]
+
+    assert payload["errors"] == []
+    assert payload["gate"]["loginRequired"] is True
+    assert payload["gate"]["category"]["name"] == category.name
+    assert [group["code"] for group in payload["gate"]["groups"]] == ["fob"]
+
+    content = get_graphql_content(
+        staff_api_client.post_graphql(
+            CATEGORY_GATE_READ,
+            {"id": graphene.Node.to_global_id("Category", category.pk)},
+        )
+    )
+    assert content["data"]["category"]["wsmGate"]["loginRequired"] is True
+
+
+def test_the_category_gate_field_needs_the_permission(staff_api_client, category):
+    response = staff_api_client.post_graphql(
+        CATEGORY_GATE_READ,
+        {"id": graphene.Node.to_global_id("Category", category.pk)},
+    )
+
+    assert_no_permission(response)
+
+
+def test_a_dealer_in_two_groups_sees_what_either_group_may_see(
+    user_api_client, product, channel_USD, gated_store, customer_user, fob, cif
+):
+    """Dana, 2026-09-11: ACCESS is the union, PRICE stays the one group."""
+    dealer = DealerCustomer.objects.create(user=customer_user, group=cif)
+    dealer.access_groups.add(fob)
+    gate = DealerProductGate.objects.create(product=product, login_required=True)
+    gate.groups.add(fob)
+
+    data = ask(user_api_client, PDP, product, channel_USD)["data"]["product"]
+
+    assert data["wsmGated"] is False
+    assert data["pricing"] is not None

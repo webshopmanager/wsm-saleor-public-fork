@@ -18,11 +18,19 @@ from ..gate import (
     GATED_CODE,
     Gate,
     blocked_products,
+    buyer_groups_for,
+    category_gates_for_products,
     gates_for_products,
     is_gated,
     refuse_gated_lines,
 )
-from ..models import DealerCustomer, DealerGroup, DealerProductGate, DealerSettings
+from ..models import (
+    DealerCategoryGate,
+    DealerCustomer,
+    DealerGroup,
+    DealerProductGate,
+    DealerSettings,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -48,31 +56,50 @@ def fob_buyer(customer_user, fob):
 # Every way through the rule, named. The three that matter to ds are the first
 # row (the public on a gated store), the fifth (a dealer on a gated store) and
 # the last two (a part one trade tier may see and another may not).
+NOBODY = frozenset()
+FOB = frozenset({"fob"})
+CIF = frozenset({"cif"})
+BOTH = frozenset({"fob", "cif"})
+
+
 @pytest.mark.parametrize(
-    ("gate", "site_gated", "buyer_group", "expected"),
+    ("gate", "site_gated", "buyer_groups", "expected"),
     [
-        (None, True, None, True),
-        (None, False, None, False),
-        (None, False, "fob", False),
-        (None, True, "fob", False),
-        (Gate(True, frozenset()), False, None, True),
-        (Gate(True, frozenset()), False, "fob", False),
-        (Gate(False, frozenset()), True, None, False),
-        (Gate(True, frozenset({"fob"})), True, "fob", False),
-        (Gate(True, frozenset({"fob"})), True, "cif", True),
-        (Gate(True, frozenset({"fob"})), False, None, True),
+        (None, True, NOBODY, True),
+        (None, False, NOBODY, False),
+        (None, False, FOB, False),
+        (None, True, FOB, False),
+        (Gate(True, frozenset()), False, NOBODY, True),
+        (Gate(True, frozenset()), False, FOB, False),
+        (Gate(False, frozenset()), True, NOBODY, False),
+        (Gate(True, FOB), True, FOB, False),
+        (Gate(True, FOB), True, CIF, True),
+        (Gate(True, FOB), False, NOBODY, True),
+        # Access is the UNION: one matching group is enough, and a buyer in
+        # neither named group is still refused (Dana, 2026-09-11).
+        (Gate(True, FOB), True, BOTH, False),
+        (Gate(True, frozenset({"wd-pallet", "jobber"})), True, CIF, True),
+        (
+            Gate(True, frozenset({"wd-pallet", "jobber"})),
+            True,
+            frozenset({"cif", "jobber"}),
+            False,
+        ),
     ],
 )
-def test_the_rule(gate, site_gated, buyer_group, expected):
-    assert is_gated(gate, site_gated=site_gated, buyer_group=buyer_group) is expected
+def test_the_rule(gate, site_gated, buyer_groups, expected):
+    assert is_gated(gate, site_gated=site_gated, buyer_groups=buyer_groups) is expected
 
 
 def test_an_unconfigured_store_gates_nothing():
-    """Fail SAFE means show LESS, and on a store nobody configured, less is
-    what the store already showed: a filter that started hiding prices by
-    itself would be the failure, not the fix."""
+    """An unconfigured store shows what it always showed.
+
+    Fail SAFE means show LESS, and on a store nobody configured, less is what
+    the store already showed: a filter that started hiding prices by itself
+    would be the failure, not the fix.
+    """
     assert DealerSettings.catalogue_gated_enabled() is False
-    assert is_gated(None, site_gated=False, buyer_group=None) is False
+    assert is_gated(None, site_gated=False, buyer_groups=frozenset()) is False
 
 
 def test_gates_for_products_reads_the_groups_it_was_given(product, fob):
@@ -107,7 +134,9 @@ def test_blocked_products_scopes_by_group(product, fob_buyer, cif, customer_user
 def test_the_ds_shape_two_groups_see_a_part_and_a_third_does_not(
     product, customer_user, customer_user2
 ):
-    """ds's real data, measured 2026-09-11: `customer_group_access_link` carries
+    """A part two trade tiers may see and a third may not.
+
+    ds's real data, measured 2026-09-11: `customer_group_access_link` carries
     2,748 rows across 3 of its 5 groups (WD Pallet 1,371, Jobber 1,370,
     Container 7), while FOB and CIF carry none and are pure price books. So a
     part named to two groups and not a third is the common case, not the edge.
@@ -148,9 +177,12 @@ def test_a_member_may_write_the_same_line(checkout, variant, fob_buyer):
 
 
 def test_removing_a_gated_line_is_never_refused(checkout, variant):
-    """A shopper whose cart holds a line the merchant has since gated must
-    still be able to take it OUT, and a removal is quantity 0 through the same
-    function."""
+    """A gated line can always be taken back out of a cart.
+
+    A shopper whose cart holds a line the merchant has since gated must still
+    be able to remove it, and a removal is quantity 0 through the same function
+    an add goes through.
+    """
     DealerSettings.objects.create(catalogue_gated=True)
 
     refuse_gated_lines(checkout, [variant], [_line(variant, 0)])
@@ -218,3 +250,117 @@ def test_a_gated_store_still_prices_for_a_dealer_with_a_tier(
 
     assert found is not None
     assert found.amount == Decimal("5.00")
+
+
+# --------------------------------------------------------------- CATEGORIES
+#
+# 5.0 gates SECTIONS as well as products: 76 tenants login-gate a category or
+# page (127 rows) and 40 scope content by group (210 rows). ds alone carries 15
+# category visibility rows and 5 category login gates, every one of which a
+# product-only gate dropped on the floor.
+
+
+def test_a_category_gate_covers_the_products_in_it(product, category):
+    DealerCategoryGate.objects.create(category=category, login_required=True)
+
+    assert product.category_id == category.pk
+    assert blocked_products([product.pk], None) == {product.pk}
+
+
+def test_a_category_gate_covers_a_product_in_a_CHILD_category(product, category):
+    """A merchant gating a section means the section, not one level of it."""
+    from ....product.models import Category
+
+    child = Category.objects.create(name="Inner", slug="inner", parent=category)
+    product.category = child
+    product.save(update_fields=["category"])
+    DealerCategoryGate.objects.create(category=category, login_required=True)
+
+    assert blocked_products([product.pk], None) == {product.pk}
+
+
+def test_a_products_own_row_beats_its_category(product, category):
+    """Most specific wins, and it wins in the PERMISSIVE direction too."""
+    DealerCategoryGate.objects.create(category=category, login_required=True)
+    DealerProductGate.objects.create(product=product, login_required=False)
+
+    assert blocked_products([product.pk], None) == set()
+
+
+def test_the_nearest_gated_ancestor_wins(product, category, fob, cif, customer_user):
+    """Two gated ancestors, and the deeper one decides."""
+    from ....product.models import Category
+
+    child = Category.objects.create(name="Inner", slug="inner2", parent=category)
+    product.category = child
+    product.save(update_fields=["category"])
+    outer = DealerCategoryGate.objects.create(category=category, login_required=True)
+    outer.groups.add(cif)
+    inner = DealerCategoryGate.objects.create(category=child, login_required=True)
+    inner.groups.add(fob)
+
+    # The buyer is in FOB, which the INNER gate names and the outer one does not.
+    DealerCustomer.objects.create(user=customer_user, group=fob)
+
+    assert blocked_products([product.pk], customer_user.pk) == set()
+
+
+def test_a_category_gate_scoped_to_a_group_hides_it_from_another(
+    product, category, fob_buyer, cif, customer_user2
+):
+    DealerCustomer.objects.create(user=customer_user2, group=cif)
+    gate = DealerCategoryGate.objects.create(category=category, login_required=True)
+    gate.groups.add(DealerGroup.objects.get(code="fob"))
+
+    assert blocked_products([product.pk], fob_buyer.pk) == set()
+    assert blocked_products([product.pk], customer_user2.pk) == {product.pk}
+
+
+def test_a_public_category_gate_publishes_a_section_of_a_gated_store(product, category):
+    DealerSettings.objects.create(catalogue_gated=True)
+    DealerCategoryGate.objects.create(category=category, login_required=False)
+
+    assert blocked_products([product.pk], None) == set()
+
+
+def test_no_category_gate_costs_nothing(product, django_assert_num_queries):
+    """The store that has gated no section must not pay for the tree."""
+    with django_assert_num_queries(1):
+        assert category_gates_for_products([product.pk]) == {}
+
+
+# ------------------------------------------------------------- MULTI-GROUP
+
+
+def test_access_is_the_union_of_every_group_the_buyer_is_in(
+    product, category, customer_user, fob, cif
+):
+    """Dana, 2026-09-11: ACCESS is the union, PRICE stays the one group.
+
+    5.0's `customer_group_link` is many-to-many on 28 tenants and 2,533
+    customers; ds has 156 customers in the link table against 96 on the legacy
+    single-group column.
+    """
+    wd = DealerGroup.objects.create(code="wd-pallet", name="WD Pallet")
+    dealer = DealerCustomer.objects.create(user=customer_user, group=cif)
+    dealer.access_groups.add(wd)
+    gate = DealerProductGate.objects.create(product=product, login_required=True)
+    gate.groups.add(wd)
+
+    assert buyer_groups_for(customer_user.pk) == frozenset({"cif", "wd-pallet"})
+    assert blocked_products([product.pk], customer_user.pk) == set()
+
+
+def test_the_price_group_is_still_exactly_one(customer_user, fob, cif):
+    """The union is visibility only: `tier_group_for` answers one group."""
+    from ..pricing import tier_group_for
+
+    dealer = DealerCustomer.objects.create(user=customer_user, group=cif)
+    dealer.access_groups.add(fob)
+
+    assert tier_group_for(customer_user.pk) == "cif"
+
+
+def test_a_buyer_in_no_group_has_no_access_groups(customer_user):
+    assert buyer_groups_for(customer_user.pk) == frozenset()
+    assert buyer_groups_for(None) == frozenset()

@@ -18,6 +18,7 @@ from ....graphql.account.types import User
 from ....graphql.core.connection import CountableConnection
 from ....graphql.core.context import ChannelContext
 from ....graphql.core.types import ModelObjectType
+from ....graphql.product.types.categories import Category
 from ....graphql.product.types.products import ProductVariant
 from ...dealer import models
 from ..scalars import WsmDecimal
@@ -56,6 +57,12 @@ class WsmDealerGroup(WsmDocCategory, ModelObjectType[models.DealerGroup]):
         description = "A buyer group: dealer-1, warehouse, installer."
 
     @staticmethod
+    def resolve_access_groups(root: models.DealerCustomer, _info):
+        # `.all()` on a prefetched manager reads the cache; the list resolver
+        # prefetches it, for the reason the counts are annotated there.
+        return root.access_groups.all()
+
+    @staticmethod
     def resolve_tier_price_count(root: models.DealerGroup, _info):
         count = getattr(root, TIER_PRICE_COUNT, None)
         return root.tier_prices.count() if count is None else count
@@ -83,11 +90,59 @@ class WsmDealerCustomer(WsmDocCategory, ModelObjectType[models.DealerCustomer]):
             "the merchant's to hold on file; nothing here checks for one."
         ),
     )
+    access_groups = graphene.List(
+        graphene.NonNull(WsmDealerGroup),
+        required=True,
+        description=(
+            "Extra groups whose products this shopper may SEE, on top of the "
+            "one they buy at. Visibility only: access is the union of every "
+            "group, while the price is always the one above."
+        ),
+    )
 
     class Meta:
         model = models.DealerCustomer
         interfaces = [graphene.relay.Node]
         description = "The link from a signed-in shopper to their buyer group."
+
+
+class WsmCategoryGate(WsmDocCategory, ModelObjectType[models.DealerCategoryGate]):
+    """Who may see a whole section of the catalogue, and everything under it.
+
+    Null on a category with no row, for the reason `WsmProductGate` is: a type
+    that invented a row would tell a merchant they had configured something
+    they had not.
+    """
+
+    id = graphene.GlobalID(required=True, description="ID of the gate.")
+    category = graphene.Field(
+        Category, required=True, description="The section this rule is about."
+    )
+    login_required = graphene.Boolean(
+        required=True,
+        description=(
+            "True: only a signed-in dealer sees prices in this section and can "
+            "buy from it. False: this section is priced and sold to everyone, "
+            "even when the whole store is gated."
+        ),
+    )
+    groups = graphene.List(
+        graphene.NonNull(WsmDealerGroup),
+        required=True,
+        description=(
+            "Empty means any dealer group may see this section. Naming groups "
+            "means only those groups may."
+        ),
+    )
+
+    class Meta:
+        model = models.DealerCategoryGate
+        interfaces = [graphene.relay.Node]
+        description = "Who may see a whole section of the catalogue."
+
+    @staticmethod
+    def resolve_groups(root: models.DealerCategoryGate, _info):
+        return root.groups.all()
 
 
 class WsmTierPrice(WsmDocCategory, ModelObjectType[models.TierPrice]):

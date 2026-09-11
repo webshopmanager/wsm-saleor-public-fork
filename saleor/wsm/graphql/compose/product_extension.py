@@ -52,13 +52,13 @@ def _resolve_compliance(root, info, **_kwargs):
     return loaders.ComplianceByProductIdLoader(info.context).load(root.node.id)
 
 
-def _assert_free(name):
-    existing = Product._meta.fields.get(name)
+def _assert_free(owner, name):
+    existing = owner._meta.fields.get(name)
     if existing is not None and getattr(existing, "_wsm_owned", False) is not True:
         raise RuntimeError(
-            f"Product already declares {name!r}. This fork appends fields to the "
-            f"stock type and never redefines one, so a collision is an upstream "
-            f"bump to read, not a name to work around."
+            f"{owner.__name__} already declares {name!r}. This fork appends "
+            f"fields to the stock type and never redefines one, so a collision "
+            f"is an upstream bump to read, not a name to work around."
         )
 
 
@@ -109,16 +109,16 @@ def extend_product_type():
             _resolve_compliance,
         ),
     }
-    return append_product_fields(fields)
+    return append_fields(Product, fields)
 
 
-def append_product_fields(fields):
-    """Append `{name: (field, resolver)}` to stock's `Product`. Idempotent.
+def append_fields(owner, fields):
+    """Append `{name: (field, resolver)}` to a stock graphene type. Idempotent.
 
     The loop, named, because MP4 is not one domain's business any more: the
-    dealer app appends the gated-catalogue fields to the same core type through
-    this function (`saleor/wsm/graphql/dealer/product_extension.py`), and a
-    second copy of this loop would be a second `_assert_free` and a second
+    dealer app appends the gated-catalogue fields to `Product` AND to `Category`
+    through this function (`saleor/wsm/graphql/dealer/product_extension.py`),
+    and a second copy of this loop would be a second `_assert_free` and a second
     chance to forget the `_wsm_owned` marker the ledger discovers by.
 
     ponytail: the ceiling is that the ORDERING guarantee (stock's schema is
@@ -130,10 +130,10 @@ def append_product_fields(fields):
     but the import lines would move.
     """
     for name, (field, resolver) in fields.items():
-        _assert_free(name)
+        _assert_free(owner, name)
         field._wsm_owned = True
-        Product._meta.fields[name] = field
-        setattr(Product, f"resolve_{name}", staticmethod(resolver))
+        owner._meta.fields[name] = field
+        setattr(owner, f"resolve_{name}", staticmethod(resolver))
     return tuple(fields)
 
 
@@ -142,4 +142,4 @@ extend_product_type()
 
 # Re-exported so a test can assert the extension without importing graphene's
 # internals itself.
-__all__ = ["WSM_PRODUCT_FIELDS", "append_product_fields", "extend_product_type"]
+__all__ = ["WSM_PRODUCT_FIELDS", "append_fields", "extend_product_type"]

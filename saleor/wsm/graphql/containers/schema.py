@@ -14,6 +14,7 @@ from ....graphql.core.utils import from_global_id_or_error
 from ....graphql.core.validators import validate_one_of_args_is_in_query
 from ....permission.enums import ProductPermissions
 from ...containers import models
+from ...containers import resolve as containers_resolve
 from ..types import DOC_CATEGORY_WSM
 from .filters import WsmKitConfigFilterInput, WsmSeriesConfigFilterInput
 from .mutations import (
@@ -24,6 +25,7 @@ from .mutations import (
     WsmSeriesConfigUpdate,
 )
 from .types import (
+    WsmContainerResolution,
     WsmKitConfig,
     WsmKitConfigCountableConnection,
     WsmSeriesConfig,
@@ -93,6 +95,28 @@ class WsmContainersQueries(graphene.ObjectType):
         doc_category=DOC_CATEGORY_WSM,
     )
 
+    wsm_container_resolve = PermissionsField(
+        WsmContainerResolution,
+        collection=graphene.Argument(
+            graphene.ID, required=True, description="The container's collection."
+        ),
+        fitment_pairs=graphene.Argument(
+            graphene.String,
+            description=(
+                "The shopper's vehicle as the search engine names it, "
+                "`1:18,2:2008,3:2784`. Omitted resolves nothing and costs no "
+                "engine call, which is the price-range state."
+            ),
+        ),
+        description=(
+            "Resolve a container for a vehicle: which candidates fit each slot, "
+            "or the merchant's refusal. Two engine round trips with a vehicle, "
+            "zero without, both independent of the member count."
+        ),
+        permissions=CONTAINER_PERMISSIONS,
+        doc_category=DOC_CATEGORY_WSM,
+    )
+
     @staticmethod
     def resolve_wsm_series_config(
         _root, info: ResolveInfo, /, *, id=None, collection=None
@@ -131,6 +155,27 @@ class WsmContainersQueries(graphene.ObjectType):
         )
         return create_connection_slice(
             qs, info, kwargs, WsmKitConfigCountableConnection
+        )
+
+    @staticmethod
+    def resolve_wsm_container_resolve(
+        _root, info: ResolveInfo, /, *, collection, fitment_pairs=None
+    ):
+        """Staff-only, on purpose.
+
+        The shopper path does not come through here: the storefront asks the
+        SEARCH ENGINE directly over a public, CDN-cached GET and groups the
+        answer against the Saleor payload it already holds (the architecture
+        doc's shopper sequence). This field is the merchant-side preview and the
+        one place the rules live in Python, so it inherits the same
+        MANAGE_PRODUCTS gate as every other container field rather than opening
+        a second, unauthenticated door onto the same data.
+        """
+        _type, pk = from_global_id_or_error(collection, "Collection", raise_error=True)
+        return containers_resolve.resolve(
+            int(pk),
+            fitment_pairs or "",
+            database=get_database_connection_name(info.context),
         )
 
 

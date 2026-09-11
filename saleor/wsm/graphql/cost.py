@@ -78,6 +78,19 @@ CONTAINERS_COST = {
         "wsmSeriesConfigs": PER_PAGE,
         "wsmKitConfig": PER_OBJECT,
         "wsmKitConfigs": PER_PAGE,
+        # One container resolved for one vehicle. Two engine round trips at
+        # most, and the answer is one object however many members it holds, so
+        # it weighs what the other single-container lookups weigh.
+        "wsmContainerResolve": PER_OBJECT,
+    },
+    # Unpaged lists hanging off a type that IS paged (`wsmKitConfigs`), the
+    # same shape COMPOSE_COST prices on stock's `Product`: they multiply with
+    # the page above them, so they are not free.
+    "WsmKitConfig": {
+        "slots": PER_OBJECT,
+    },
+    "WsmContainerSlot": {
+        "candidates": PER_OBJECT,
     },
 }
 

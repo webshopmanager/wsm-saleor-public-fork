@@ -734,6 +734,37 @@ names are the same object, so passing the view's schema is a no-op there and a
 fix for every fork that composes one.
 
 
+## 16. Nothing. Container slots and the vehicle resolver (U7, 2026-09-11)
+
+The slots layer added **zero** lines to a file Saleor owns. The command at the
+top of this file still returns `saleor/settings.py` and `saleor/wsm/**` and
+nothing else, on this branch, after the rebase onto `ca1fbf3771`. New monkey
+patches: **zero.** New core rebinds: **zero**, so `REBOUND` in
+`saleor/wsm/patches.py` is unchanged and MP5 is the only entry in it.
+
+Everything the unit added lives under `saleor/wsm/`: a `ContainerSlot` table
+and its members' foreign key (`wsm_containers.0003_container_slots`, additive,
+with a data step that gives every existing kit one slot holding its members),
+the resolver in `saleor/wsm/containers/resolve.py`, and the GraphQL that
+reaches them.
+
+The one thing it had to add OUTSIDE its own package is three cost-map entries,
+because fix wave 2A's `test_every_wsm_root_field_carries_a_cost_hint` reads the
+SERVED schema and reddens on a `wsm*` root field with no price. They are in
+`saleor/wsm/graphql/cost.py`, which is fork-owned:
+
+| Entry | Weight | Why that weight |
+|---|---|---|
+| `Query.wsmContainerResolve` | `PER_OBJECT` | One container resolved for one vehicle. The answer is one object however many members it holds, and the engine round trips are capped at two, so it weighs what `wsmKitConfig` weighs. |
+| `WsmKitConfig.slots` | `PER_OBJECT` | An unpaged list on a type reached through a PAGED connection, so it multiplies with the page above it. Same shape `COMPOSE_COST` prices on stock's `Product`. |
+| `WsmContainerSlot.candidates` | `PER_OBJECT` | Same, one level down: this is where a kit's fan-out actually is. |
+
+Known gap, pre-existing and NOT introduced here: `WsmKitConfig.members` and
+`WsmKitConfig.rules` have no entry either, so they are still free. The 2A test
+only asserts root fields, so nothing is red. Worth one line in `cost.py` the
+next time that file is opened.
+
+
 ## Where the stamps live: PRIVATE metadata, always (review wave WW1, 2026-09-08)
 
 All three patches decide what to do with a line by reading a `wsm.*` key off it.

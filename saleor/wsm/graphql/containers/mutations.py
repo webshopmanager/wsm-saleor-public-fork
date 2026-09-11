@@ -214,6 +214,46 @@ class WsmSeriesConfigDelete(ModelDeleteMutation):
 # --- kits --------------------------------------------------------------------
 
 
+class WsmContainerSlotInput(BaseInputObjectType):
+    id = graphene.ID(description="Omit to create. Supply to edit the row in place.")
+    key = graphene.String(
+        description=(
+            "A client-chosen handle, unique within this one mutation, so a part "
+            "in the same payload can name a slot that has no ID yet. Never stored."
+        )
+    )
+    label = graphene.String(
+        required=True, description="What this role is called: Exhaust, Tuner, Gauge."
+    )
+    quantity = graphene.Int(description="How many of whatever fills this slot.")
+    required = graphene.Boolean(
+        description="A required slot with nothing that fits refuses the container."
+    )
+    sort_order = graphene.Int(description="Lowest first.")
+    axes = NonNullList(
+        graphene.String,
+        description="The questions this slot asks AFTER the vehicle, in order.",
+    )
+    partitioning_axis = graphene.String(
+        description=(
+            "The axis that decides which of the fitting candidates the shopper "
+            "ends up on. Blank takes every candidate that fits."
+        )
+    )
+    miss_message = graphene.String(
+        description="What a shopper is told when nothing here fits their vehicle."
+    )
+    source_collection = graphene.ID(
+        description=(
+            "Fill this slot from another container's collection instead of "
+            "listing candidates, so a kit can hold a series by reference."
+        )
+    )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_WSM
+
+
 class WsmKitMemberInput(BaseInputObjectType):
     id = graphene.ID(description="Omit to create. Supply to edit the row in place.")
     key = graphene.String(
@@ -226,6 +266,12 @@ class WsmKitMemberInput(BaseInputObjectType):
     variant = graphene.ID(required=True, description="The SKU this kit contains.")
     quantity = graphene.Int(description="How many of this SKU one kit contains.")
     sort_order = graphene.Int(description="Lowest first.")
+    slot_id = graphene.ID(
+        description="An existing slot of this container. Never both with slotKey."
+    )
+    slot_key = graphene.String(
+        description="A slot created in this same payload. Never both with slotId."
+    )
 
     class Meta:
         doc_category = DOC_CATEGORY_WSM
@@ -260,6 +306,20 @@ class WsmKitConfigCreateInput(BaseInputObjectType):
     discount_amount = WsmDecimal(description="The saving off the members' prices.")
     freight_class = graphene.String(description="Freight class for the whole kit.")
     active = graphene.Boolean(description="Off takes the kit price away.")
+    brand = graphene.String(description="The one brand this container covers.")
+    published = graphene.Boolean(description="Show this container as its own page.")
+    miss_message = graphene.String(
+        description="What a shopper is told when their vehicle leaves a slot empty."
+    )
+    slots = NonNullList(
+        WsmContainerSlotInput,
+        description=(
+            "The roles this container is made of. Provided REPLACES the list, "
+            "and a slot dropped from it takes its own candidates with it, so a "
+            "payload that drops a slot still holding parts is refused unless it "
+            "replaces the parts too."
+        ),
+    )
     members = NonNullList(WsmKitMemberInput, description="The parts, and how many.")
     rules = NonNullList(WsmKitMemberRuleInput, description="How the kit goes together.")
 
@@ -274,6 +334,18 @@ class WsmKitConfigUpdateInput(BaseInputObjectType):
     discount_amount = WsmDecimal(description="The saving off the members' prices.")
     freight_class = graphene.String(description="Freight class for the whole kit.")
     active = graphene.Boolean(description="Off takes the kit price away.")
+    brand = graphene.String(description="The one brand this container covers.")
+    published = graphene.Boolean(description="Show this container as its own page.")
+    miss_message = graphene.String(
+        description="What a shopper is told when their vehicle leaves a slot empty."
+    )
+    slots = NonNullList(
+        WsmContainerSlotInput,
+        description=(
+            "Omitted leaves slots untouched. Provided replaces the list, and a "
+            "slot dropped from it takes its own candidates with it."
+        ),
+    )
     members = NonNullList(
         WsmKitMemberInput,
         description="Omitted leaves members untouched. Provided replaces the list.",
@@ -315,22 +387,32 @@ class KitWriteMixin:
         if collection_id is not None:
             cleaned_input["collection"] = _collection_or_error(database, collection_id)
 
+        slots = cleaned_input.pop("slots", None)
+        cleaned_input["slot_rows"] = (
+            cls._clean_slots(database, instance, slots) if slots is not None else None
+        )
+        cleaned_input["replace_slots"] = slots is not None
+
         if cleaned_input.get("members") is not None:
-            slots = cls._clean_members(database, instance, cleaned_input["members"])
-            cleaned_input["member_slots"] = slots
+            cleaned_input["member_rows"] = cls._clean_members(
+                database, instance, cleaned_input["members"], cleaned_input["slot_rows"]
+            )
             cleaned_input["replace_members"] = True
         else:
-            cleaned_input["member_slots"] = [
-                {"member": member, "key": None}
+            cleaned_input["member_rows"] = [
+                {"member": member, "key": None, "slot": None}
                 for member in cls._stored_members(instance)
             ]
             cleaned_input["replace_members"] = False
         # Never handed to `construct_instance`: KitConfig has no such column.
         cleaned_input.pop("members", None)
 
+        if cleaned_input["replace_slots"] and not cleaned_input["replace_members"]:
+            cls._refuse_orphaning_candidates(instance, cleaned_input["slot_rows"])
+
         rules = cleaned_input.pop("rules", None)
         cleaned_input["rule_rows"] = (
-            cls._clean_rules(instance, rules, cleaned_input["member_slots"])
+            cls._clean_rules(instance, rules, cleaned_input["member_rows"])
             if rules is not None
             else None
         )
@@ -340,14 +422,193 @@ class KitWriteMixin:
     def _stored_members(instance):
         return list(instance.members.all()) if instance.pk else []
 
+    @staticmethod
+    def _stored_slots(instance):
+        return list(instance.slots.all()) if instance.pk else []
+
     @classmethod
-    def _clean_members(cls, database, instance, rows):
+    def _clean_slots(cls, database, instance, rows):
+        """The posted roles, checked against each other before one is written."""
+        from ....product.models import Collection
+
+        stored = {slot.pk: slot for slot in cls._stored_slots(instance)}
+        errors: dict = {}
+        slot_rows: list[dict] = []
+        seen_keys: set = set()
+        seen_labels: dict = {}
+        wanted_sources: dict = {}
+
+        for index, row in enumerate(rows):
+            field = f"slots.{index}"
+            slot = None
+            if row.get("id"):
+                pk = _pk_or_none(row["id"], "WsmContainerSlot")
+                slot = stored.get(pk) if pk is not None else None
+                if slot is None:
+                    errors[f"{field}.id"] = _error(
+                        "that slot is not on this container", "not_found"
+                    )
+                    continue
+            key = row.get("key")
+            if key is not None:
+                if key in seen_keys:
+                    errors[f"{field}.key"] = _error(
+                        f"{key!r} names two slots in this payload",
+                        "duplicated_input_item",
+                    )
+                    continue
+                seen_keys.add(key)
+
+            label = (row.get("label") or "").strip()
+            if not label:
+                errors[f"{field}.label"] = _error("name this role", "required")
+                continue
+            # The database says so too (wsm_containers_one_slot_per_label); this
+            # is the same rule where a merchant can read it, on the field.
+            if label.casefold() in seen_labels:
+                errors[f"{field}.label"] = _error(
+                    f"this container already has a slot called {label!r}",
+                    "duplicate_slot_label",
+                )
+                continue
+            seen_labels[label.casefold()] = index
+
+            quantity = row.get("quantity")
+            quantity = 1 if quantity is None else quantity
+            if quantity < 1:
+                errors[f"{field}.quantity"] = _error(
+                    "a slot holds at least one of whatever fills it",
+                    "kit_member_quantity_below_one",
+                )
+                continue
+
+            axes = list(row.get("axes") or [])
+            partitioning_axis = row.get("partitioning_axis") or ""
+            if partitioning_axis and axes and partitioning_axis not in axes:
+                errors[f"{field}.partitioningAxis"] = _error(
+                    f"{partitioning_axis!r} is not one of the axes {axes!r}",
+                    "axis_not_in_axes",
+                )
+                continue
+
+            source = row.get("source_collection")
+            source_pk = None
+            if source:
+                source_pk = _pk_or_none(source, "Collection")
+                if source_pk is None:
+                    errors[f"{field}.sourceCollection"] = _error(
+                        "that is not a collection", "invalid"
+                    )
+                    continue
+                wanted_sources.setdefault(source_pk, index)
+
+            slot_rows.append(
+                {
+                    "slot": slot,
+                    "key": key,
+                    "label": label,
+                    "quantity": quantity,
+                    "required": True
+                    if row.get("required") is None
+                    else row["required"],
+                    "sort_order": row.get("sort_order") or 0,
+                    "axes": axes,
+                    "partitioning_axis": partitioning_axis,
+                    "miss_message": row.get("miss_message") or "",
+                    "source_collection_pk": source_pk,
+                }
+            )
+
+        if errors:
+            raise ValidationError(errors)
+
+        # One read for every source collection the payload names, never one per
+        # slot: a bundle of twelve series would otherwise be twelve queries.
+        sources = Collection.objects.using(database).in_bulk(list(wanted_sources))
+        for slot_row in slot_rows:
+            source_pk = slot_row["source_collection_pk"]
+            if source_pk is None:
+                slot_row["source_collection"] = None
+                continue
+            collection = sources.get(source_pk)
+            if collection is None:
+                errors[f"slots.{wanted_sources[source_pk]}.sourceCollection"] = _error(
+                    "that collection does not exist", "not_found"
+                )
+            slot_row["source_collection"] = collection
+        if errors:
+            raise ValidationError(errors)
+        return slot_rows
+
+    @staticmethod
+    def _slot_for_member(row, slot_rows):
+        """Which posted slot this part fills, as an index, or (None, error).
+
+        Named by id or by key, never both, and always a slot IN THIS PAYLOAD: a
+        part pointing at a role the container is about to stop having is a row
+        the cascade would delete the moment it was written.
+        """
+        slot_id, slot_key = row.get("slot_id"), row.get("slot_key")
+        if slot_id and slot_key:
+            return None, _error("name the slot by id or by key, never both", "invalid")
+        if not slot_id and not slot_key:
+            return None, None
+        if slot_rows is None:
+            return None, _error(
+                "name this container's slots in the same call", "slot_not_in_container"
+            )
+        if slot_id:
+            pk = _pk_or_none(slot_id, "WsmContainerSlot")
+            for index, slot_row in enumerate(slot_rows):
+                if slot_row["slot"] is not None and slot_row["slot"].pk == pk:
+                    return index, None
+        else:
+            for index, slot_row in enumerate(slot_rows):
+                if slot_row["key"] == slot_key:
+                    return index, None
+        return None, _error(
+            "that slot is not on this container", "slot_not_in_container"
+        )
+
+    @classmethod
+    def _refuse_orphaning_candidates(cls, instance, slot_rows):
+        """Dropping a role deletes the parts that fill it. Never by surprise.
+
+        `KitMember.slot` cascades on purpose: a candidate for a role that no
+        longer exists is not a part of anything. That is right when the merchant
+        is rewriting the whole container, and it is silent data loss when they
+        only touched the slot list, so this refuses the second case out loud and
+        names the slot.
+        """
+        if not instance.pk:
+            return
+        kept = {row["slot"].pk for row in slot_rows if row["slot"] is not None}
+        doomed = [
+            slot
+            for slot in cls._stored_slots(instance)
+            if slot.pk not in kept and slot.candidates.exists()
+        ]
+        if doomed:
+            raise ValidationError(
+                {
+                    "slots": _error(
+                        "these slots still hold parts, so removing them would "
+                        "delete those parts: "
+                        f"{sorted(slot.label for slot in doomed)}. Send the "
+                        "parts you want to keep in the same call.",
+                        "slot_still_has_candidates",
+                    )
+                }
+            )
+
+    @classmethod
+    def _clean_members(cls, database, instance, rows, slot_rows):
         """The posted parts, checked against each other before one is written."""
         from ....product.models import ProductVariant
 
         stored = {member.pk: member for member in cls._stored_members(instance)}
         errors: dict = {}
-        slots: list[dict] = []
+        member_rows: list[dict] = []
         seen_keys: set = set()
         seen_variants: dict = {}
 
@@ -391,13 +652,18 @@ class KitWriteMixin:
                     "kit_member_quantity_below_one",
                 )
                 continue
-            slots.append(
+            slot_index, slot_error = cls._slot_for_member(row, slot_rows)
+            if slot_error is not None:
+                errors[f"{field}.slotId"] = slot_error
+                continue
+            member_rows.append(
                 {
                     "member": member,
                     "key": key,
                     "variant_pk": variant_pk,
                     "quantity": quantity,
                     "sort_order": row.get("sort_order") or 0,
+                    "slot_index": slot_index,
                 }
             )
 
@@ -405,19 +671,20 @@ class KitWriteMixin:
             raise ValidationError(errors)
 
         variants = ProductVariant.objects.using(database).in_bulk(list(seen_variants))
-        for slot in slots:
-            variant = variants.get(slot["variant_pk"])
+        for member_row in member_rows:
+            variant = variants.get(member_row["variant_pk"])
             if variant is None:
-                errors[f"members.{seen_variants[slot['variant_pk']]}.variant"] = _error(
+                index = seen_variants[member_row["variant_pk"]]
+                errors[f"members.{index}.variant"] = _error(
                     "that SKU does not exist", "not_found"
                 )
-            slot["variant"] = variant
+            member_row["variant"] = variant
         if errors:
             raise ValidationError(errors)
-        return slots
+        return member_rows
 
     @classmethod
-    def _clean_rules(cls, instance, rows, slots):
+    def _clean_rules(cls, instance, rows, member_rows):
         """Every rule resolved to the SLOTS of this same kit, or refused.
 
         A rule naming a member outside this kit can never fire
@@ -430,14 +697,14 @@ class KitWriteMixin:
             {rule.pk: rule for rule in instance.rules.all()} if instance.pk else {}
         )
         by_pk = {
-            slot["member"].pk: index
-            for index, slot in enumerate(slots)
-            if slot["member"] is not None
+            row["member"].pk: index
+            for index, row in enumerate(member_rows)
+            if row["member"] is not None
         }
         by_key = {
-            slot["key"]: index
-            for index, slot in enumerate(slots)
-            if slot["key"] is not None
+            row["key"]: index
+            for index, row in enumerate(member_rows)
+            if row["key"] is not None
         }
         errors: dict = {}
         parsed: list[dict] = []
@@ -525,15 +792,44 @@ class KitWriteMixin:
     @classmethod
     def _save_m2m(cls, info, instance, cleaned_data):
         super()._save_m2m(info, instance, cleaned_data)
+        # Slots first: a member row names the slot it fills, so the slot has to
+        # have a primary key before the member is saved against it.
+        if cleaned_data.get("replace_slots"):
+            cls._write_slots(instance, cleaned_data["slot_rows"])
         if cleaned_data.get("replace_members"):
-            cls._write_members(instance, cleaned_data["member_slots"])
+            cls._write_members(
+                instance, cleaned_data["member_rows"], cleaned_data["slot_rows"]
+            )
         if cleaned_data.get("rule_rows") is not None:
             cls._write_rules(
-                instance, cleaned_data["rule_rows"], cleaned_data["member_slots"]
+                instance, cleaned_data["rule_rows"], cleaned_data["member_rows"]
             )
 
     @staticmethod
-    def _write_members(instance, slots):
+    def _write_slots(instance, slot_rows):
+        """Replace the set. Dropped rows go FIRST, for the unique label constraint.
+
+        Same shape and same reason as `_write_members`: `wsm_containers_one_slot_per_label`
+        is a database constraint, so a row taking over a label another row is
+        giving up has to find it gone.
+        """
+        kept = [row["slot"].pk for row in slot_rows if row["slot"] is not None]
+        instance.slots.exclude(pk__in=kept).delete()
+        for row in slot_rows:
+            slot = row["slot"] or models.ContainerSlot(kit=instance)
+            slot.label = row["label"]
+            slot.quantity = row["quantity"]
+            slot.required = row["required"]
+            slot.sort_order = row["sort_order"]
+            slot.axes = row["axes"]
+            slot.partitioning_axis = row["partitioning_axis"]
+            slot.miss_message = row["miss_message"]
+            slot.source_collection = row["source_collection"]
+            slot.save()
+            row["slot"] = slot
+
+    @staticmethod
+    def _write_members(instance, member_rows, slot_rows=None):
         """Replace the set: the dropped rows go FIRST, then the kept ones move.
 
         Dropped first because `wsm_containers_one_row_per_kit_variant` is a
@@ -544,27 +840,34 @@ class KitWriteMixin:
         offers a swap, is a deferrable constraint; a datagrid that deletes and
         adds, which is what the Dashboard's does, never reaches it.
         """
-        kept = [slot["member"].pk for slot in slots if slot["member"] is not None]
+        kept = [row["member"].pk for row in member_rows if row["member"] is not None]
         instance.members.exclude(pk__in=kept).delete()
-        for slot in slots:
-            member = slot["member"] or models.KitMember(kit=instance)
-            member.variant = slot["variant"]
-            member.quantity = slot["quantity"]
-            member.sort_order = slot["sort_order"]
+        for row in member_rows:
+            member = row["member"] or models.KitMember(kit=instance)
+            member.variant = row["variant"]
+            member.quantity = row["quantity"]
+            member.sort_order = row["sort_order"]
+            if "slot_index" in row:
+                index = row["slot_index"]
+                member.slot = (
+                    slot_rows[index]["slot"]
+                    if index is not None and slot_rows is not None
+                    else None
+                )
             member.save()
-            slot["member"] = member
+            row["member"] = member
 
     @staticmethod
-    def _write_rules(instance, rule_rows, slots):
+    def _write_rules(instance, rule_rows, member_rows):
         kept = [row["rule"].pk for row in rule_rows if row["rule"] is not None]
         instance.rules.exclude(pk__in=kept).delete()
         for row in rule_rows:
             rule = row["rule"] or models.KitMemberRule(kit=instance)
-            rule.subject = slots[row["subject"]]["member"]
+            rule.subject = member_rows[row["subject"]]["member"]
             rule.kind = row["kind"]
             rule.message = row["message"]
             rule.save()
-            rule.targets.set([slots[index]["member"] for index in row["targets"]])
+            rule.targets.set([member_rows[index]["member"] for index in row["targets"]])
 
 
 class WsmKitConfigCreate(KitWriteMixin, DeprecatedModelMutation):

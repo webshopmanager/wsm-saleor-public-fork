@@ -12,9 +12,11 @@ from decimal import Decimal
 
 import pytest
 
-from saleor.wsm.containers import pricing
-from saleor.wsm.containers.models import KitConfig, KitMember
+from saleor.wsm.containers import pricing, resolve
+from saleor.wsm.containers.models import ContainerSlot, KitConfig, KitMember
 from saleor.wsm.tests import DEALER_HEADERS
+
+from .test_resolve import RZR_900, FakeEngine, document
 
 pytestmark = pytest.mark.django_db
 
@@ -1106,3 +1108,111 @@ def test_a_cart_read_does_not_buy_three_queries_per_kit(client, checkout, three_
         counted[k] = len(captured.captured_queries)
 
     assert counted[1] == counted[2] == counted[3], counted
+
+
+# --- the resolved assortment goes through the SAME kit money, not a second path -
+
+
+@pytest.fixture
+def bakeoff_container(bakeoff_kit):
+    """The acceptance kit as a one-slot container, exactly as the backfill makes it.
+
+    No partitioning axis, which is the data that says "take every candidate that
+    survives". If that is wrong, these two numbers move.
+    """
+    slot = ContainerSlot.objects.create(
+        kit=bakeoff_kit, label="Included parts", required=True, sort_order=0
+    )
+    bakeoff_kit.members.update(slot=slot)
+    return bakeoff_kit
+
+
+def test_the_resolver_picks_the_acceptance_kit_and_it_is_still_9358_19(
+    client, checkout, bakeoff_container, product_list
+):
+    """B4 retail, through `resolve` -> `pricing_members`. No vehicle, no engine."""
+    resolution = resolve.resolve(bakeoff_container.collection)
+
+    assert resolution.engine_calls == 0
+    picks = resolution.selected_variant_ids()
+    assert picks == [
+        product_list[0].variants.first().pk,
+        product_list[1].variants.first().pk,
+    ]
+
+    response = post_kit(
+        client, checkout, bakeoff_container.collection_id, variant_ids=picks
+    )
+
+    assert response.status_code == 200
+    assert response.json()["kitTotal"] == "9358.19"
+
+
+def test_a_vehicle_resolved_assortment_is_still_9358_19_at_retail(
+    client, checkout, bakeoff_container, product_list, settings, monkeypatch
+):
+    """Both members fit the machine, so the vehicle changes the money by nothing."""
+    settings.WSM_SEARCH_ENGINE_URL = "https://search.tonneauoutlaw.test"
+    members = [product_list[0], product_list[1]]
+    engine = FakeEngine(
+        by_vehicle={RZR_900: [document(p) for p in members]},
+        no_vehicle=[document(p) for p in members],
+    )
+    monkeypatch.setattr(resolve.requests, "get", engine)
+
+    resolution = resolve.resolve(bakeoff_container.collection, RZR_900)
+
+    assert resolution.engine_calls == 2
+    assert [c.fitment for c in resolution.slots[0].candidates] == [
+        resolve.FITS,
+        resolve.FITS,
+    ]
+    response = post_kit(
+        client,
+        checkout,
+        bakeoff_container.collection_id,
+        variant_ids=resolution.selected_variant_ids(),
+    )
+
+    assert response.json()["kitTotal"] == "9358.19"
+
+
+def test_a_vehicle_resolved_assortment_is_still_9159_10_for_a_tagged_dealer(
+    client,
+    checkout,
+    bakeoff_container,
+    product_list,
+    customer_user,
+    settings,
+    monkeypatch,
+):
+    """B4 dealer half: tiers apply per line because the lines are still real."""
+    from saleor.wsm.dealer.models import DealerCustomer, DealerGroup, TierPrice
+
+    group = DealerGroup.objects.create(code="dealer-1", name="Dealer 1")
+    DealerCustomer.objects.create(user=customer_user, group=group)
+    TierPrice.objects.create(
+        variant=product_list[0].variants.first(),
+        group=group,
+        min_quantity=1,
+        amount=Decimal("3400.00"),
+    )
+    settings.WSM_SEARCH_ENGINE_URL = "https://search.tonneauoutlaw.test"
+    members = [product_list[0], product_list[1]]
+    engine = FakeEngine(
+        by_vehicle={RZR_900: [document(p) for p in members]},
+        no_vehicle=[document(p) for p in members],
+    )
+    monkeypatch.setattr(resolve.requests, "get", engine)
+
+    resolution = resolve.resolve(bakeoff_container.collection, RZR_900)
+    response = post_kit(
+        client,
+        checkout,
+        bakeoff_container.collection_id,
+        customer=customer_user,
+        variant_ids=resolution.selected_variant_ids(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["kitTotal"] == "9159.10"

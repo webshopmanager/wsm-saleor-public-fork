@@ -63,6 +63,12 @@ class WsmErrorCode(Enum):
     KIT_MEMBER_QUANTITY_BELOW_ONE = "kit_member_quantity_below_one"
     RULE_SUBJECT_NOT_IN_KIT = "rule_subject_not_in_kit"
     RULE_TARGET_NOT_IN_KIT = "rule_target_not_in_kit"
+    # Slots. A container's roles are named, so two of them cannot share a name,
+    # a part cannot fill a role the container does not have, and a role cannot
+    # be deleted out from under the parts that fill it.
+    DUPLICATE_SLOT_LABEL = "duplicate_slot_label"
+    SLOT_NOT_IN_CONTAINER = "slot_not_in_container"
+    SLOT_STILL_HAS_CANDIDATES = "slot_still_has_candidates"
 
     # --- dealer: six rules, each with the line that enforces it. Two of them
     # are the same money column from two directions, because a tier amount is

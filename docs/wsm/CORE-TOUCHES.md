@@ -10,7 +10,7 @@ The complete inventory is one command, and it must return this file's list and
 nothing else:
 
 ```
-git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py, urls.py, section 7's list, saleor/wsm/**
+git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py, section 7's list, saleor/wsm/**
 git diff --name-only a1ab3a2..HEAD -- CHANGELOG.md
 ```
 
@@ -29,10 +29,13 @@ one resolver swap Bill's secondary-categories patch performs from
 FKs into core tables; core migrations are untouched, and the one migration
 section 7 brings in is state-only.
 
-Sections 1 to 6 and section 8 are this branch's own work and touch two core
-files. Section 7 is the six WSM patches that already existed before the fork,
-merged in from `wsm/bakeoff-rebase-probe`; they are the reason the guard test's
-allow-list is longer than two entries.
+Sections 1 to 4, 6, 8 to 10, 12 and 13 are this branch's own work and touch
+ONE core file, `saleor/settings.py`. Section 5 is gone and its line with it:
+section 13 turned the fork's urlconf into the root one, which took
+`saleor/urls.py` back to upstream byte-for-byte. Section 7 is the six WSM
+patches that already existed before the fork, merged in from
+`wsm/bakeoff-rebase-probe`; they are the reason the guard test's allow-list is
+longer than one entry.
 
 Since 2026-09-10 every patch also pins a **sha256 of the wrapped function's
 own source** (`SOURCE` in `saleor/wsm/patches.py`), and `install_guard` refuses
@@ -224,42 +227,26 @@ Containers.
 
 ---
 
-## 5. `saleor/urls.py`, +1 line of code (U2, U3 and U4 together, 2026-09-08)
+## 5. Withdrawn. `saleor/urls.py` is upstream again (U1 spine, 2026-09-10)
 
-```python
-    re_path(r"", include("saleor.wsm.urls")),
-```
+This section used to hold the fork's one `saleor/urls.py` line,
+`re_path(r"", include("saleor.wsm.urls"))`. Section 13 inverted that
+relationship: `saleor/wsm/urls.py` is the ROOT urlconf now and `saleor.urls` is
+what it includes, so the core line would be a cycle. It was removed and
+`saleor/urls.py` is byte-identical to the upstream release again.
 
-**Shared touch.** U2 (Compose endpoints, the merchant admin, static), U3
-(Dealer endpoints) and U4 (the kit endpoint) each need the fork's URLs mounted, and both branches wrote
-this line their own way. U2's shape is the one kept: U3's `path("wsm/", ...)`
-prefixes every fork route with `/wsm/`, which the dealer and compose endpoints
-want but `/admin/` and `/static/` do not, and those two are U2's merchant UI.
-Since 2026-09-10 the `/static/` route is OFF unless `WSM_SERVE_STATIC` is set
-(`saleor/wsm/urls.py::static_routes`, Wild West finding 11): the target
-deployment is ECS behind a CDN, where Django serving static files is a
-production defect, and a bake-off box behind SSH says so for itself. A box
-whose merchant screens render unstyled is missing that variable.
-An empty `re_path` prefix mounts the list at the root and lets
-`saleor/wsm/urls.py` spell out each app's own prefix, so all three shapes fit
-behind one core line. The dealer routes keep their exact paths
-(`/wsm/dealer_pricing/...`) because `saleor/wsm/urls.py` now carries the
-`wsm/` segment in its own pattern.
-
-Core gains ONE include however many fork apps exist, because
-`saleor/wsm/urls.py` is the list. Adding the next app's endpoints is a line in
-that file, which upstream does not own, rather than another core touch.
-
-Removal cost: delete the line and the `saleor/wsm/` package. Nothing in core
-resolves a `wsm-` route name.
+The numbering is kept rather than closed up, because sections 6 and 7 were
+written referring to "sections 1 to 5" and a renumbered ledger is a ledger
+nobody can follow across a rebase.
 
 ---
 
 ## 6. Nothing. What the merge added, and where (U6, 2026-09-08)
 
 Landing all three units on one branch added **zero** lines to a file Saleor
-owns. Sections 1 to 5 are still the complete core-touch list, and the command at
-the top of this file still returns `saleor/settings.py`, `saleor/urls.py` and
+owns. Sections 1 to 5 were the complete core-touch list at the time, and the
+command at the top of this file then returned `saleor/settings.py`, the now
+withdrawn `saleor/urls.py` and
 `saleor/wsm/**` and nothing else. What the merge did add lives entirely inside
 `saleor/wsm/`, and is listed here because a reviewer looking for the seam should
 not have to diff three branches to find it.
@@ -574,6 +561,69 @@ and would go red if the scope were tighter than the admin needs: 36 passed. Plus
 
 Expected: zero. Actual: **two**, in U3 and U7. Every entry names the exact
 function it replaces and the upstream change that would delete it.
+
+## 13. `saleor/settings.py`, one line repointed, +5 comment lines (U1 dashboard spine, 2026-09-10)
+
+```python
+ROOT_URLCONF = "saleor.wsm.urls"
+```
+
+**This is the whole attachment for the fork's GraphQL layer.** The merchant
+screens are being rebuilt as native Saleor Dashboard sections, which means the
+Dashboard has to reach our models over GraphQL, which means our fields have to
+be in the schema the API serves. There are two ways to do that in a fork that
+does not edit `saleor/`: rebind `saleor.graphql.api.schema` from `ready()`
+(rung 5, a fourth monkey patch), or compose our own schema and make our own
+urlconf the root (rung 1, a settings seam). This is the second.
+
+What it buys, concretely:
+
+- `saleor/wsm/graphql/schema.py` SUBCLASSES stock's `Query` and `Mutation`
+  (`type("Query", (WsmQueries, api.Query), {})`) and calls
+  `build_federated_schema` with the arguments read back off `api` itself, so
+  the composed schema is stock's schema plus our fields, never stock's schema
+  changed. `saleor/graphql/api.py` is imported and left alone; its own
+  `schema` object still exists and still has no WSM field on it, which
+  `test_our_fields_are_on_our_schema_and_stock_is_left_alone` asserts.
+- `saleor/wsm/urls.py` serves that schema at `graphql/` FIRST, then includes
+  `saleor.urls` whole. Every core route resolves exactly as before; core's own
+  `graphql/` line is simply never reached.
+- The monkey-patch count stays at **three**. A fourth was the alternative.
+- `saleor/urls.py` LEAVES the deviation budget (section 5, withdrawn), so the
+  files outside `saleor/wsm/` that differ from upstream on this branch's own
+  account go from two to one, and `ALLOWED_CORE_FILES` in
+  `saleor/wsm/tests/test_core_tables_untouched.py` is one entry shorter.
+
+**The tripwire.** Composing "with the same arguments" is an assumption about a
+core file. `API_SCHEMA_SOURCE` in `saleor/wsm/graphql/schema.py` is a sha256 of
+api.py's construction block (from `schema = build_federated_schema(` through
+`monitor_fields_usage(schema)`), and
+`test_the_pinned_digest_is_the_api_block_this_layer_was_written_against`
+compares it on every run. An upstream bump that adds a `types=` entry or a
+directive is then a red test with a diff to read, rather than a type that
+exists in stock's schema and silently not in the one we serve. Proven able to
+fail twice over: once by pinning a wrong digest (the first run of this branch),
+and permanently by
+`test_the_tripwire_moves_when_an_argument_does`, which feeds the function a
+modified api.py and asserts the digest moves. To re-pin after a deliberate
+bump, read the diff FIRST, mirror any new argument, then:
+
+```
+python -c "from saleor.wsm.graphql import schema; print(schema.source_digest())"
+```
+
+**Cost, measured and accepted.** Two full Saleor schemas are built at urlconf
+load, because `saleor.urls` builds its own on import and this design refuses to
+patch that away. The ceiling is cold-start time and resident memory on a worker,
+nothing per request. The upgrade path, if a cold start ever has to get cheaper,
+is the rung-5 rebind with a `PINNED` entry, which buys back one build at the
+cost of one monkey patch.
+
+**Removal cost:** set `ROOT_URLCONF` back to `"saleor.urls"`, restore the
+`include("saleor.wsm.urls")` line in `saleor/urls.py`, and the fork's REST
+routes work exactly as they did before; only the GraphQL fields go away.
+
+---
 
 ## Where the stamps live: PRIVATE metadata, always (review wave WW1, 2026-09-08)
 

@@ -49,6 +49,27 @@ FEE_SCOPE_CHOICES = [(s, SCOPE_LABELS.get(s, s)) for s in pricing.FEE_SCOPES]
 to_cents = money.to_cents
 
 
+# The machine code on every rule below, so one merchant sentence reaches a
+# screen with something a program can branch on. The strings ARE the members of
+# `saleor.wsm.graphql.errors.WsmErrorCode`; `get_error_code_from_error` passes an
+# unrecognised code through untouched, so a typo here would reach the Dashboard
+# as an enum value the schema does not declare and fail at serialisation, which
+# is what `test_every_compose_error_code_is_declared` proves cannot happen.
+#
+# The code lives on the raise, not in the mutation, because the rule lives on
+# the raise: a mutation matching merchant sentences to guess which rule fired
+# would break the first time somebody improved the wording.
+CONFIGURED_FLOOR_BELOW_ZERO = "configured_floor_below_zero"
+DEALER_FLOOR_BELOW_ZERO = "dealer_floor_below_zero"
+DUPLICATE_SKU_FRAGMENT = "duplicate_sku_fragment"
+UNKNOWN_DEALER_GROUP = "unknown_dealer_group"
+DEALER_DELTA_ABOVE_RETAIL = "dealer_delta_above_retail"
+DUPLICATE_TIER_GROUP = "duplicate_tier_group"
+FEE_AMOUNT_NEGATIVE = "fee_amount_negative"
+FEE_PERCENT_ABOVE_100 = "fee_percent_above_100"
+UNKNOWN_US_STATE_CODE = "unknown_us_state_code"
+
+
 def tier_group_choices():
     """Every dealer group code, for the admin dropdown and the error message.
 
@@ -73,7 +94,8 @@ def validate_tier_group_code(code: str) -> None:
     known = ", ".join(tier_group_choices()) or "none yet"
     raise ValidationError(
         f"There is no dealer group called {code!r}, so this price would never be "
-        f"charged to anyone. Dealer groups that exist: {known}."
+        f"charged to anyone. Dealer groups that exist: {known}.",
+        code=UNKNOWN_DEALER_GROUP,
     )
 
 
@@ -252,7 +274,8 @@ def floor_error(floor_cents: int, base_cents: int) -> ValidationError:
         f"stay above zero. The product's cheapest listed price is "
         f"{pricing.format_money(base_cents)} and the credits on it now add up to "
         f"more than that. Reduce the credit until the configured total stays "
-        f"above zero, or raise the product's price."
+        f"above zero, or raise the product's price.",
+        code=CONFIGURED_FLOOR_BELOW_ZERO,
     )
 
 
@@ -267,7 +290,8 @@ def dealer_floor_error(
         f"listed price is {pricing.format_money(base_cents)} and this group pays "
         f"the better of its own dealer price and retail on every choice, so its "
         f"credits add up to more than that. Reduce the dealer credit, or raise "
-        f"the product's price."
+        f"the product's price.",
+        code=DEALER_FLOOR_BELOW_ZERO,
     )
 
 
@@ -276,7 +300,8 @@ def duplicate_fragment_error(other_name: str, fragment: str) -> ValidationError:
         f"{other_name!r} in this question already uses the SKU code {fragment!r}. "
         f"Two choices with the same code produce the same SKU on the order, so "
         f"nobody can tell which one was bought. Give this one its own code, or "
-        f"leave it blank."
+        f"leave it blank.",
+        code=DUPLICATE_SKU_FRAGMENT,
     )
 
 
@@ -644,10 +669,11 @@ class ProductCompliance(models.Model):
         if unknown:
             raise ValidationError(
                 {
-                    "restricted_states": (
+                    "restricted_states": ValidationError(
                         "Not US state codes: "
                         + ", ".join(unknown)
-                        + ". Use two-letter codes, e.g. CA, HI, AK."
+                        + ". Use two-letter codes, e.g. CA, HI, AK.",
+                        code=UNKNOWN_US_STATE_CODE,
                     )
                 }
             )
@@ -954,7 +980,8 @@ class DealerTierOptionPrice(models.Model):
                     f"so a {self.tier_group} dealer cannot be charged "
                     f"{pricing.format_money(to_cents(self.price_delta))} for it. A "
                     f"dealer price is never above retail: enter the retail amount "
-                    f"or less, or a negative amount for a credit."
+                    f"or less, or a negative amount for a credit.",
+                    code=DEALER_DELTA_ABOVE_RETAIL,
                 )
 
         if not errors and self.option_value_id and self.price_delta is not None:
@@ -1081,7 +1108,8 @@ class Fee(models.Model):
                 {
                     "amount": ValidationError(
                         "A charge cannot be negative. To reduce a price, add an "
-                        "option choice with a credit instead."
+                        "option choice with a credit instead.",
+                        code=FEE_AMOUNT_NEGATIVE,
                     )
                 }
             )
@@ -1090,7 +1118,8 @@ class Fee(models.Model):
                 {
                     "amount": ValidationError(
                         "A percentage charge cannot be more than 100%. Enter 8.25 "
-                        "for 8.25%."
+                        "for 8.25%.",
+                        code=FEE_PERCENT_ABOVE_100,
                     )
                 }
             )

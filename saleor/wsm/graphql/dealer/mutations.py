@@ -1,15 +1,700 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
-"""Dealer pricing's GraphQL mutations."""
+"""The thirteen dealer mutations.
+
+Four on a group, three on a customer, five on a tier price, one on the settings
+singleton.
+
+Three rules here are the whole reason this file is longer than a declaration:
+
+1. **A tier amount is money that gets CHARGED.** The column carries three
+   decimal places to match `CheckoutLine.price_override`, the merchant screen
+   takes two (`dealer/admin.py:106`), and the floor is one cent rather than
+   "above zero" because 0.004 is a positive number that charges 0.00. Both
+   refusals are field errors with their own code. The `CheckConstraint`
+   `wsm_dealer_tier_amount_at_least_a_cent` is the backstop under them, for the
+   writers that never call `full_clean()`; a mutation that let a row reach it
+   would hand the merchant a 500 instead of a sentence.
+
+2. **A group code is a name other tables point at by string.** wsm.compose
+   stores `tier_group` as a bare CharField, so a code that is deleted or
+   duplicated silently changes what a compose delta prices against. Deleting a
+   group with customers is refused (`on_delete=PROTECT`) before the database
+   raises, so the merchant reads a sentence rather than a traceback.
+
+3. **A 300-row paste is the import path, not a loop.** `wsmTierPriceBulkCreate`
+   validates the whole payload against itself and the stored rows in a fixed
+   number of queries and writes it with ONE `bulk_create`.
+"""
+
+from decimal import Decimal
 
 import graphene
+from django.core.exceptions import ValidationError
+from django.db import transaction
 
-from ....graphql.core.mutations import DeprecatedModelMutation
-from ....graphql.core.types import BaseInputObjectType
+from ....graphql.core.mutations import (
+    BaseMutation,
+    DeprecatedModelMutation,
+    ModelBulkDeleteMutation,
+    ModelDeleteMutation,
+)
+from ....graphql.core.scalars import PositiveDecimal
+from ....graphql.core.types import BaseInputObjectType, NonNullList
+from ....graphql.core.utils import from_global_id_or_error
 from ....permission.enums import DiscountPermissions
 from ...dealer import models
 from ..errors import WsmError
 from ..types import DOC_CATEGORY_WSM
-from .types import WsmDealerSettings
+from .types import (
+    WsmDealerCustomer,
+    WsmDealerGroup,
+    WsmDealerSettings,
+    WsmTierPrice,
+)
+
+# ponytail: every mutation here reuses MANAGE_DISCOUNTS rather than adding a
+# `WsmPermissions` enum, because that enum lives in a core file and our
+# codenames would have to reach graphene's `PermissionEnum` to be assignable in
+# the Dashboard's own permission-group screens. Ceiling: anyone who can edit a
+# voucher can edit a dealer price. Upgrade path: append a `WsmPermissions` class
+# to `PERMISSIONS_ENUMS` from `ready()` before the schema is built, at which
+# point the existing `create_wsm_permissions` receiver and the
+# `wsm_merchant_role` command already carry the rows and the group.
+DEALER_PERMISSIONS = (DiscountPermissions.MANAGE_DISCOUNTS,)
+
+# Two places, because that is what a merchant means by a price. The column
+# stores three to match CheckoutLine.price_override.
+TIER_AMOUNT_PLACES = 2
+
+
+def _error(message: str, code: str) -> ValidationError:
+    return ValidationError(message, code=code)
+
+
+def _pk_or_none(global_id, type_name: str):
+    """The database id behind a global id, or None if it is not one of those."""
+    try:
+        _, pk = from_global_id_or_error(global_id, type_name, raise_error=True)
+        return int(pk)
+    except Exception:
+        return None
+
+
+def _clean_amount(amount, field: str) -> Decimal:
+    """The two refusals every tier amount gets, wherever it was typed.
+
+    Named once because the single create, the update and the 300-row paste all
+    mean the same thing by "a price", and three copies of a money rule is three
+    chances for one of them to drift a cent.
+    """
+    if amount is None:
+        raise ValidationError({field: _error("say what this group pays", "required")})
+    amount = Decimal(amount)
+    if -amount.as_tuple().exponent > TIER_AMOUNT_PLACES:
+        raise ValidationError(
+            {
+                field: _error(
+                    "a price has at most two decimal places",
+                    "tier_amount_too_many_decimals",
+                )
+            }
+        )
+    if amount < models.MIN_TIER_AMOUNT:
+        raise ValidationError(
+            {
+                field: _error(
+                    "a dealer price is a price, so it is at least one cent",
+                    "tier_amount_below_one_cent",
+                )
+            }
+        )
+    return amount
+
+
+class TypedIdMixin:
+    """Resolve an input's FK ids to the type that input NAMES, not to any node.
+
+    The inherited `clean_input` resolves a bare `ID` field with no `only_type`,
+    so a Collection global id posted as `group` comes back as a Collection and
+    the assignment that follows is a 500. Every id in this file names exactly
+    one type, so saying which turns that into a field error.
+    """
+
+    # field name in the input -> the graphene type its global id must carry
+    typed_ids: dict = {}
+
+    @classmethod
+    def clean_input(cls, info, instance, data, **kwargs):
+        typed = {name: data.pop(name) for name in cls.typed_ids if name in data}
+        cleaned_input = super().clean_input(info, instance, data, **kwargs)
+        for name, value in typed.items():
+            if value is None:
+                continue
+            cleaned_input[name] = cls.get_node_or_error(
+                info, value, field=name, only_type=cls.typed_ids[name]
+            )
+        return cleaned_input
+
+
+# --- groups ------------------------------------------------------------------
+
+
+class WsmDealerGroupCreateInput(BaseInputObjectType):
+    code = graphene.String(
+        required=True,
+        description=(
+            "The exact code that names this group everywhere else. Never "
+            "changed once prices point at it."
+        ),
+    )
+    name = graphene.String(description="What staff see. Blank shows the code.")
+
+    class Meta:
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmDealerGroupUpdateInput(BaseInputObjectType):
+    code = graphene.String(description="Changing this re-points every compose delta.")
+    name = graphene.String(description="What staff see. Blank shows the code.")
+
+    class Meta:
+        doc_category = DOC_CATEGORY_WSM
+
+
+class GroupWriteMixin:
+    @classmethod
+    def clean_input(cls, info, instance, data, **kwargs):
+        from ....graphql.core.context import get_database_connection_name
+
+        cleaned_input = super().clean_input(info, instance, data, **kwargs)
+        code = (cleaned_input.get("code") or "").strip()
+        if "code" in cleaned_input:
+            if not code:
+                raise ValidationError(
+                    {"code": _error("a group needs a code", "required")}
+                )
+            cleaned_input["code"] = code
+            # Its own check rather than `full_clean`'s, which calls this
+            # "unique": the Dashboard renders one sentence per code, and
+            # "unique" is the code it would also get from a duplicate anything.
+            taken = (
+                models.DealerGroup.objects.using(
+                    get_database_connection_name(info.context)
+                )
+                .filter(code=code)
+                .exclude(pk=instance.pk)
+                .exists()
+            )
+            if taken:
+                raise ValidationError(
+                    {
+                        "code": _error(
+                            f"{code!r} already names a dealer group",
+                            "duplicate_group_code",
+                        )
+                    }
+                )
+        return cleaned_input
+
+
+class WsmDealerGroupCreate(GroupWriteMixin, DeprecatedModelMutation):
+    class Arguments:
+        input = WsmDealerGroupCreateInput(
+            required=True, description="Fields required to create a dealer group."
+        )
+
+    class Meta:
+        description = "Create a buyer group."
+        model = models.DealerGroup
+        object_type = WsmDealerGroup
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmDealerGroupUpdate(GroupWriteMixin, DeprecatedModelMutation):
+    class Arguments:
+        id = graphene.ID(required=True, description="ID of the group to update.")
+        input = WsmDealerGroupUpdateInput(
+            required=True, description="Fields required to update a dealer group."
+        )
+
+    class Meta:
+        description = "Update a buyer group."
+        model = models.DealerGroup
+        object_type = WsmDealerGroup
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+
+class GroupDeleteMixin:
+    """A group with customers in it is refused here, not by the database.
+
+    `DealerCustomer.group` is `on_delete=PROTECT`, so the delete would raise
+    `ProtectedError` out of the view: a 500 on a merchant screen where the
+    honest answer is a sentence naming how many shoppers are in the way.
+    """
+
+    @classmethod
+    def clean_instance(cls, info, instance, /):
+        count = instance.customers.count()
+        if count:
+            raise ValidationError(
+                {
+                    "id": _error(
+                        f"{count} customer(s) buy at this group's prices. Move "
+                        f"them to another group first.",
+                        "group_in_use",
+                    )
+                }
+            )
+
+
+class WsmDealerGroupDelete(GroupDeleteMixin, ModelDeleteMutation):
+    class Arguments:
+        id = graphene.ID(required=True, description="ID of the group to delete.")
+
+    class Meta:
+        description = (
+            "Delete a buyer group. Its tier prices go with it; a group with "
+            "customers in it is refused."
+        )
+        model = models.DealerGroup
+        object_type = WsmDealerGroup
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmDealerGroupBulkDelete(GroupDeleteMixin, ModelBulkDeleteMutation):
+    class Arguments:
+        ids = NonNullList(
+            graphene.ID, required=True, description="IDs of the groups to delete."
+        )
+
+    class Meta:
+        description = "Delete buyer groups. Any group with customers is skipped."
+        model = models.DealerGroup
+        object_type = WsmDealerGroup
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+
+# --- customers ---------------------------------------------------------------
+
+
+class WsmDealerCustomerAssignInput(BaseInputObjectType):
+    user = graphene.ID(required=True, description="The shopper's account.")
+    group = graphene.ID(required=True, description="The group whose prices they get.")
+    tax_exempt = graphene.Boolean(description="Charge this shopper no sales tax.")
+
+    class Meta:
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmDealerCustomerUpdateInput(BaseInputObjectType):
+    group = graphene.ID(description="Move this shopper to another group.")
+    tax_exempt = graphene.Boolean(description="Charge this shopper no sales tax.")
+
+    class Meta:
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmDealerCustomerAssign(TypedIdMixin, DeprecatedModelMutation):
+    """Assign, not create, on stock's `giftCardAddNote` naming for the same shape.
+
+    A shopper buys at one group's prices or none (`DealerCustomer.user` is a
+    OneToOne), so a second assignment is a merchant looking at a stale list, not
+    a merchant asking for two prices.
+    """
+
+    typed_ids = {"user": "User", "group": WsmDealerGroup}
+
+    class Arguments:
+        input = WsmDealerCustomerAssignInput(
+            required=True, description="Fields required to assign a dealer customer."
+        )
+
+    class Meta:
+        description = "Put a shopper in a buyer group."
+        model = models.DealerCustomer
+        object_type = WsmDealerCustomer
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+    @classmethod
+    def clean_input(cls, info, instance, data, **kwargs):
+        from ....graphql.core.context import get_database_connection_name
+
+        cleaned_input = super().clean_input(info, instance, data, **kwargs)
+        user = cleaned_input.get("user")
+        if user is not None:
+            existing = (
+                models.DealerCustomer.objects.using(
+                    get_database_connection_name(info.context)
+                )
+                .select_related("group")
+                .filter(user=user)
+                .first()
+            )
+            if existing is not None:
+                raise ValidationError(
+                    {
+                        "user": _error(
+                            f"{user.email} already buys at {existing.group}'s "
+                            f"prices. Move them instead.",
+                            "customer_already_assigned",
+                        )
+                    }
+                )
+        return cleaned_input
+
+
+class WsmDealerCustomerUpdate(TypedIdMixin, DeprecatedModelMutation):
+    typed_ids = {"group": WsmDealerGroup}
+
+    class Arguments:
+        id = graphene.ID(required=True, description="ID of the assignment.")
+        input = WsmDealerCustomerUpdateInput(
+            required=True, description="Fields required to update a dealer customer."
+        )
+
+    class Meta:
+        description = "Move a shopper to another group, or change their tax status."
+        model = models.DealerCustomer
+        object_type = WsmDealerCustomer
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmDealerCustomerUnassign(ModelDeleteMutation):
+    class Arguments:
+        id = graphene.ID(required=True, description="ID of the assignment to remove.")
+
+    class Meta:
+        description = (
+            "Take a shopper out of their buyer group. The account itself is "
+            "untouched: this row is a link, never the customer."
+        )
+        model = models.DealerCustomer
+        object_type = WsmDealerCustomer
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+
+# --- tier prices -------------------------------------------------------------
+
+
+class WsmTierPriceCreateInput(BaseInputObjectType):
+    variant = graphene.ID(required=True, description="The exact SKU.")
+    group = graphene.ID(required=True, description="The group that pays this price.")
+    min_quantity = graphene.Int(description="This price applies from here up.")
+    amount = PositiveDecimal(
+        required=True, description="What the group pays each, at least one cent."
+    )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmTierPriceUpdateInput(BaseInputObjectType):
+    min_quantity = graphene.Int(description="This price applies from here up.")
+    amount = PositiveDecimal(description="What the group pays each.")
+
+    class Meta:
+        doc_category = DOC_CATEGORY_WSM
+
+
+class TierPriceWriteMixin(TypedIdMixin):
+    typed_ids = {"variant": "ProductVariant", "group": WsmDealerGroup}
+
+    @classmethod
+    def clean_input(cls, info, instance, data, **kwargs):
+        cleaned_input = super().clean_input(info, instance, data, **kwargs)
+        if "amount" in cleaned_input:
+            cleaned_input["amount"] = _clean_amount(cleaned_input["amount"], "amount")
+        quantity = cleaned_input.get("min_quantity")
+        if quantity is not None and quantity < 1:
+            raise ValidationError(
+                {"minQuantity": _error("a quantity break starts at one", "invalid")}
+            )
+        return cleaned_input
+
+    @classmethod
+    def clean_instance(cls, info, instance, /):
+        """The break this row would occupy, checked before it is called "unique".
+
+        `wsm_dealer_one_row_per_break` is the constraint; the code a merchant
+        screen renders for it is the one that says what a break IS, because
+        "unique" on a screen with four fields names none of them.
+        """
+        from ....graphql.core.context import get_database_connection_name
+
+        taken = (
+            models.TierPrice.objects.using(get_database_connection_name(info.context))
+            .filter(
+                variant_id=instance.variant_id,
+                group_id=instance.group_id,
+                min_quantity=instance.min_quantity,
+            )
+            .exclude(pk=instance.pk)
+            .exists()
+        )
+        if taken:
+            raise ValidationError(
+                {
+                    "minQuantity": _error(
+                        "this group already has a price for that SKU at that quantity",
+                        "duplicate_tier_break",
+                    )
+                }
+            )
+        super().clean_instance(info, instance)
+
+
+class WsmTierPriceCreate(TierPriceWriteMixin, DeprecatedModelMutation):
+    class Arguments:
+        input = WsmTierPriceCreateInput(
+            required=True, description="Fields required to create a tier price."
+        )
+
+    class Meta:
+        description = "Give one group one price for one SKU."
+        model = models.TierPrice
+        object_type = WsmTierPrice
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmTierPriceUpdate(TierPriceWriteMixin, DeprecatedModelMutation):
+    """The SKU and the group are not in the input, as they were not in the form.
+
+    Moving a price to another SKU is not an edit of this row, it is a different
+    price: the row a merchant is looking at is "what dealer-1 pays for this
+    SKU", and a screen that let the SKU change under it would silently rewrite
+    the wrong line.
+    """
+
+    class Arguments:
+        id = graphene.ID(required=True, description="ID of the tier price.")
+        input = WsmTierPriceUpdateInput(
+            required=True, description="Fields required to update a tier price."
+        )
+
+    class Meta:
+        description = "Change what a group pays, or from what quantity."
+        model = models.TierPrice
+        object_type = WsmTierPrice
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmTierPriceDelete(ModelDeleteMutation):
+    class Arguments:
+        id = graphene.ID(required=True, description="ID of the tier price to delete.")
+
+    class Meta:
+        description = "Delete one quantity break. The SKU is untouched."
+        model = models.TierPrice
+        object_type = WsmTierPrice
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmTierPriceBulkDelete(ModelBulkDeleteMutation):
+    class Arguments:
+        ids = NonNullList(
+            graphene.ID, required=True, description="IDs of the tier prices."
+        )
+
+    class Meta:
+        description = "Delete quantity breaks. The SKUs are untouched."
+        model = models.TierPrice
+        object_type = WsmTierPrice
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmTierPriceBulkCreateInput(BaseInputObjectType):
+    variant = graphene.ID(required=True, description="The exact SKU.")
+    group = graphene.ID(required=True, description="The group that pays this price.")
+    min_quantity = graphene.Int(description="This price applies from here up.")
+    amount = PositiveDecimal(
+        required=True, description="What the group pays each, at least one cent."
+    )
+
+    class Meta:
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmTierPriceBulkCreate(BaseMutation):
+    """The paste/import path: 300+ rows in one call, one transaction, one write.
+
+    A loop of `wsmTierPriceCreate` would be 300 round trips and 1,200 queries to
+    land one spreadsheet column, which is the shape live data actually has
+    (304+ rows on one group, `dealer/admin.py:32`). This validates the whole
+    payload against itself and against what is stored in a FIXED number of
+    queries, then writes it with one `bulk_create`.
+
+    `bulk_create` skips `full_clean`, which is the point and also the risk: the
+    amount rule, the quantity rule and the break rule are all enforced here,
+    above the same `_clean_amount` the single-row mutations call, and the
+    `CheckConstraint` underneath is the backstop that turns a miss into a
+    refused transaction rather than a charged cent.
+    """
+
+    count = graphene.Int(
+        required=True, description="How many tier prices were created."
+    )
+    tier_prices = NonNullList(
+        WsmTierPrice, required=True, description="The rows that were created."
+    )
+
+    class Arguments:
+        tier_prices = NonNullList(
+            WsmTierPriceBulkCreateInput,
+            required=True,
+            description="The rows to create.",
+        )
+
+    class Meta:
+        description = "Create many tier prices in one call. One transaction."
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+    @classmethod
+    def perform_mutation(cls, _root, info, /, *, tier_prices, **data):
+        try:
+            rows = cls._clean_rows(info, tier_prices)
+        except ValidationError as error:
+            # `count` and `tierPrices` are non-null, so a refusal has to carry
+            # them: a payload that returned null for either would be a schema
+            # error on top of the merchant's own.
+            return cls.handle_errors(error, count=0, tier_prices=[])
+        with transaction.atomic():
+            created = models.TierPrice.objects.bulk_create(rows)
+        return cls(errors=[], count=len(created), tier_prices=created)
+
+    @classmethod
+    def _clean_rows(cls, info, rows):
+        """Every row checked against the payload and the table, in five queries.
+
+        Errors name the row the way stock's bulk mutations do,
+        `tierPrices.<index>.<field>`, so a failed paste of 300 lines tells the
+        merchant which line to fix instead of which column.
+        """
+        from ....graphql.core.context import get_database_connection_name
+        from ....product.models import ProductVariant
+
+        database = get_database_connection_name(info.context)
+        errors: dict = {}
+        parsed: list[dict] = []
+        seen: dict = {}
+
+        for index, row in enumerate(rows):
+            field = f"tierPrices.{index}"
+            variant_pk = _pk_or_none(row["variant"], "ProductVariant")
+            group_pk = _pk_or_none(row["group"], "WsmDealerGroup")
+            if variant_pk is None:
+                errors[f"{field}.variant"] = _error(
+                    "that is not a product variant", "invalid"
+                )
+                continue
+            if group_pk is None:
+                errors[f"{field}.group"] = _error(
+                    "that is not a dealer group", "invalid"
+                )
+                continue
+            quantity = row.get("min_quantity")
+            quantity = 1 if quantity is None else quantity
+            if quantity < 1:
+                errors[f"{field}.minQuantity"] = _error(
+                    "a quantity break starts at one", "invalid"
+                )
+                continue
+            try:
+                amount = _clean_amount(row.get("amount"), f"{field}.amount")
+            except ValidationError as error:
+                errors.update(error.error_dict)
+                continue
+            break_key = (variant_pk, group_pk, quantity)
+            if break_key in seen:
+                errors[f"{field}.minQuantity"] = _error(
+                    f"row {seen[break_key]} in this paste already prices that "
+                    f"SKU for that group at that quantity",
+                    "duplicate_tier_break",
+                )
+                continue
+            seen[break_key] = index
+            parsed.append(
+                {
+                    "index": index,
+                    "variant_pk": variant_pk,
+                    "group_pk": group_pk,
+                    "min_quantity": quantity,
+                    "amount": amount,
+                }
+            )
+
+        if errors:
+            raise ValidationError(errors)
+
+        variant_pks = {row["variant_pk"] for row in parsed}
+        group_pks = {row["group_pk"] for row in parsed}
+        variants = ProductVariant.objects.using(database).in_bulk(variant_pks)
+        groups = models.DealerGroup.objects.using(database).in_bulk(group_pks)
+        stored = set(
+            models.TierPrice.objects.using(database)
+            .filter(variant_id__in=variant_pks, group_id__in=group_pks)
+            .values_list("variant_id", "group_id", "min_quantity")
+        )
+
+        instances = []
+        for row in parsed:
+            field = f"tierPrices.{row['index']}"
+            variant = variants.get(row["variant_pk"])
+            group = groups.get(row["group_pk"])
+            if variant is None:
+                errors[f"{field}.variant"] = _error(
+                    "that SKU does not exist", "not_found"
+                )
+                continue
+            if group is None:
+                errors[f"{field}.group"] = _error(
+                    "that dealer group does not exist", "not_found"
+                )
+                continue
+            if (variant.pk, group.pk, row["min_quantity"]) in stored:
+                errors[f"{field}.minQuantity"] = _error(
+                    "this group already has a price for that SKU at that quantity",
+                    "duplicate_tier_break",
+                )
+                continue
+            instances.append(
+                models.TierPrice(
+                    variant=variant,
+                    group=group,
+                    min_quantity=row["min_quantity"],
+                    amount=row["amount"],
+                )
+            )
+
+        if errors:
+            raise ValidationError(errors)
+        return instances
+
+
+# --- settings ----------------------------------------------------------------
 
 
 class WsmDealerSettingsInput(BaseInputObjectType):
@@ -31,15 +716,6 @@ class WsmDealerSettingsUpdate(DeprecatedModelMutation):
     `DeprecatedModelMutation` is what stock's own model mutations still use
     (`saleor/graphql/giftcard/mutations/gift_card_create.py`); there is no
     non-deprecated `ModelMutation` in 3.23 to match instead.
-
-    ponytail: `MANAGE_DISCOUNTS` is reused rather than a `WsmPermissions` enum
-    added, because the enum lives in a core file and the codenames would have to
-    reach graphene's `PermissionEnum` to be assignable in the Dashboard's own
-    permission-group screens. Ceiling: anyone who can edit vouchers can edit
-    this. Upgrade path: append a `WsmPermissions` class to `PERMISSIONS_ENUMS`
-    from `ready()` before the schema is built, at which point the existing
-    `create_wsm_permissions` receiver and the `wsm_merchant_role` command
-    already carry the rows and the group.
     """
 
     class Arguments:
@@ -51,7 +727,7 @@ class WsmDealerSettingsUpdate(DeprecatedModelMutation):
         description = "Update the store-wide dealer pricing settings."
         model = models.DealerSettings
         object_type = WsmDealerSettings
-        permissions = (DiscountPermissions.MANAGE_DISCOUNTS,)
+        permissions = DEALER_PERMISSIONS
         error_type_class = WsmError
         doc_category = DOC_CATEGORY_WSM
 
@@ -64,4 +740,11 @@ class WsmDealerSettingsUpdate(DeprecatedModelMutation):
         singleton table a second row on every call. There is no id to take,
         because the row is the store, so the existing row is the instance.
         """
-        return models.DealerSettings.objects.first() or models.DealerSettings()
+        from ....graphql.core.context import get_database_connection_name
+
+        return (
+            models.DealerSettings.objects.using(
+                get_database_connection_name(info.context)
+            ).first()
+            or models.DealerSettings()
+        )

@@ -175,7 +175,10 @@ def test_create_stores_the_charge(merchant_api_client, product):
 
     payload = get_graphql_content(response)["data"]["wsmFeeCreate"]
     assert payload["errors"] == []
-    assert payload["fee"]["amount"] == "149", "the value as typed, exactly"
+    # Two places, not "149" as typed: a money field leaves this API as the
+    # amount that would be CHARGED (`WsmDecimal.serialize` -> `to_money`), so a
+    # screen that posts back what it was handed posts back a legal price.
+    assert payload["fee"]["amount"] == "149.00"
     stored = Fee.objects.get()
     assert stored.apply_to == pricing.PER_LINE
     assert stored.amount == Decimal("149.00")

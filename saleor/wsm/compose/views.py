@@ -168,6 +168,11 @@ def option_sets(request, product_gid):
                     "prompt_type": s.prompt_type,
                     "required": s.required,
                     "note": s.note,
+                    # Served on every set, empty on most. The storefront reads
+                    # it only on an optional one and supplies its own wording
+                    # when it is blank, so the branch lives in the one place
+                    # that draws the control.
+                    "deselect_prompt": s.deselect_prompt,
                     "values": [
                         {
                             "id": v.pk,
@@ -175,6 +180,8 @@ def option_sets(request, product_gid):
                             "sku_fragment": v.sku_fragment,
                             "price_delta": f"{v.price_delta:.2f}",
                             "image_url": v.image_url,
+                            "help_text": v.help_text,
+                            "is_default": v.is_default,
                         }
                         for v in s.values.all()
                     ],

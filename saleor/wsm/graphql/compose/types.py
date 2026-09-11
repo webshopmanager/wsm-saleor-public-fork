@@ -114,6 +114,20 @@ class WsmOptionValue(ModelObjectType[models.OptionValue]):
         ),
     )
     image_url = graphene.String(required=True, description="Swatch or thumbnail URL.")
+    help_text = graphene.String(
+        required=True,
+        description=(
+            "The merchant's sentence under this choice. Empty string, never "
+            "null. Display only: it prices nothing."
+        ),
+    )
+    is_default = graphene.Boolean(
+        required=True,
+        description=(
+            "Pre-picked, and PRICED: the quote opens with this choice's "
+            "priceDelta in it. At most one per question."
+        ),
+    )
     sort_order = graphene.Int(required=True, description="Low numbers first.")
     tier_deltas = NonNullList(
         WsmDealerTierOptionPrice,
@@ -157,6 +171,14 @@ class WsmOptionSet(ModelObjectType[models.OptionSet]):
     note = graphene.String(
         required=True,
         description="Help shown to the shopper. Empty string, never null.",
+    )
+    deselect_prompt = graphene.String(
+        required=True,
+        description=(
+            "What the shopper sees to choose nothing on a question they may "
+            "skip. Empty string, never null, and then the storefront uses its "
+            "own wording. Meaningless while `required` is true."
+        ),
     )
     sort_order = graphene.Int(required=True, description="Low numbers first.")
     values = NonNullList(

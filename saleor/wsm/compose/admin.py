@@ -412,6 +412,8 @@ class OptionValueInline(admin.TabularInline):
         "sku_fragment",
         "price_delta",
         "image_url",
+        "help_text",
+        "is_default",
         "dealer_prices",
     )
     readonly_fields = ("dealer_prices",)

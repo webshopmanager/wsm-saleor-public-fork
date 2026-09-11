@@ -68,6 +68,11 @@ DUPLICATE_TIER_GROUP = "duplicate_tier_group"
 FEE_AMOUNT_NEGATIVE = "fee_amount_negative"
 FEE_PERCENT_ABOVE_100 = "fee_percent_above_100"
 UNKNOWN_US_STATE_CODE = "unknown_us_state_code"
+# Stock's own generic member, borrowed rather than given a private twin: two
+# pre-picked answers is not a rule with its own remedy, it is one field that
+# cannot hold what was sent. Named here so the guard test still reads it off
+# the raise.
+INVALID = "invalid"
 
 
 def tier_group_choices():
@@ -305,6 +310,28 @@ def duplicate_fragment_error(other_name: str, fragment: str) -> ValidationError:
     )
 
 
+def duplicate_default_error(other_name):
+    """Two pre-picked answers to one question, said to the merchant.
+
+    Deliberately NOT a database constraint, for the same reason the duplicate
+    SKU code is not: `replace_option_values` and the admin formset both write a
+    whole answer list row at a time, so moving the default from the second
+    choice to the first collides transiently against the row not yet cleared
+    and refuses the very submit that fixes it. ponytail: the ceiling is that a
+    bulk writer outside both screens can still store two; `OptionSet.default_value`
+    reads the first in catalog order so nothing a shopper touches can raise.
+    Upgrade path is a DEFERRABLE partial UniqueConstraint on (option_set) under
+    a condition of Q(is_default=True), which is the same upgrade
+    `replace_tier_deltas` is waiting on.
+    """
+    return ValidationError(
+        f"{other_name!r} is already the pre-picked choice for this question. A "
+        f"question can only open on one answer, so clear that one first, or "
+        f"leave this one unpicked.",
+        code=INVALID,
+    )
+
+
 class OptionSet(models.Model):
     """One question a product asks, and the answers it accepts."""
 
@@ -349,6 +376,16 @@ class OptionSet(models.Model):
     note = models.TextField(
         blank=True, help_text="Optional help shown to the shopper under this question."
     )
+    deselect_prompt = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text=(
+            "What the shopper sees to choose nothing, on a question they are "
+            "allowed to skip. Blank shows the storefront's own wording. Ignored "
+            "while the question is required, because then there is nothing to "
+            "choose."
+        ),
+    )
     sort_order = models.IntegerField(
         default=0, help_text="Low numbers first. Ties fall back to the order created."
     )
@@ -360,6 +397,21 @@ class OptionSet(models.Model):
         # A question means nothing without the product it is asked on, and this
         # is the string on the delete confirmation and in every picker.
         return f"{self.product.name}: {self.label or self.name}"
+
+    @property
+    def default_value(self):
+        """The one pre-picked answer, in catalog order, or None.
+
+        FIRST in catalog order rather than "the default", because two defaults
+        on one question is a data bug a shopper must never meet: the merchant
+        screens refuse the second one (`duplicate_default_error`), and a row
+        pair written past them still prices deterministically instead of
+        raising on a buy button. `self.values.all()` carries Meta.ordering.
+        """
+        for value in self.values.all():
+            if value.is_default:
+                return value
+        return None
 
     def clean(self):
         """Making a set required, or one-of, can push the floor under zero too.
@@ -437,6 +489,22 @@ class OptionValue(models.Model):
         blank=True,
         help_text="Optional swatch or thumbnail shown next to this choice.",
     )
+    help_text = models.TextField(
+        blank=True,
+        help_text=(
+            "One sentence under this choice, in the merchant's own words: "
+            "\"Fits 2019 and newer only\". Shown to the shopper, never used to "
+            "price anything."
+        ),
+    )
+    is_default = models.BooleanField(
+        default=False,
+        help_text=(
+            "Pre-picked for the shopper, and PRICED: a default that costs money "
+            "is in the quote before anyone touches the question. At most one "
+            "per question."
+        ),
+    )
     sort_order = models.IntegerField(
         default=0, help_text="Low numbers first. Ties fall back to the order created."
     )
@@ -509,6 +577,7 @@ class OptionValue(models.Model):
             name=self.name,
             sku_fragment=self.sku_fragment,
             price_delta=to_cents(self.price_delta),
+            is_default=self.is_default,
             sort_order=self.sort_order,
             tier_deltas=tuple(t.to_pricing() for t in self.tier_deltas.all()),
         )

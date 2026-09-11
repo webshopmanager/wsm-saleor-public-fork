@@ -26,6 +26,7 @@ from .models import (
     OptionValue,
     configured_floor_cents,
     dealer_floor_problem,
+    duplicate_default_error,
     duplicate_fragment_error,
     floor_error,
     tier_group_choices,
@@ -39,6 +40,8 @@ VALUE_LABELS = {
     "sku_fragment": "SKU code",
     "price_delta": "Price change",
     "image_url": "Image",
+    "help_text": "Note under the choice",
+    "is_default": "Pre-picked",
 }
 
 
@@ -259,6 +262,15 @@ class OptionValueInlineFormSet(BaseInlineFormSet):
                 )
             else:
                 seen[fragment] = form.cleaned_data.get("name") or "another choice"
+
+        default_name = None
+        for form in pending:
+            if not form.cleaned_data.get("is_default"):
+                continue
+            if default_name is not None:
+                form.add_error("is_default", duplicate_default_error(default_name))
+            else:
+                default_name = form.cleaned_data.get("name") or "another choice"
         if any(self.errors):
             return
 

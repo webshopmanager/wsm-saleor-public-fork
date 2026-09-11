@@ -92,6 +92,8 @@ VALUE_FIELDS = {
     "sku_fragment": "skuFragment",
     "price_delta": "priceDelta",
     "image_url": "imageUrl",
+    "help_text": "helpText",
+    "is_default": "isDefault",
     "sort_order": "sortOrder",
     "option_set": "",
     "__all__": "",
@@ -187,6 +189,10 @@ def replace_option_values(option_set, values_input):
             row.price_delta = item["price_delta"]
         if item.get("image_url") is not None:
             row.image_url = item["image_url"]
+        if item.get("help_text") is not None:
+            row.help_text = item["help_text"]
+        if item.get("is_default") is not None:
+            row.is_default = item["is_default"]
         if item.get("sort_order") is not None:
             row.sort_order = item["sort_order"]
         # The two rules a single row cannot see are checked across the whole
@@ -213,6 +219,20 @@ def replace_option_values(option_set, values_input):
                 }
             )
         seen[row.sku_fragment] = row.name
+
+    # Checked across the whole submitted list for the same reason the SKU code
+    # is: two rows each legal against the database and contradictory together.
+    # After the save, so the picture is the edit as it now stands and not a
+    # default still stored on a row this submit is clearing.
+    default_name = None
+    for row, field, _tiers in rows:
+        if not row.is_default:
+            continue
+        if default_name is not None:
+            raise ValidationError(
+                {f"{field}.isDefault": models.duplicate_default_error(default_name)}
+            )
+        default_name = row.name
 
     for row, field, tiers in rows:
         if tiers is not None:
@@ -256,6 +276,12 @@ class WsmOptionValueInput(BaseInputObjectType):
     sku_fragment = graphene.String(description="Appended to the product SKU.")
     price_delta = WsmDecimal(description="Signed: a credit subtracts.")
     image_url = graphene.String(description="Swatch or thumbnail URL.")
+    help_text = graphene.String(
+        description="One sentence shown under this choice. Prices nothing."
+    )
+    is_default = graphene.Boolean(
+        description="Pre-picked, and priced. At most one per question."
+    )
     sort_order = graphene.Int(description="Low numbers first.")
     tier_deltas = NonNullList(
         WsmDealerTierOptionPriceInput,
@@ -276,6 +302,9 @@ class WsmOptionSetCreateInput(BaseInputObjectType):
     prompt_type = WsmOptionSetPromptTypeEnum(description="How the shopper answers.")
     required = graphene.Boolean(description="The shopper cannot decline this question.")
     note = graphene.String(description="Help shown under the question.")
+    deselect_prompt = graphene.String(
+        description="What the shopper sees to choose nothing. Optional questions only."
+    )
     sort_order = graphene.Int(description="Low numbers first.")
     values = NonNullList(
         WsmOptionValueInput,
@@ -292,6 +321,9 @@ class WsmOptionSetUpdateInput(BaseInputObjectType):
     prompt_type = WsmOptionSetPromptTypeEnum(description="How the shopper answers.")
     required = graphene.Boolean(description="The shopper cannot decline this question.")
     note = graphene.String(description="Help shown under the question.")
+    deselect_prompt = graphene.String(
+        description="What the shopper sees to choose nothing. Optional questions only."
+    )
     sort_order = graphene.Int(description="Low numbers first.")
     values = NonNullList(
         WsmOptionValueInput,

@@ -300,12 +300,65 @@ def test_unmatched_sku_is_reported_not_invented(payload, catalog):
 
 
 def test_a_desc_that_names_no_group_is_not_a_tier(payload, catalog):
+    """It is the merchant's sentence under the choice, and it lands on a value.
+
+    Reading it as a tier is what dropped 221 of `udd`'s 244 choices on
+    2026-09-09. This row shares its (name, SKU code) with the Retail Red row, so
+    it cannot become a second value: first wins, reported, never a silent
+    reprice of the choice shoppers are buying.
+    """
     payload["values"].append(_value(1, 99, "Red", "Clearance", "5.00", "2", 7))
 
     report = apply(payload, channel_slug=CHANNEL)
-    assert report["values_desc_not_a_group"] == 1
-    assert report["unknown_desc"] == ["Color: Clearance"]
+    assert report["values_duplicate_key"] == 1
+    assert report["duplicate_keys"] == ["Color: 'Red'"]
     assert DealerTierOptionPrice.objects.filter(tier_group="clearance").count() == 0
+    assert OptionValue.objects.get(name="Red").price_delta == Decimal("34.00")
+
+
+def test_a_per_choice_sentence_is_imported_as_the_choices_help_text(payload, catalog):
+    """Gap 1 of the parity sweep: 83 tenants, 40,079 of these sentences.
+
+    Before this, a value whose `desc` was prose was read as a dealer sibling of
+    a Retail row that does not exist, and was dropped on the floor.
+    """
+    payload["values"].append(
+        _value(1, 99, "Clearcoat", "Fits 2019 and newer only", "12.00", "3", 7)
+    )
+
+    report = apply(payload, channel_slug=CHANNEL)
+
+    assert report["values_help_text"] == 1
+    value = OptionValue.objects.get(name="Clearcoat")
+    assert value.help_text == "Fits 2019 and newer only"
+    assert value.price_delta == Decimal("12.00")
+    assert value.sku_fragment == "3"
+
+
+def test_the_pre_picked_answer_and_the_deselect_wording_are_imported(payload, catalog):
+    """Gaps 2 and 3: 76 tenants carry a default, 40 carry deselect wording."""
+    payload["sets"][0]["deselect"] = "No colour, thanks"
+    payload["values"][3]["default"] = 1
+
+    apply(payload, channel_slug=CHANNEL)
+
+    option_set = OptionSet.objects.get(name="Color")
+    assert option_set.deselect_prompt == "No colour, thanks"
+    assert option_set.default_value.name == "Red"
+
+
+def test_a_second_default_in_one_5_0_set_is_demoted_not_refused(payload, catalog):
+    """5.0 has no constraint behind `default`, and a stopped migration is worse."""
+    payload["values"][0]["default"] = 1
+    payload["values"][3]["default"] = 1
+
+    report = apply(payload, channel_slug=CHANNEL)
+
+    assert report["values_extra_default_dropped"] == 1
+    assert report["extra_defaults"] == ["Color: Red"]
+    option_set = OptionSet.objects.get(name="Color")
+    assert option_set.default_value.name == "Black"
+    assert option_set.values.filter(is_default=True).count() == 1
 
 
 def test_imported_qsst_rows_price_the_real_configuration(payload, catalog):

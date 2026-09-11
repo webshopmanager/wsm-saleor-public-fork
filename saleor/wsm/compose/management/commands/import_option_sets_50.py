@@ -22,8 +22,16 @@ Two shapes in the 5.0 data decide the whole mapping:
    ("Black", desc "Dealer 2", 0.00); ("Red", "Retail", 34.00), ("Red",
    "Dealer 1", 32.30), ("Red", "Dealer 2", 21.97). The Retail row is the
    `OptionValue`; every sibling whose `desc` names a customer group of this site
-   becomes one `DealerTierOptionPrice`. A `desc` that names no group is left on
-   the retail row it belongs to and reported, never guessed at.
+   becomes one `DealerTierOptionPrice`. A `desc` that names no group is NOT a
+   tier and never was: it is the merchant's sentence under the choice, it lands
+   on `OptionValue.help_text`, and the row stays a value of its own. Reading it
+   as a tier is what dropped 221 of `udd`'s 244 choices on 2026-09-09.
+
+3. TWO MORE COLUMNS NOBODY WAS CARRYING. `product_option_value.default` marks
+   the answer a question opens on (76 tenants, 429 of those defaults priced) and
+   becomes `OptionValue.is_default`; `product_option_set.deselect` is the free
+   text on the empty choice (40 tenants, 8,879 sets) and becomes
+   `OptionSet.deselect_prompt`. Both are carried verbatim.
 
 Idempotent by natural key, so a second run writes nothing: an `OptionSet` is
 identified by (product, name), a value by (option set, name, sku fragment), a
@@ -168,7 +176,7 @@ def read_50(host, user, database, site_id):
         SELECT JSON_ARRAYAGG(JSON_OBJECT(
             'set_id', v.product_option_set, 'value_id', v.id, 'name', v.name,
             'desc', v.desc, 'price', CAST(v.price AS CHAR), 'sku', v.sku,
-            'priority', v.priority, 'image', v.image,
+            'priority', v.priority, 'image', v.image, 'default', v.`default`,
             'image_ext', i.extension))
         FROM product_option_value v
         JOIN product_option_set s ON s.id = v.product_option_set
@@ -283,7 +291,8 @@ def apply(payload, *, channel_slug, include_hidden=False, image_base="", dry_run
     """
     report = _Report()
     report["unmatched_skus"] = []
-    report["unknown_desc"] = []
+    report["extra_defaults"] = []
+    report["duplicate_keys"] = []
     report["orphan_tier_keys"] = []
     report["refused"] = []
 
@@ -342,6 +351,12 @@ def apply(payload, *, channel_slug, include_hidden=False, image_base="", dry_run
                 "prompt_type": prompt,
                 "required": bool(int(row.get("required") or 0)),
                 "note": row.get("description") or "",
+                # 5.0's `deselect` is the placeholder on the empty choice
+                # ("Select a value", "Choose"), free text and not a flag. It is
+                # copy only, so it is carried verbatim and truncated to the
+                # column rather than refused: a long placeholder is not worth
+                # failing a catalog import over.
+                "deselect_prompt": (row.get("deselect") or "")[:120],
                 "sort_order": int(row.get("priority") or 0),
             }
             option_set = OptionSet.objects.filter(
@@ -405,31 +420,66 @@ def apply(payload, *, channel_slug, include_hidden=False, image_base="", dry_run
     return report
 
 
+def _is_tier_row(row, price_groups):
+    """A sibling that prices one customer group, rather than a value in its own right.
+
+    `desc` is ONE 5.0 column carrying two meanings: on a dealer sibling it names
+    a customer group, and on every other row it is the merchant's sentence under
+    the choice. Naming a live group is the whole test, and everything else is a
+    value: reading prose as a tier is what dropped 221 of `udd`'s 244 choices on
+    2026-09-09, and the fleet sweep counts 40,079 such sentences on 83 tenants.
+    """
+    desc = (row.get("desc") or "").strip()
+    return bool(desc) and desc != RETAIL_DESC and desc in price_groups
+
+
 def _import_values(option_set, rows, price_groups, image_base, report):
-    """Write the Retail row as the value and each dealer sibling as a tier row."""
-    retail = [r for r in rows if (r.get("desc") or RETAIL_DESC) == RETAIL_DESC]
+    """Write each non-tier row as the value and each dealer sibling as a tier row."""
+    retail = [r for r in rows if not _is_tier_row(r, price_groups)]
     tiers = defaultdict(list)
     for row in rows:
-        desc = row.get("desc") or RETAIL_DESC
-        if desc == RETAIL_DESC:
+        if not _is_tier_row(row, price_groups):
             continue
-        if desc not in price_groups:
-            # A `desc` naming no customer group is prose on the value, not a
-            # tier, and there is no retail row it could be a tier OF.
-            report.bump("values_desc_not_a_group")
-            report.note("unknown_desc", f"{option_set.name}: {desc}")
-            continue
-        tiers[(row["name"], row.get("sku") or "")].append((desc, row["price"]))
+        tiers[(row["name"], row.get("sku") or "")].append(
+            ((row.get("desc") or "").strip(), row["price"])
+        )
 
     seen = set()
+    default_taken = False
     for row in retail:
         key = (row["name"], row.get("sku") or "")
+        if key in seen:
+            # A Compose value is identified by (set, name, SKU code), so two
+            # 5.0 rows sharing both are one row here and the later one can only
+            # overwrite the earlier. FIRST WINS and the rest are reported: a
+            # silent reprice of a choice a shopper is buying is the worse half
+            # of the trade.
+            report.bump("values_duplicate_key")
+            report.note("duplicate_keys", f"{option_set.name}: {row['name']!r}")
+            continue
         # A refused row is still a row 5.0 has: it counts as seen so the report
         # does not also call it stale or call its tier rows orphans.
         seen.add(key)
+        desc = (row.get("desc") or "").strip()
+        help_text = "" if desc == RETAIL_DESC else desc
+        if help_text:
+            report.bump("values_help_text")
+        is_default = bool(int(row.get("default") or 0))
+        if is_default and default_taken:
+            # 5.0 has no constraint behind its `default` column, so a set can
+            # arrive with two. The FIRST in 5.0 priority order wins and the rest
+            # are demoted rather than refused: a question that opens on the
+            # wrong one of two is a merchant fix, an import that stops on it is
+            # a migration nobody can finish.
+            report.bump("values_extra_default_dropped")
+            report.note("extra_defaults", f"{option_set.name}: {row['name']}")
+            is_default = False
+        default_taken = default_taken or is_default
         fields = {
             "price_delta": Decimal(row["price"]),
             "image_url": _image_url(row, image_base),
+            "help_text": help_text,
+            "is_default": is_default,
             "sort_order": int(row.get("priority") or 0),
         }
         what = f"{option_set.name}: choice {row['name']!r}"

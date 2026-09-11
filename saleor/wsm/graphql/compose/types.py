@@ -45,14 +45,20 @@ class WsmDealerTierOptionPrice(ModelObjectType[models.DealerTierOptionPrice]):
     )
     dealer_group = graphene.Field(
         WsmDealerGroup,
-        description="The resolved group row, null if the code names a deleted group.",
+        description=(
+            "READ ONLY, and the resolved half of `tierGroup`: the group row that "
+            "code names, or null when it names a group that was deleted. A "
+            "screen renders this and writes `tierGroup`; there is no input "
+            "field behind it."
+        ),
     )
     tier_group = graphene.String(
         required=True,
         description=(
             "The DealerGroup code this price is for, as a plain string and NOT a "
             "global ID: the column is a CharField on purpose, so compose can "
-            "price without joining wsm_dealer."
+            "price without joining wsm_dealer. This is the field a screen "
+            "WRITES, and `dealerGroup` is the resolved read of it."
         ),
     )
     price_delta = WsmDecimal(

@@ -209,8 +209,12 @@ class SeriesConfig(models.Model):
         if self.partitioning_axis not in axes:
             raise ValidationError(
                 {
-                    "partitioning_axis": (
-                        f"{self.partitioning_axis!r} is not one of the axes {axes!r}"
+                    "partitioning_axis": ValidationError(
+                        f"{self.partitioning_axis!r} is not one of the axes {axes!r}",
+                        # The code travels with the refusal so every door that
+                        # renders one, the admin and now the GraphQL mutation,
+                        # names the same rule without reading the sentence.
+                        code="axis_not_in_axes",
                     )
                 }
             )
@@ -223,9 +227,10 @@ class SeriesConfig(models.Model):
         if len(members) < 2:
             raise ValidationError(
                 {
-                    "published": (
+                    "published": ValidationError(
                         "a series materializes only with 2 or more published "
-                        f"members; this collection has {len(members)}"
+                        f"members; this collection has {len(members)}",
+                        code="series_needs_two_members",
                     )
                 }
             )
@@ -242,9 +247,10 @@ class SeriesConfig(models.Model):
         if missing:
             raise ValidationError(
                 {
-                    "published": (
+                    "published": ValidationError(
                         f"every member must carry {self.partitioning_axis!r}; "
-                        f"missing on {sorted(missing)}"
+                        f"missing on {sorted(missing)}",
+                        code="member_missing_partitioning_attribute",
                     )
                 }
             )
@@ -352,6 +358,39 @@ class KitConfig(models.Model):
         default=True,
         help_text="Off takes the kit price away; the members still sell on their own.",
     )
+    # The three columns a series carries that a kit did not. They are nullable
+    # and blank because every row that exists today was written without them:
+    # an additive migration that backfilled a value would be inventing a
+    # merchant's answer, and `is_published` below says what a row with no
+    # answer means in ONE place rather than at every reader.
+    brand = models.CharField(
+        max_length=250,
+        blank=True,
+        default="",
+        help_text=(
+            "The one brand this container covers, when it covers exactly one. "
+            "Blank for a mixed-brand bundle."
+        ),
+    )
+    published = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Show this container as its own shoppable page. Unset means the "
+            "container has never been published or hidden by hand, and `active` "
+            "answers for it."
+        ),
+    )
+    miss_message = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "What a shopper is told when their vehicle leaves a required part "
+            "of this container with nothing that fits. A slot's own sentence "
+            "wins over this one. Blank for the storefront's standard wording."
+        ),
+    )
 
     class Meta:
         ordering = ("pk",)
@@ -360,6 +399,18 @@ class KitConfig(models.Model):
 
     def __str__(self):
         return f"Kit: {self.collection.name}"
+
+    @property
+    def is_published(self):
+        """Whether a shopper can reach this container, from ONE place.
+
+        `published` is unset on every row written before containers had the
+        column, and a reader that defaulted it to False would dark every kit on
+        the fleet the moment the column landed. `active` is the answer those
+        rows were written with, so it is the answer they keep; a merchant who
+        touches the new switch overrides it from then on.
+        """
+        return self.active if self.published is None else self.published
 
     @property
     def discount_percent(self):
@@ -463,10 +514,151 @@ class KitConfig(models.Model):
         ]
 
 
+class ContainerSlot(models.Model):
+    """One named role inside a container: what can go here, and how it is chosen.
+
+    ONE substrate (Dana, 2026-09-10): "there is either a product series and a
+    bundle in a kit or bundle... a bundle is an assortment of products, but
+    they are still all relative to fitment, at least some of them are". A series
+    is a container with ONE slot; a bundle is a container with N. Depth stays 1,
+    because a slot points at a COLLECTION and never at another container's
+    slots, so "a kit could have several series in it" costs one nullable FK and
+    never a nested tree.
+
+    FIXED OR CHOSEN IS READ OFF THE DATA, never off a toggle
+    (`feedback-features-recognize-data-not-toggles`). A slot with no
+    `partitioning_axis` takes every candidate that survives the vehicle, which
+    is exactly what every kit authored before this row existed does, and is why
+    the backfill can put a whole kit in one slot without changing a price. A
+    slot WITH one asks the shopper to pick one of the survivors along that axis,
+    which is what a series does. Same column the series configurator already
+    used, doing the same job one level down: the vehicle decides fitment, and
+    the axis decides colour, finish or gauge, which no vehicle can.
+    """
+
+    kit = models.ForeignKey(KitConfig, related_name="slots", on_delete=models.CASCADE)
+    label = models.CharField(
+        max_length=250,
+        help_text=(
+            "What this part of the container is called, in the merchant's own "
+            "words: Exhaust, Tuner, Gauge."
+        ),
+    )
+    quantity = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="How many of whatever fills this slot one container contains.",
+    )
+    required = models.BooleanField(
+        default=True,
+        help_text=(
+            "A required slot with nothing that fits the shopper's vehicle "
+            "refuses the whole container, in the sentence below."
+        ),
+    )
+    sort_order = models.IntegerField(
+        default=0,
+        help_text="Lowest first. Slots with the same number fall back to the order added.",
+    )
+    axes = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "The questions this slot asks AFTER the vehicle has answered "
+            "fitment, in order, as product attribute slugs."
+        ),
+    )
+    partitioning_axis = models.CharField(
+        max_length=250,
+        blank=True,
+        help_text=(
+            "The one axis that decides WHICH of the fitting candidates the "
+            "shopper ends up on. Blank means this slot takes every candidate "
+            "that fits rather than asking the shopper to choose."
+        ),
+    )
+    miss_message = models.TextField(
+        blank=True,
+        help_text=(
+            "What a shopper is told when nothing in this slot fits their "
+            "vehicle. Blank falls back to the container's own sentence."
+        ),
+    )
+    source_collection = models.ForeignKey(
+        "product.Collection",
+        related_name="wsm_container_slots",
+        null=True,
+        blank=True,
+        # SET_NULL, and never PROTECT: a slot left pointing at nothing holds no
+        # candidates, and a required slot with no candidates already refuses the
+        # container by the rule above. That is the fail-SAFE direction. PROTECT
+        # would put our refusal inside stock Saleor's collection delete, which
+        # is a core behaviour this fork does not own.
+        on_delete=models.SET_NULL,
+        help_text=(
+            "Fill this slot from another container's collection instead of "
+            "listing candidates by hand, so a kit can hold a series and the "
+            "series stays the one place its members are edited."
+        ),
+    )
+
+    class Meta:
+        ordering = ("sort_order", "pk")
+        verbose_name = "container slot"
+        verbose_name_plural = "container slots"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["kit", "label"],
+                name="wsm_containers_one_slot_per_label",
+            )
+        ]
+
+    def __str__(self):
+        # The heading on a delete confirmation, so it names the container too:
+        # "Exhaust" alone says nothing about which bundle is losing it.
+        return f"{self.label} ({self.kit.collection.name})"
+
+    @property
+    def drills(self) -> bool:
+        """Whether the shopper picks ONE of the survivors, or gets all of them."""
+        return bool(self.partitioning_axis)
+
+    def clean(self):
+        """Refuse a partitioning axis this slot never asks about.
+
+        The same scar as `SeriesConfig.clean`, one level down: an axis that
+        decides the answer but is not among the questions is a configurator
+        asking something it will not use.
+        """
+        super().clean()
+        axes = list(self.axes or [])
+        if self.partitioning_axis and axes and self.partitioning_axis not in axes:
+            raise ValidationError(
+                {
+                    "partitioning_axis": ValidationError(
+                        f"{self.partitioning_axis!r} is not one of the axes {axes!r}",
+                        code="axis_not_in_axes",
+                    )
+                }
+            )
+
+
 class KitMember(models.Model):
     """One variant in a kit, and how many of it the kit contains."""
 
     kit = models.ForeignKey(KitConfig, related_name="members", on_delete=models.CASCADE)
+    slot = models.ForeignKey(
+        ContainerSlot,
+        related_name="candidates",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        help_text=(
+            "The role this part fills in the container. A slot's candidates go "
+            "with the slot when it is deleted, because a candidate for a role "
+            "that no longer exists is not a part of anything."
+        ),
+    )
     variant = models.ForeignKey(
         "product.ProductVariant",
         related_name="wsm_kit_memberships",
@@ -590,7 +782,13 @@ class KitMemberRule(models.Model):
         """Refuse a rule reaching outside its own kit: nobody could satisfy it."""
         super().clean()
         if self.subject_id and self.kit_id and self.subject.kit_id != self.kit_id:
-            raise ValidationError({"subject": "that part is not in this kit"})
+            raise ValidationError(
+                {
+                    "subject": ValidationError(
+                        "that part is not in this kit", code="rule_subject_not_in_kit"
+                    )
+                }
+            )
 
     @property
     def target_variant_ids(self):

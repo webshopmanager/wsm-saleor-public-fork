@@ -89,7 +89,12 @@ SITE_ID = 1
 
 PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
-ROOT_URLCONF = "saleor.urls"
+# WSM-FORK: the fork's urlconf, not Saleor's. It serves the composed GraphQL
+# schema (saleor/wsm/graphql/schema.py) at graphql/ and then INCLUDES
+# saleor.urls for everything else, so the fork adds fields to the API without a
+# runtime patch and without editing a file Saleor owns. This line is the whole
+# attachment. See docs/wsm/CORE-TOUCHES.md.
+ROOT_URLCONF = "saleor.wsm.urls"
 
 ADMINS = (
     # ('Your Name', 'your_email@example.com'),
@@ -291,14 +296,6 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "saleor.core.middleware.jwt_refresh_token_middleware",
-    # WSM-FORK: the three the Django admin requires, each a subclass that runs
-    # only under /admin/. Unscoped, AuthenticationMiddleware overwrites
-    # request.user with a lazy AnonymousUser on every request, and the plugin
-    # manager's requestor stops being a User or None. See
-    # saleor/wsm/middleware.py and docs/wsm/CORE-TOUCHES.md.
-    "saleor.wsm.middleware.AdminSessionMiddleware",
-    "saleor.wsm.middleware.AdminAuthenticationMiddleware",
-    "saleor.wsm.middleware.AdminMessageMiddleware",
 ]
 
 ENABLE_RESTRICT_WRITER_MIDDLEWARE = get_bool_from_env(
@@ -315,16 +312,6 @@ INSTALLED_APPS = [
     "storages",
     # Django modules
     "django.contrib.contenttypes",
-    # WSM-FORK: the Django admin is the merchant UI for Compose (bake-off design
-    # section 6) and it hard-requires these four. The fourth, `django.contrib.auth`,
-    # is installed further down, below `saleor.account`. See docs/wsm/CORE-TOUCHES.md.
-    "django.contrib.sessions",
-    "django.contrib.messages",
-    "django.contrib.admin",
-    # Saleor sets FORM_RENDERER to TemplatesSetting, so form widget templates are
-    # resolved through the normal loaders and django.forms must be installed for
-    # them to be found. No models, no migrations.
-    "django.forms",
     "django.contrib.sites",
     "django.contrib.staticfiles",
     "django.contrib.postgres",
@@ -335,9 +322,13 @@ INSTALLED_APPS = [
     "saleor.plugins",
     "saleor.account",
     # WSM-FORK: `django.contrib.auth`, loaded through a fork-owned AppConfig
-    # because Saleor renamed auth_permission out from under it. It has to stay
-    # BELOW `saleor.account`: Django resolves a management command name to the
-    # first app in this list that ships one, so above it, auth's own
+    # because Saleor renamed auth_permission out from under it. The Django admin
+    # that first required it is gone (CORE-TOUCHES section 2); what still needs
+    # it is `AdminPasswordBackend`, whose `wsm_*` grants are Permission rows on
+    # Saleor's renamed table, and the two state-only migrations under
+    # `saleor/wsm/compose/django_auth_migrations/`. It has to stay BELOW
+    # `saleor.account`: Django resolves a management command name to the first
+    # app in this list that ships one, so above it, auth's own
     # `createsuperuser` and `changepassword` shadow the ones `saleor.account`
     # overrides, and auth's `createsuperuser` calls `create_superuser()` on
     # Saleor's UserManager, which does not have it.
@@ -661,9 +652,9 @@ PLACEHOLDER_IMAGES = {
 AUTHENTICATION_BACKENDS = [
     "saleor.core.auth_backend.JSONWebTokenBackend",
     "saleor.core.auth_backend.PluginBackend",
-    # WSM-FORK: email plus password for /admin/ only. Django's own ModelBackend
-    # cannot be used: its permission lookups read auth_permission, a table
-    # Saleor renamed. See docs/wsm/CORE-TOUCHES.md.
+    # WSM-FORK: email plus password, and the fork's own `wsm_*` permissions.
+    # Django's own ModelBackend cannot be used: its permission lookups read
+    # auth_permission, a table Saleor renamed. See docs/wsm/CORE-TOUCHES.md.
     "saleor.wsm.compose.auth.AdminPasswordBackend",
 ]
 

@@ -1,0 +1,210 @@
+# WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
+"""Containers' queries and mutations, as two mixins."""
+
+import graphene
+
+from ....graphql.core import ResolveInfo
+from ....graphql.core.connection import (
+    create_connection_slice,
+    filter_connection_queryset,
+)
+from ....graphql.core.context import get_database_connection_name
+from ....graphql.core.fields import FilterConnectionField, PermissionsField
+from ....graphql.core.utils import from_global_id_or_error
+from ....graphql.core.validators import validate_one_of_args_is_in_query
+from ....permission.enums import ProductPermissions
+from ...containers import models
+from ...containers import resolve as containers_resolve
+from ..types import DOC_CATEGORY_WSM
+from .filters import WsmKitConfigFilterInput, WsmSeriesConfigFilterInput
+from .mutations import (
+    WsmKitConfigCreate,
+    WsmKitConfigDelete,
+    WsmKitConfigUpdate,
+    WsmSeriesConfigDelete,
+    WsmSeriesConfigUpdate,
+)
+from .types import (
+    WsmContainerResolution,
+    WsmKitConfig,
+    WsmKitConfigCountableConnection,
+    WsmSeriesConfig,
+    WsmSeriesConfigCountableConnection,
+    in_channel,
+)
+
+CONTAINER_PERMISSIONS = [ProductPermissions.MANAGE_PRODUCTS]
+
+
+# What a channel argument means on a container field, said once. Stock spells
+# it `channel` on `product`, `collection` and `productVariant` and means the
+# same thing there: the channel whose listings the money comes from.
+CHANNEL_ARGUMENT = (
+    "The channel a shopper is asking in. The candidates' own prices come from "
+    "its listings, exactly as on `product(channel:)`. Omitted is the merchant "
+    "preview: the container still answers and the money is simply absent, "
+    "which is the fail-SAFE side of getting it wrong."
+)
+
+
+def _by_id_or_collection(info: ResolveInfo, manager, type_name, id, collection):
+    """One detail resolver for both container rows, keyed either way.
+
+    A merchant screen opens on a collection and a Dashboard list links by row
+    id, so refusing one of the two would cost a round trip on every visit.
+    Exactly one of them, because answering a query that named both would mean
+    picking which key the caller meant.
+    """
+    validate_one_of_args_is_in_query(
+        "id", id, "collection", collection, use_camel_case=True
+    )
+    # Named connection, not a bare `.objects`: under
+    # ENABLE_RESTRICT_WRITER_MIDDLEWARE an unrouted read inside a GraphQL
+    # request raises UnsafeWriterAccessError.
+    qs = manager.using(get_database_connection_name(info.context)).select_related(
+        "collection"
+    )
+    if id:
+        _, pk = from_global_id_or_error(id, type_name, raise_error=True)
+        return qs.filter(pk=pk).first()
+    _, pk = from_global_id_or_error(collection, "Collection", raise_error=True)
+    return qs.filter(collection_id=pk).first()
+
+
+class WsmContainersQueries(graphene.ObjectType):
+    wsm_series_config = PermissionsField(
+        WsmSeriesConfig,
+        id=graphene.Argument(graphene.ID, description="ID of the series."),
+        collection=graphene.Argument(
+            graphene.ID, description="ID of the collection the series is on."
+        ),
+        description="Look up a series by row ID, or by collection.",
+        permissions=CONTAINER_PERMISSIONS,
+        doc_category=DOC_CATEGORY_WSM,
+    )
+    wsm_series_configs = FilterConnectionField(
+        WsmSeriesConfigCountableConnection,
+        filter=WsmSeriesConfigFilterInput(description="Filtering options for series."),
+        description="List of series.",
+        permissions=CONTAINER_PERMISSIONS,
+        doc_category=DOC_CATEGORY_WSM,
+    )
+    wsm_kit_config = PermissionsField(
+        WsmKitConfig,
+        id=graphene.Argument(graphene.ID, description="ID of the kit."),
+        collection=graphene.Argument(
+            graphene.ID, description="ID of the collection sold as a kit."
+        ),
+        channel=graphene.Argument(graphene.String, description=CHANNEL_ARGUMENT),
+        description="Look up a kit by row ID, or by collection.",
+        permissions=CONTAINER_PERMISSIONS,
+        doc_category=DOC_CATEGORY_WSM,
+    )
+    wsm_kit_configs = FilterConnectionField(
+        WsmKitConfigCountableConnection,
+        filter=WsmKitConfigFilterInput(description="Filtering options for kits."),
+        description="List of kits.",
+        permissions=CONTAINER_PERMISSIONS,
+        doc_category=DOC_CATEGORY_WSM,
+    )
+
+    wsm_container_resolve = PermissionsField(
+        WsmContainerResolution,
+        collection=graphene.Argument(
+            graphene.ID, required=True, description="The container's collection."
+        ),
+        fitment_pairs=graphene.Argument(
+            graphene.String,
+            description=(
+                "The shopper's vehicle as the search engine names it, "
+                "`1:18,2:2008,3:2784`. Omitted resolves nothing and costs no "
+                "engine call, which is the price-range state."
+            ),
+        ),
+        channel=graphene.Argument(graphene.String, description=CHANNEL_ARGUMENT),
+        description=(
+            "Resolve a container for a vehicle: which candidates fit each slot, "
+            "or the merchant's refusal. Two engine round trips with a vehicle, "
+            "zero without, both independent of the member count."
+        ),
+        permissions=CONTAINER_PERMISSIONS,
+        doc_category=DOC_CATEGORY_WSM,
+    )
+
+    @staticmethod
+    def resolve_wsm_series_config(
+        _root, info: ResolveInfo, /, *, id=None, collection=None
+    ):
+        return _by_id_or_collection(
+            info, models.SeriesConfig.objects, "WsmSeriesConfig", id, collection
+        )
+
+    @staticmethod
+    def resolve_wsm_series_configs(_root, info: ResolveInfo, /, **kwargs):
+        qs = models.SeriesConfig.objects.using(
+            get_database_connection_name(info.context)
+        ).select_related("collection")
+        qs = filter_connection_queryset(
+            qs, kwargs, allow_replica=info.context.allow_replica
+        )
+        return create_connection_slice(
+            qs, info, kwargs, WsmSeriesConfigCountableConnection
+        )
+
+    @staticmethod
+    def resolve_wsm_kit_config(
+        _root, info: ResolveInfo, /, *, id=None, collection=None, channel=None
+    ):
+        # ponytail: the channel is on the SINGULAR lookup only. The list field
+        # beside it is the Dashboard's kit index, which selects no variant and
+        # therefore no money; giving it one means stamping every node of a
+        # connection slice. Ceiling: a list screen that starts showing prices.
+        # Upgrade: stamp in `resolve_wsm_kit_configs` after the slice is built.
+        return in_channel(
+            _by_id_or_collection(
+                info, models.KitConfig.objects, "WsmKitConfig", id, collection
+            ),
+            channel,
+        )
+
+    @staticmethod
+    def resolve_wsm_kit_configs(_root, info: ResolveInfo, /, **kwargs):
+        qs = models.KitConfig.objects.using(
+            get_database_connection_name(info.context)
+        ).select_related("collection")
+        qs = filter_connection_queryset(
+            qs, kwargs, allow_replica=info.context.allow_replica
+        )
+        return create_connection_slice(
+            qs, info, kwargs, WsmKitConfigCountableConnection
+        )
+
+    @staticmethod
+    def resolve_wsm_container_resolve(
+        _root, info: ResolveInfo, /, *, collection, fitment_pairs=None, channel=None
+    ):
+        """Staff-only, on purpose.
+
+        The shopper path does not come through here: the storefront asks the
+        SEARCH ENGINE directly over a public, CDN-cached GET and groups the
+        answer against the Saleor payload it already holds (the architecture
+        doc's shopper sequence). This field is the merchant-side preview and the
+        one place the rules live in Python, so it inherits the same
+        MANAGE_PRODUCTS gate as every other container field rather than opening
+        a second, unauthenticated door onto the same data.
+        """
+        _type, pk = from_global_id_or_error(collection, "Collection", raise_error=True)
+        return containers_resolve.resolve(
+            int(pk),
+            fitment_pairs or "",
+            database=get_database_connection_name(info.context),
+            channel=channel or "",
+        )
+
+
+class WsmContainersMutations(graphene.ObjectType):
+    wsm_series_config_update = WsmSeriesConfigUpdate.Field()
+    wsm_series_config_delete = WsmSeriesConfigDelete.Field()
+    wsm_kit_config_create = WsmKitConfigCreate.Field()
+    wsm_kit_config_update = WsmKitConfigUpdate.Field()
+    wsm_kit_config_delete = WsmKitConfigDelete.Field()

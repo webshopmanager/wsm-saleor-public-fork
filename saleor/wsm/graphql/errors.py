@@ -1,0 +1,102 @@
+# WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
+"""The error type every WSM mutation returns, on stock's pattern.
+
+Stock splits this in three across three core files: a plain `Enum` of codes per
+domain (`saleor/giftcard/error_codes.py`), a graphene enum built from it
+(`saleor/graphql/core/enums.py`), and an `Error` subclass carrying that enum
+(`saleor/graphql/core/types/common.py`). The fork owns no core file, so the
+three live here, in that order, and one module is the whole pattern.
+
+One code set for the whole layer, not one per domain. The codes below are the
+ones `get_error_code_from_error` can actually produce from a Django
+`ValidationError` raised by our models, plus the two graphene raises itself;
+a domain that needs a code of its own adds it here, where every screen that has
+to render an error can see the complete list.
+"""
+
+from enum import Enum
+
+import graphene
+
+from ...graphql.core.types.common import Error
+from .types import DOC_CATEGORY_WSM
+
+
+class WsmErrorCode(Enum):
+    # The stock codes `get_error_code_from_error` can produce from any Django
+    # ValidationError, plus the two graphene raises itself.
+    DUPLICATED_INPUT_ITEM = "duplicated_input_item"
+    GRAPHQL_ERROR = "graphql_error"
+    INVALID = "invalid"
+    NOT_FOUND = "not_found"
+    # Not one stock produces from a ValidationError: stock refuses a whole
+    # mutation with a top-level `PermissionDenied`. This layer needs the FIELD
+    # shape as well, for a mutation the caller IS allowed to run that carries
+    # one input field they are not (`tierDeltas`, dealer money on a catalog
+    # mutation), so the screen can refuse the column and keep the save.
+    PERMISSION_DENIED = "permission_denied"
+    REQUIRED = "required"
+    UNIQUE = "unique"
+
+    # Compose. Every member below is a rule enforced on a model in
+    # `saleor/wsm/compose/`, and the string is the `code=` on that raise; the
+    # constants live beside the rule in `compose/models.py` so the two cannot
+    # drift, and `test_every_compose_error_code_is_declared` says so.
+    CONFIGURED_FLOOR_BELOW_ZERO = "configured_floor_below_zero"
+    DEALER_FLOOR_BELOW_ZERO = "dealer_floor_below_zero"
+    DUPLICATE_SKU_FRAGMENT = "duplicate_sku_fragment"
+    UNKNOWN_DEALER_GROUP = "unknown_dealer_group"
+    DEALER_DELTA_ABOVE_RETAIL = "dealer_delta_above_retail"
+    DUPLICATE_TIER_GROUP = "duplicate_tier_group"
+    FEE_AMOUNT_NEGATIVE = "fee_amount_negative"
+    FEE_PERCENT_ABOVE_100 = "fee_percent_above_100"
+    UNKNOWN_US_STATE_CODE = "unknown_us_state_code"
+
+    # --- containers: every one of these is a rule with a line that enforces it.
+    # The value is what the enforcing raise passes as its `code`, so the screen
+    # reading the error and the model refusing the save never drift.
+    AXIS_NOT_IN_AXES = "axis_not_in_axes"
+    SERIES_NEEDS_TWO_MEMBERS = "series_needs_two_members"
+    MEMBER_MISSING_PARTITIONING_ATTRIBUTE = "member_missing_partitioning_attribute"
+    UNKNOWN_ATTRIBUTE_SLUG = "unknown_attribute_slug"
+    DUPLICATE_KIT_MEMBER = "duplicate_kit_member"
+    KIT_MEMBER_QUANTITY_BELOW_ONE = "kit_member_quantity_below_one"
+    RULE_SUBJECT_NOT_IN_KIT = "rule_subject_not_in_kit"
+    RULE_TARGET_NOT_IN_KIT = "rule_target_not_in_kit"
+    # Slots. A container's roles are named, so two of them cannot share a name,
+    # a part cannot fill a role the container does not have, and a role cannot
+    # be deleted out from under the parts that fill it.
+    DUPLICATE_SLOT_LABEL = "duplicate_slot_label"
+    SLOT_NOT_IN_CONTAINER = "slot_not_in_container"
+    SLOT_STILL_HAS_CANDIDATES = "slot_still_has_candidates"
+
+    # --- dealer: six rules, each with the line that enforces it. Two of them
+    # are the same money column from two directions, because a tier amount is
+    # what gets CHARGED: the one-cent floor
+    # (CheckConstraint wsm_dealer_tier_amount_at_least_a_cent,
+    # dealer/models.py:185), and the two decimal places a merchant is allowed
+    # to type into a three-place column (dealer/admin.py:106).
+    DUPLICATE_TIER_BREAK = "duplicate_tier_break"
+    TIER_AMOUNT_BELOW_ONE_CENT = "tier_amount_below_one_cent"
+    TIER_AMOUNT_TOO_MANY_DECIMALS = "tier_amount_too_many_decimals"
+    DUPLICATE_GROUP_CODE = "duplicate_group_code"
+    CUSTOMER_ALREADY_ASSIGNED = "customer_already_assigned"
+    GROUP_IN_USE = "group_in_use"
+    # A paste is capped on stock's own bulk-create shape (`MAX_ORDERS`,
+    # `saleor/graphql/order/bulk_mutations/order_bulk_create.py:86`), and
+    # this is stock's name for that refusal (`saleor/order/error_codes.py:86`).
+    BULK_LIMIT = "bulk_limit"
+
+
+# `from_enum` names the GraphQL type after the PYTHON class, so the type in the
+# schema is `WsmErrorCode` whatever this variable is called.
+WsmErrorCodeEnum = graphene.Enum.from_enum(WsmErrorCode)
+WsmErrorCodeEnum.doc_category = DOC_CATEGORY_WSM
+
+
+class WsmError(Error):
+    code = WsmErrorCodeEnum(description="The error code.", required=True)
+
+    class Meta:
+        description = "Represents an error in a WSM mutation."
+        doc_category = DOC_CATEGORY_WSM

@@ -10,7 +10,7 @@ The complete inventory is one command, and it must return this file's list and
 nothing else:
 
 ```
-git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py, urls.py, section 7's list, saleor/wsm/**
+git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py, section 7's list, saleor/wsm/**
 git diff --name-only a1ab3a2..HEAD -- CHANGELOG.md
 ```
 
@@ -19,20 +19,28 @@ cannot see `CHANGELOG.md`, which this branch also edits and which
 `make vendor-delta` counts. One file, outside the only command this ledger
 offered to find it (Wild West finding 12).
 
-Monkey patches: **three** (MP1, added by U3; MP2, added by U7; MP3, added by
-H1; the design doc budgeted zero, see those entries for why the stock levers do
-not exist). Three, not four: the compliance PLUGIN in section 9 is a native
-hook, argued there, and it is deliberately not a fourth patch. Read this line
-with section 9 and the two counts agree. Plus
+Core touches from outside `saleor/wsm/`: **three wrapped functions, one
+core-class extension and one module-attribute rebind.** MP1 (added by U3), MP2 (U7) and MP3 (H1) replace core
+FUNCTIONS; the design doc budgeted zero, and those entries say why the stock
+levers do not exist. MP4 (section 14) appends three fields to stock's `Product`
+GRAPHENE TYPE, which is not a wrapped function and so was invisible to both the
+count and the boot guard until 2026-09-11. MP5 (section 15) repoints one module
+ATTRIBUTE, `saleor.graphql.views.schema`, so the query complexity guard weighs
+the schema this fork actually serves. The compliance PLUGIN in section 9 is
+a native hook, argued there, and is deliberately none of the four. Plus
 one resolver swap Bill's secondary-categories patch performs from
 `saleor/wsm/apps.py` (section 7). Core table edits: **zero.** Our tables carry
 FKs into core tables; core migrations are untouched, and the one migration
 section 7 brings in is state-only.
 
-Sections 1 to 6 and section 8 are this branch's own work and touch two core
-files. Section 7 is the six WSM patches that already existed before the fork,
-merged in from `wsm/bakeoff-rebase-probe`; they are the reason the guard test's
-allow-list is longer than two entries.
+Sections 1 to 4, 6, 8 to 10 and 13 are this branch's own work and touch ONE
+core file, `saleor/settings.py`. Sections 5 and 12 are withdrawn and their
+lines are gone: section 13 turned the fork's urlconf into the root one, which
+took `saleor/urls.py` back to upstream byte-for-byte, and the Django admin
+deletion took the three `MIDDLEWARE` entries with it. Section 7 is the six WSM
+patches that already existed before the fork, merged in from
+`wsm/bakeoff-rebase-probe`; they are the reason the guard test's allow-list is
+longer than one entry.
 
 Since 2026-09-10 every patch also pins a **sha256 of the wrapped function's
 own source** (`SOURCE` in `saleor/wsm/patches.py`), and `install_guard` refuses
@@ -129,47 +137,74 @@ Compose.
 
 ---
 
-## 2. `saleor/settings.py`, +33 lines, 13 of them code (U2, 2026-09-08)
+## 2. `saleor/settings.py`, +10 lines, 2 of them code (U2, 2026-09-08; cut back 2026-09-10)
 
-The merchant UI is the Django admin (design section 6), and the admin will not
-start on a Saleor that amputated `django.contrib.auth`. Every line here exists
-to satisfy one of its dependencies. Grouped, with what breaks without it:
+**The Django admin this section existed for is gone.** The merchant UI is now
+native screens in the Saleor Dashboard over `saleor/wsm/graphql`, ruling Dana
+2026-09-10. Deleted with it: the 13 `ModelAdmin` registrations, the three
+`admin.py` files, `saleor/wsm/admin_pickers.py`, `ComposeAdminSite` and its
+mixins, the throttled admin login form, the `^admin/` mount in
+`saleor/wsm/urls.py`, `saleor/wsm/middleware.py` (section 12, now empty) and
+the admin's own form layer, `saleor/wsm/compose/forms.py`.
 
-| Lines | What | Without it |
+Four `INSTALLED_APPS` entries went with them, restoring this list to upstream's
+for those four names:
+
+| Removed | Why it was there |
+|---|---|
+| `django.contrib.admin` | the admin itself |
+| `django.contrib.sessions`, `django.contrib.messages` | the two apps the admin requires |
+| `django.forms` | Saleor sets `FORM_RENDERER = TemplatesSetting`, so admin widget templates resolved through the loaders |
+
+Removing `django.forms` is what proved the form layer had no consumer left: the
+one test that still built an inline formset raised
+`TemplateDoesNotExist: django/forms/errors/list/default.html` on
+`non_form_errors()` and nothing else moved. The rules it was asserting are
+model rules (`configured_floor_cents`, `duplicate_fragment_error` in
+`saleor/wsm/compose/models.py`) and the GraphQL option-set mutation calls the
+same two, across the whole submitted list, with its own tests. So the module
+went rather than the `INSTALLED_APPS` entry coming back. `currency_for`,
+`money` and `CENT` lived there too and had exactly one caller each, all of them
+in the deleted `admin.py` files; a later reader who wants a currency helper
+should put it in `saleor/wsm/money.py`, which already owns the rounding rule.
+
+`django.contrib.sites`, `django.contrib.staticfiles` and `django.contrib.postgres`
+are NOT fork additions: upstream `a1ab3a23a3f5` installs all three and stock
+Saleor imports them (`saleor/core/notification/utils.py`,
+`saleor/checkout/complete_checkout.py`, `STATICFILES_FINDERS`). They stay.
+`TEMPLATES` is byte-identical to upstream and always was; the old version of
+this table claimed three added context processors that are not in the file.
+
+**What is still here, and its consumer.**
+
+| Lines | What | Read by |
 |---|---|---|
-| `INSTALLED_APPS`: `saleor.wsm.compose.apps.WsmAuthConfig` | `django.contrib.auth`, relabelled `django_auth` | `admin.E403`: the admin refuses to load |
-| `INSTALLED_APPS`: `django.contrib.sessions`, `django.contrib.messages`, `django.contrib.admin` | the admin itself and the two apps it requires | no admin |
-| `INSTALLED_APPS`: `django.forms` | Saleor sets `FORM_RENDERER = TemplatesSetting`, which resolves widget templates through the loaders | `TemplateDoesNotExist` on every admin form |
-| `MIDDLEWARE`: session, authentication, message, each a `/admin/`-scoped subclass since section 12 | admin checks `admin.E40x` | admin refuses to load |
-| `TEMPLATES` context processors: `auth`, `messages`, `request` | same checks, plus `admin.W411` for the sidebar | admin refuses to load |
-| `AUTHENTICATION_BACKENDS`: `saleor.wsm.compose.auth.AdminPasswordBackend` | email + password login, and permissions read from Saleor's renamed `permission_permission` | no way to log in as a merchant |
-| `MIGRATION_MODULES = {"django_auth": "saleor.wsm.compose.django_auth_migrations"}` | `saleor.auth` already owns the `auth` label and holds the 13 historical auth migrations | duplicate migration history, `migrate` fails |
+| `INSTALLED_APPS`: `saleor.wsm.compose.apps.WsmAuthConfig` | `django.contrib.auth`, relabelled `django_auth` | the two state-only migrations below, and `Permission` rows the backend answers from. Stays BELOW `saleor.account` so auth's `createsuperuser` cannot shadow Saleor's (section 10) |
+| `AUTHENTICATION_BACKENDS`: `saleor.wsm.compose.auth.AdminPasswordBackend` | password sign-in, and `wsm_*` permissions out of Saleor's renamed `permission_permission` | every `authenticate()` and every `has_perm()` in the process |
+| `MIGRATION_MODULES = {"django_auth": "saleor.wsm.compose.django_auth_migrations"}` | `saleor.auth` already owns the `auth` label | `migrate`; without it, duplicate migration history |
 
 Why a relabelled `django.contrib.auth` rather than the stock one: `saleor.auth`
 is a models-free shim occupying the `auth` label whose `0013` deletes Group,
 Permission and User from migration state. Two apps cannot share a label, so the
 one we add takes `django_auth`. Its `AppConfig.ready()` is a no-op so that
 Django's `create_permissions` receiver is never connected: `wsm_compose`
-permission rows are created by our own `post_migrate` receiver, into
-`saleor.permission.models.Permission`.
+permission rows are created by our own `post_migrate` receiver
+(`create_wsm_permissions`), into `saleor.permission.models.Permission`.
 
 `MIGRATION_MODULES` points `django_auth` at a FORK-OWNED migration package,
-`saleor.wsm.compose.django_auth_migrations`, not at `None`. It holds two
-migrations, `0001_initial` and `0002_auth_models_state_only`, and both are
-state-only: they create no table and touch no row, they exist so that
-`makemigrations --check` sees a history for an app that has three models in the
-registry and none of its own tables. `None` was the shape U2 first wrote and the
-shape this table used to claim; the code has said otherwise since
-`0002_auth_models_state_only` landed on the merge branch.
+`saleor.wsm.compose.django_auth_migrations`. It holds two migrations,
+`0001_initial` and `0002_auth_models_state_only`, and both are state-only: they
+create no table and touch no row, they exist so that `makemigrations --check`
+sees a history for an app that has three models in the registry and none of its
+own tables.
 
 Read the `AUTHENTICATION_BACKENDS` row as the app-wide change it is. A backend in
-that list is consulted on EVERY `authenticate()` call in the process, not only on
-/admin/, so this one password backend is part of the shop's whole sign-in path.
-Since review wave A it therefore honours the merchant's own
-`SiteSettings.password_login_mode`: `DISABLED` refuses everyone and
-`CUSTOMERS_ONLY` refuses staff, which is what the same switch means to Saleor's
-own backends (`saleor/wsm/compose/auth.py`, and its tests in
-`saleor/wsm/compose/tests/test_auth.py`).
+that list is consulted on EVERY `authenticate()` call in the process, so this one
+password backend is part of the shop's whole sign-in path. Since review wave A it
+therefore honours the merchant's own `SiteSettings.password_login_mode`:
+`DISABLED` refuses everyone and `CUSTOMERS_ONLY` refuses staff, which is what the
+same switch means to Saleor's own backends (`saleor/wsm/compose/auth.py`, and its
+tests in `saleor/wsm/compose/tests/test_auth.py`).
 
 App-wide covers every `has_perm()` too, not only every `authenticate()`. Django's
 `_user_has_perm` walks `AUTHENTICATION_BACKENDS` until one says yes, and this
@@ -189,6 +224,16 @@ did not change, only what they cost. Held by
 `test_a_wsm_permission_is_still_read_from_the_grant` in
 `saleor/wsm/compose/tests/test_auth.py`, the first of which is red without the
 short-circuit and the second red if it is widened.
+
+**Open, and deliberately not settled here.** Nothing calls
+`AdminPasswordBackend.authenticate()` now that the admin login view is gone, and
+the only reader of the `wsm_*` grant rows was the admin's own permission checks.
+Whether that whole stack (this backend, `create_wsm_permissions`,
+`django.contrib.auth` and its two state-only migrations) survives depends on
+decision D1 in `ARCHITECTURE-dashboard-merchant-screens.md`: per-model `wsm_*`
+permissions on the GraphQL layer keep it, reusing `MANAGE_PRODUCTS` and
+`MANAGE_DISCOUNTS` deletes it. It was left in place because deleting it means
+deleting migrations, which this branch does not do on a live schema.
 
 Removal cost: delete the block. Nothing outside `saleor/wsm/` imports any of it.
 
@@ -224,42 +269,26 @@ Containers.
 
 ---
 
-## 5. `saleor/urls.py`, +1 line of code (U2, U3 and U4 together, 2026-09-08)
+## 5. Withdrawn. `saleor/urls.py` is upstream again (U1 spine, 2026-09-10)
 
-```python
-    re_path(r"", include("saleor.wsm.urls")),
-```
+This section used to hold the fork's one `saleor/urls.py` line,
+`re_path(r"", include("saleor.wsm.urls"))`. Section 13 inverted that
+relationship: `saleor/wsm/urls.py` is the ROOT urlconf now and `saleor.urls` is
+what it includes, so the core line would be a cycle. It was removed and
+`saleor/urls.py` is byte-identical to the upstream release again.
 
-**Shared touch.** U2 (Compose endpoints, the merchant admin, static), U3
-(Dealer endpoints) and U4 (the kit endpoint) each need the fork's URLs mounted, and both branches wrote
-this line their own way. U2's shape is the one kept: U3's `path("wsm/", ...)`
-prefixes every fork route with `/wsm/`, which the dealer and compose endpoints
-want but `/admin/` and `/static/` do not, and those two are U2's merchant UI.
-Since 2026-09-10 the `/static/` route is OFF unless `WSM_SERVE_STATIC` is set
-(`saleor/wsm/urls.py::static_routes`, Wild West finding 11): the target
-deployment is ECS behind a CDN, where Django serving static files is a
-production defect, and a bake-off box behind SSH says so for itself. A box
-whose merchant screens render unstyled is missing that variable.
-An empty `re_path` prefix mounts the list at the root and lets
-`saleor/wsm/urls.py` spell out each app's own prefix, so all three shapes fit
-behind one core line. The dealer routes keep their exact paths
-(`/wsm/dealer_pricing/...`) because `saleor/wsm/urls.py` now carries the
-`wsm/` segment in its own pattern.
-
-Core gains ONE include however many fork apps exist, because
-`saleor/wsm/urls.py` is the list. Adding the next app's endpoints is a line in
-that file, which upstream does not own, rather than another core touch.
-
-Removal cost: delete the line and the `saleor/wsm/` package. Nothing in core
-resolves a `wsm-` route name.
+The numbering is kept rather than closed up, because sections 6 and 7 were
+written referring to "sections 1 to 5" and a renumbered ledger is a ledger
+nobody can follow across a rebase.
 
 ---
 
 ## 6. Nothing. What the merge added, and where (U6, 2026-09-08)
 
 Landing all three units on one branch added **zero** lines to a file Saleor
-owns. Sections 1 to 5 are still the complete core-touch list, and the command at
-the top of this file still returns `saleor/settings.py`, `saleor/urls.py` and
+owns. Sections 1 to 5 were the complete core-touch list at the time, and the
+command at the top of this file then returned `saleor/settings.py`, the now
+withdrawn `saleor/urls.py` and
 `saleor/wsm/**` and nothing else. What the merge did add lives entirely inside
 `saleor/wsm/`, and is listed here because a reviewer looking for the seam should
 not have to diff three branches to find it.
@@ -299,8 +328,10 @@ at that point; MP2 arrived after it, in U7.
   `add_variants_to_checkout`, the same function `checkoutLinesAdd` calls, with
   `price_override` computed in this process. A kit is never a Saleor object
   beyond the Collection.
-- **No `django.contrib.admin` registration in settings.** `saleor/wsm/containers/admin.py`
-  registers onto the AdminSite that U2 mounts; on a containers-only branch there
+- **No `django.contrib.admin` registration in settings.** (Historical: all
+  three `admin.py` files were deleted on 2026-09-10, section 2.)
+  `saleor/wsm/containers/admin.py`
+  registered onto the AdminSite that U2 mounted; on a containers-only branch there
   is nothing to register onto and the screens are exercised by calling
   `admin.register(AdminSite())` in a test. When U2 and U4 sit on one branch the
   screens appear with no further edit. The `post_migrate` permission receiver in
@@ -518,62 +549,221 @@ together with the whole of `test_transaction_initialize.py`,
 and `saleor/tests/e2e/gift_cards/`: 271 passed, so the gate's own proofs still
 hold.
 
-## 12. `saleor/settings.py`, three `MIDDLEWARE` entries repointed, +5 comment lines (fork regression sweep, 2026-09-09)
+## 12. `saleor/settings.py`, `MIDDLEWARE` back to upstream's three (fork regression sweep 2026-09-09; REMOVED 2026-09-10)
 
-`django.contrib.sessions.middleware.SessionMiddleware`,
-`django.contrib.auth.middleware.AuthenticationMiddleware` and
-`django.contrib.messages.middleware.MessageMiddleware` are replaced by
-`AdminSessionMiddleware`, `AdminAuthenticationMiddleware` and
-`AdminMessageMiddleware` from the new fork-owned file `saleor/wsm/middleware.py`.
-Each is a subclass of the Django one that runs its hooks only when
-`request.path` starts with `/admin/`, which is where `saleor/wsm/urls.py` mounts
-the merchant admin. No entry was added or removed, and inside `/admin/` the
-behaviour is Django's, unchanged.
+**Nothing left. This section is now a record of a touch that no longer exists.**
 
-**The regression it fixes.** `saleor/core/tests/test_dataloaders.py` passed 2/2
-on upstream `a1ab3a23a3f5` and failed 2/2 on `wsm/bakeoff`. Both assert the
-plugin requestor contract: `test_plugins_manager_loader_loads_requestor_in_plugin`
-wants the authenticated `User`, and got
-`SimpleLazyObject(AnonymousUser)`;
-`test_plugins_manager_loader_requestor_in_plugin_when_no_app_and_user_in_req_is_none`
-wants nothing at all, and got the same truthy lazy object.
-`AuthenticationMiddleware.process_request` assigns `request.user`
-unconditionally, so with the admin block listed unscoped it overwrote whatever
-was there on EVERY request in the process. `plugin_manager_promise`
-(`saleor/graphql/plugins/dataloaders.py:51`) reads exactly that attribute:
-`requestor = app or user`. So the fork was handing every plugin in the manager
-an `AnonymousUser` where upstream hands a `User` or `None`, on the live GraphQL
-API and not only under pytest. Evaluating that lazy object for its truthiness
-also loads it, which is a `django_session` read charged to a request that never
-asked for a session.
+The fork put `SessionMiddleware`, `AuthenticationMiddleware` and
+`MessageMiddleware` in `MIDDLEWARE` because the Django admin hard-requires them.
+Listed unscoped they ran on EVERY request the process serves, and
+`AuthenticationMiddleware` overwrote `request.user` with a lazy `AnonymousUser`,
+which broke upstream's plugin-requestor contract on the live GraphQL API
+(`saleor/core/tests/test_dataloaders.py`, 2/2 red on the fork, 2/2 green on
+upstream `a1ab3a23a3f5`). The 09-09 fix repointed the three at
+`/admin/`-scoped subclasses in `saleor/wsm/middleware.py`.
 
-**Why the fix is here and not in the requestor resolution.** The broken value is
-"which requests these three middlewares run on", and `MIDDLEWARE` is the list
-that owns it. Teaching `plugin_manager_promise` to read an anonymous lazy user
-as `None` would be a core edit inside upstream's own contract, and it would fix
-one reader while leaving `request.user` wrong for every other one; the fork
-would keep paying the session cost on the API path either way. Scoping the
-three restores upstream behaviour for the whole process outside `/admin/`, which
-is the class, not the instance.
+The admin is gone (section 2, ruling Dana 2026-09-10), so the three entries and
+`saleor/wsm/middleware.py` are gone with it. `MIDDLEWARE` is byte-identical to
+upstream's again:
 
-**Why subclasses rather than wrapper functions.** `django.contrib.admin`'s own
-system checks (`admin.E408`, `E409`, `E410`) look for a `MIDDLEWARE` entry that
-is a SUBCLASS of each of these three, so a subclass keeps the admin's
-configuration valid where a wrapper function would report it broken;
-`manage.py check` returns "no issues" on this branch. A subclass also keeps
-`MiddlewareMixin`'s sync and async capability, which a plain function drops.
+```python
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "saleor.core.middleware.jwt_refresh_token_middleware",
+]
+```
 
-**Verified by** the two upstream tests above, red then green on a fresh test DB,
-run together with `saleor/wsm/compose/tests/test_admin.py` and
-`test_auth.py`, which drive the merchant admin over real HTTP
-(`client.force_login`, then the index, the changelists and a change-form POST)
-and would go red if the scope were tighter than the admin needs: 36 passed. Plus
-`manage.py check`, for the `admin.E40x` family the scoping could have tripped.
+This is the prize the deletion bought: the section existed only because the
+admin needed three middlewares the API did not, and deleting the admin deleted
+the reason rather than the symptom.
+
+**Verified by** the same two upstream tests, which pass on a `MIDDLEWARE` with
+no fork entry in it at all, and by `manage.py check`, which no longer has an
+`admin.E40x` family to trip.
 
 # Monkey patches
 
-Expected: zero. Actual: **two**, in U3 and U7. Every entry names the exact
-function it replaces and the upstream change that would delete it.
+Expected: zero. Actual: **five**: three wrapped functions (MP1 in U3, MP2 in
+U7, MP3 in the reprice wave), one core-class extension (MP4, the product tab,
+section 14) and one module-attribute rebind (MP5, the query cost guard, section
+15). Every entry names the exact function, class or attribute it changes and the
+upstream change that would delete it.
+
+## 13. `saleor/settings.py`, one line repointed, +5 comment lines (U1 dashboard spine, 2026-09-10)
+
+```python
+ROOT_URLCONF = "saleor.wsm.urls"
+```
+
+**This is the whole attachment for the fork's GraphQL layer.** The merchant
+screens are being rebuilt as native Saleor Dashboard sections, which means the
+Dashboard has to reach our models over GraphQL, which means our fields have to
+be in the schema the API serves. There are two ways to do that in a fork that
+does not edit `saleor/`: rebind `saleor.graphql.api.schema` from `ready()`
+(rung 5, a fourth monkey patch), or compose our own schema and make our own
+urlconf the root (rung 1, a settings seam). This is the second.
+
+What it buys, concretely:
+
+- `saleor/wsm/graphql/schema.py` SUBCLASSES stock's `Query` and `Mutation`
+  (`type("Query", (WsmQueries, api.Query), {})`) and calls
+  `build_federated_schema` with the arguments read back off `api` itself, so
+  the composed schema is stock's schema plus our fields, never stock's schema
+  changed. `saleor/graphql/api.py` is imported and left alone; its own
+  `schema` object still exists and still has no WSM field on it, which
+  `test_our_fields_are_on_our_schema_and_stock_is_left_alone` asserts.
+- `saleor/wsm/urls.py` serves that schema at `graphql/` FIRST, then includes
+  `saleor.urls` whole. Every core route resolves exactly as before; core's own
+  `graphql/` line is simply never reached.
+- The monkey-patch count stays at **three**. A fourth was the alternative.
+- `saleor/urls.py` LEAVES the deviation budget (section 5, withdrawn), so the
+  files outside `saleor/wsm/` that differ from upstream on this branch's own
+  account go from two to one, and `ALLOWED_CORE_FILES` in
+  `saleor/wsm/tests/test_core_tables_untouched.py` is one entry shorter.
+
+**The tripwire.** Composing "with the same arguments" is an assumption about a
+core file. `API_SCHEMA_SOURCE` in `saleor/wsm/graphql/schema.py` is a sha256 of
+api.py's construction block (from `schema = build_federated_schema(` through
+`monitor_fields_usage(schema)`), and
+`test_the_pinned_digest_is_the_api_block_this_layer_was_written_against`
+compares it on every run. An upstream bump that adds a `types=` entry or a
+directive is then a red test with a diff to read, rather than a type that
+exists in stock's schema and silently not in the one we serve. Proven able to
+fail twice over: once by pinning a wrong digest (the first run of this branch),
+and permanently by
+`test_the_tripwire_moves_when_an_argument_does`, which feeds the function a
+modified api.py and asserts the digest moves. To re-pin after a deliberate
+bump, read the diff FIRST, mirror any new argument, then:
+
+```
+python -c "from saleor.wsm.graphql import schema; print(schema.source_digest())"
+```
+
+**Cost, measured and accepted.** Two full Saleor schemas are built at urlconf
+load, because `saleor.urls` builds its own on import and this design refuses to
+patch that away. The ceiling is cold-start time and resident memory on a worker,
+nothing per request. The upgrade path, if a cold start ever has to get cheaper,
+is the rung-5 rebind with a `PINNED` entry, which buys back one build at the
+cost of one monkey patch.
+
+**Removal cost:** set `ROOT_URLCONF` back to `"saleor.urls"`, restore the
+`include("saleor.wsm.urls")` line in `saleor/urls.py`, and the fork's REST
+routes work exactly as they did before; only the GraphQL fields go away.
+
+---
+
+## 14. MP4. Three fields appended to stock's `Product` graphene type (dashboard spine, 2026-09-10; ledgered 2026-09-11)
+
+`saleor/wsm/graphql/compose/product_extension.py` writes into
+`Product._meta.fields` and sets `resolve_<name>` on the class, from our own
+module, at import. No file under `saleor/graphql/` is edited.
+
+**Why it exists.** The Compose tab on the product page wants the product's
+option sets, its charges and its disclosure in the SAME round trip the page
+already makes. A graphene 2 `ObjectType` collects its fields when the class body
+runs, and `_meta.fields` is the only public handle afterwards.
+
+**Why it was not in this ledger until now.** It wraps no function, so
+`patches.installed()` cannot see it, and the count above read "three, nothing
+here adds one". That sentence was in the PR body too. The Marshal review of fork
+PR 4 (2026-09-11) called it: a claim the code contradicts is the most expensive
+sentence in a description.
+
+**The tripwire, now the same as the other three.** `EXTENDED` in
+`saleor/wsm/patches.py` pins the type and the field names;
+`patches.extensions_installed()` DISCOVERS the real set by sweeping loaded core
+modules for a field carrying `_wsm_owned`; and
+`test_the_installed_core_class_extensions_are_the_documented_ones` compares
+them. An extension that lands without a line here reddens that test in the run
+that adds it.
+
+**Removal cost.** One module deleted and the three fields declared wherever
+Saleor grows a real extension hook. Nothing else in the package changes;
+`_assert_free` already refuses to overwrite a stock field, so an upstream bump
+that adds a `wsmFees` of its own is a loud `RuntimeError` at import rather than
+a silently shadowed resolver.
+
+**Known boundary: there are two schemas, and webhooks use the other one.**
+`saleor/graphql/webhook/subscription_payload.py:123` and `:209`, and
+`saleor/webhook/observability/obfuscation.py:200`, all do `from ..api import
+schema` and parse the subscription document against STOCK's schema object, not
+the composed one `saleor/wsm/graphql/schema.py` builds and `ROOT_URLCONF`
+serves. So an app subscription cannot select `wsmFees`, `wsmOptionSets` or
+`wsmCompliance` on `Product`, and `anonymize_event_payload` parses against a
+schema that cannot see them. The Dashboard is unaffected (it goes through the
+served schema); apps subscribing to WSM fields are not supported today. The
+follow-up, if an app ever needs it, is to pass the composed schema into those
+two call sites behind the same digest pin `API_SCHEMA_SOURCE` already uses.
+
+## 15. MP5. `saleor.graphql.views.schema` repointed at the composed schema (fix wave 2A, 2026-09-11)
+
+`saleor/wsm/graphql/cost.py` `install()` sets `saleor.graphql.views.schema` to
+the schema `saleor/wsm/graphql/schema.py` builds, from that module, the moment it
+is built. One attribute, no function wrapped, no core file edited.
+
+**Why it exists.** `saleor/graphql/views.py:38` does
+`from .api import API_PATH, schema`. Line 358 PARSES the incoming document with
+`self.schema`, the schema the view was constructed with, and line 479 costs it
+with `validate_query(schema=schema, ...)`, the module global. On stock Saleor
+both names point at one object and the difference is invisible. On this fork the
+view mounted at `graphql/` serves the COMPOSED schema, so the cost walk ran over
+a schema in which no `Wsm*` field exists: `products(first: 100)` cost 200 and
+`wsmDealerGroups(first: 100)` cost 0, measured 2026-09-11. The whole WSM surface
+sat outside `GRAPHQL_QUERY_MAX_COMPLEXITY`. A cost map alone cannot fix it, and
+in fact cannot be installed without it: `validate_cost_map` walks the same
+schema and rejects the entries ("cost map contains a field wsmOptionSet not
+defined by the Query type"), which turns every request into an error. That was
+the red.
+
+**Blast radius.** The composed schema is stock's `Query` and `Mutation`
+SUBCLASSED, so it is a superset: every stock query is weighed against exactly
+the types it was before, with the same map entries. Nothing else in `views.py`
+reads that module global.
+
+**The tripwire.** `REBOUND` in `saleor/wsm/patches.py` pins the name;
+`patches.rebindings_installed()` DISCOVERS every core module attribute holding
+an object the fork marked `_wsm_owned`; and
+`test_the_core_attributes_this_fork_rebinds_are_the_documented_ones` compares
+them. A second rebind is a red test in the run that adds it.
+
+**Removal cost.** One line, the moment upstream costs the query with
+`self.schema`. The upstream change that deletes this is a one-word diff in
+`saleor/graphql/views.py:479`, and it is worth offering: on stock Saleor the two
+names are the same object, so passing the view's schema is a no-op there and a
+fix for every fork that composes one.
+
+
+## 16. Nothing. Container slots and the vehicle resolver (U7, 2026-09-11)
+
+The slots layer added **zero** lines to a file Saleor owns. The command at the
+top of this file still returns `saleor/settings.py` and `saleor/wsm/**` and
+nothing else, on this branch, after the rebase onto `ca1fbf3771`. New monkey
+patches: **zero.** New core rebinds: **zero**, so `REBOUND` in
+`saleor/wsm/patches.py` is unchanged and MP5 is the only entry in it.
+
+Everything the unit added lives under `saleor/wsm/`: a `ContainerSlot` table
+and its members' foreign key (`wsm_containers.0003_container_slots`, additive,
+with a data step that gives every existing kit one slot holding its members),
+the resolver in `saleor/wsm/containers/resolve.py`, and the GraphQL that
+reaches them.
+
+The one thing it had to add OUTSIDE its own package is three cost-map entries,
+because fix wave 2A's `test_every_wsm_root_field_carries_a_cost_hint` reads the
+SERVED schema and reddens on a `wsm*` root field with no price. They are in
+`saleor/wsm/graphql/cost.py`, which is fork-owned:
+
+| Entry | Weight | Why that weight |
+|---|---|---|
+| `Query.wsmContainerResolve` | `PER_OBJECT` | One container resolved for one vehicle. The answer is one object however many members it holds, and the engine round trips are capped at two, so it weighs what `wsmKitConfig` weighs. |
+| `WsmKitConfig.slots` | `PER_OBJECT` | An unpaged list on a type reached through a PAGED connection, so it multiplies with the page above it. Same shape `COMPOSE_COST` prices on stock's `Product`. |
+| `WsmContainerSlot.candidates` | `PER_OBJECT` | Same, one level down: this is where a kit's fan-out actually is. |
+
+Known gap, pre-existing and NOT introduced here: `WsmKitConfig.members` and
+`WsmKitConfig.rules` have no entry either, so they are still free. The 2A test
+only asserts root fields, so nothing is red. Worth one line in `cost.py` the
+next time that file is opened.
+
 
 ## Where the stamps live: PRIVATE metadata, always (review wave WW1, 2026-09-08)
 

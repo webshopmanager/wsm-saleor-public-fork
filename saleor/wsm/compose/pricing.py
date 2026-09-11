@@ -495,6 +495,15 @@ def price_configured(
                 }
             )
 
+    # Recorded from `picked` and not from `lines`, because the whole point is
+    # that these produced no line. Catalog order, like everything else in the
+    # snapshot, so the same choices always serialise the same way.
+    declined = sorted(
+        set_id
+        for set_id, selection in picked.items()
+        if not selection.value_ids and sets_by_id[set_id].prompt_type == CHOICE_ONE
+    )
+
     # AT OR BELOW nothing (requirement 1.3). A configured unit that comes to
     # exactly 0 is a broken catalog row, not a free product, and a positive fee
     # must not be able to carry it into a sale.
@@ -514,6 +523,16 @@ def price_configured(
         snapshot={
             "version": SNAPSHOT_VERSION,
             "base_unit_cents": base_unit_cents,
+            # The questions the shopper answered with NOTHING. They add no
+            # money and write no line, so without this key the snapshot cannot
+            # tell "said no" from "said nothing" and anything that re-prices
+            # from it (`wsm/reprice.py`) hands the engine a set it never
+            # mentions, which `apply_defaults` answers with the merchant's
+            # default. A shopper who declined a priced default at the buy
+            # button was charged for it by the next cart read. Absent on a
+            # snapshot written before this key existed, which is correct: no
+            # default could be applied then either.
+            "declined": declined,
             "tier_group": tier_group or None,
             # A tier_group that matched nothing prices at retail, which is
             # invisible in the money alone: the dealer is charged retail and the

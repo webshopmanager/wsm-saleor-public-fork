@@ -228,8 +228,12 @@ def test_a_dealer_still_gets_their_tier_price_on_a_gated_store(
 
 
 def test_an_anonymous_add_to_cart_is_refused(
-    api_client, variant, channel_USD, gated_store
+    api_client, variant_with_many_stocks, channel_USD, gated_store
 ):
+    """A variant WITH stock, deliberately: stock is validated in `clean_input`,
+    before the write this gate wraps, so an out-of-stock variant would prove
+    nothing about the gate."""
+    variant = variant_with_many_stocks
     variables = {
         "channel": channel_USD.slug,
         "variant": graphene.Node.to_global_id("ProductVariant", variant.pk),
@@ -244,11 +248,13 @@ def test_an_anonymous_add_to_cart_is_refused(
 
 
 def test_a_dealer_add_to_cart_succeeds(
-    user_api_client, variant, channel_USD, gated_store, fob_buyer
+    user_api_client, variant_with_many_stocks, channel_USD, gated_store, fob_buyer
 ):
     variables = {
         "channel": channel_USD.slug,
-        "variant": graphene.Node.to_global_id("ProductVariant", variant.pk),
+        "variant": graphene.Node.to_global_id(
+            "ProductVariant", variant_with_many_stocks.pk
+        ),
     }
     content = get_graphql_content(
         user_api_client.post_graphql(CHECKOUT_CREATE, variables)
@@ -300,12 +306,15 @@ def test_the_gate_mutation_rewrites_rather_than_duplicating(
     staff_api_client, permission_manage_discounts, product, fob
 ):
     """The Dashboard toggle round-trips: true, false, true, one row throughout."""
+    # Granted once on the user rather than passed per call: the `permissions=`
+    # argument runs the query UNPERMITTED first to prove the gate, which the
+    # second lap of this loop would then fail.
+    staff_api_client.user.user_permissions.add(permission_manage_discounts)
     for required in (True, False, True):
         content = get_graphql_content(
             staff_api_client.post_graphql(
                 GATE_SET,
                 {"product": product_id(product), "required": required, "groups": []},
-                permissions=[permission_manage_discounts],
             )
         )
         assert content["data"]["wsmProductGateSet"]["errors"] == []
@@ -370,11 +379,10 @@ def test_the_bulk_mutation_is_an_upsert(
         {"product": product_id(product), "loginRequired": True}
         for product in product_list
     ]
+    staff_api_client.user.user_permissions.add(permission_manage_discounts)
     for _ in range(2):
         get_graphql_content(
-            staff_api_client.post_graphql(
-                GATE_BULK, {"gates": gates}, permissions=[permission_manage_discounts]
-            )
+            staff_api_client.post_graphql(GATE_BULK, {"gates": gates})
         )
 
     assert DealerProductGate.objects.count() == len(product_list)

@@ -42,6 +42,7 @@ from ....graphql.core.mutations import (
 from ....graphql.core.types import BaseInputObjectType, NonNullList
 from ....permission.enums import DiscountPermissions
 from ...dealer import models
+from ...money import to_money
 from ..errors import WsmError
 from ..scalars import WsmDecimal
 from ..types import DOC_CATEGORY_WSM
@@ -63,10 +64,6 @@ from .types import (
 # `wsm_*` permission rows those codenames would bind to.
 DEALER_PERMISSIONS = (DiscountPermissions.MANAGE_DISCOUNTS,)
 
-# Two places, because that is what a merchant means by a price. The column
-# stores three to match CheckoutLine.price_override.
-TIER_AMOUNT_PLACES = 2
-
 # One call is one paste. Stock caps its own bulk create the same way
 # (`MAX_ORDERS = 50`, `saleor/graphql/order/bulk_mutations/order_bulk_create.py:86`)
 # and 50 is the shape of an order import, not of a price list: live data is 304
@@ -76,17 +73,46 @@ TIER_AMOUNT_PLACES = 2
 MAX_TIER_PRICES = 500
 
 
+def _check_bulk_limit(rows) -> None:
+    """One paste is one call, and the refusal is the same on every bulk path."""
+    if len(rows) > MAX_TIER_PRICES:
+        raise ValidationError(
+            {
+                "tierPrices": error(
+                    f"{len(rows)} rows in one call, and the limit is "
+                    f"{MAX_TIER_PRICES}. Split the paste.",
+                    "bulk_limit",
+                )
+            }
+        )
+
+
 def _clean_amount(amount, field: str) -> Decimal:
     """The two refusals every tier amount gets, wherever it was typed.
 
     Named once because the single create, the update and the 300-row paste all
     mean the same thing by "a price", and three copies of a money rule is three
     chances for one of them to drift a cent.
+
+    The decimal rule asks what would be CHARGED, not how many characters were
+    typed. Counting the exponent refused every stored price the API had just
+    handed back: the column holds three places, so an untouched 270.00 comes out
+    as "270.000", the grid re-sends it on a QUANTITY edit, and the merchant was
+    told their own price had too many decimals. "270.000" and "119.990" are
+    270.00 and 119.99 to the cent, so they are the price. "119.995" is not: it
+    rounds to 120.00 and the half cent is real precision the merchant meant and
+    nobody can pay. `to_money` is the fork's one rounding rule
+    (`saleor/wsm/money.py`, ROUND_HALF_UP), the same one the checkout charges
+    with, so the comparison here and the charge there cannot drift.
+
+    What is RETURNED is the quantized value, so what gets stored is what would
+    be charged rather than the third place the caller happened to send.
     """
     if amount is None:
         raise ValidationError({field: error("say what this group pays", "required")})
     amount = Decimal(amount)
-    if -amount.as_tuple().exponent > TIER_AMOUNT_PLACES:
+    charged = to_money(amount)
+    if charged != amount:
         raise ValidationError(
             {
                 field: error(
@@ -95,6 +121,7 @@ def _clean_amount(amount, field: str) -> Decimal:
                 )
             }
         )
+    amount = charged
     if amount < models.MIN_TIER_AMOUNT:
         raise ValidationError(
             {
@@ -594,16 +621,7 @@ class WsmTierPriceBulkCreate(BaseMutation):
         """
         from ....product.models import ProductVariant
 
-        if len(rows) > MAX_TIER_PRICES:
-            raise ValidationError(
-                {
-                    "tierPrices": error(
-                        f"{len(rows)} rows in one call, and the limit is "
-                        f"{MAX_TIER_PRICES}. Split the paste.",
-                        "bulk_limit",
-                    )
-                }
-            )
+        _check_bulk_limit(rows)
 
         database = get_database_connection_name(info.context)
         errors: dict = {}
@@ -712,6 +730,181 @@ class WsmTierPriceBulkCreate(BaseMutation):
         return instances
 
 
+class WsmTierPriceBulkUpdateInput(BaseInputObjectType):
+    id = graphene.ID(required=True, description="ID of the tier price to change.")
+    min_quantity = graphene.Int(description="This price applies from here up.")
+    amount = WsmDecimal(description="What the group pays each.")
+
+    class Meta:
+        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmTierPriceBulkUpdate(BaseMutation):
+    """The grid's save button: every edited row in one call, one UPDATE.
+
+    `wsmTierPriceBulkCreate` gave the merchant a paste path and left them with
+    no way OUT of it: a 300-row price list that needed a five percent cut was
+    300 round trips through `wsmTierPriceUpdate`, each one a full mutation with
+    its own validation queries, or a delete-and-repaste that loses every row's
+    id. This is the same shape as the create: the whole payload is validated
+    against itself and against the table in a FIXED number of queries, then
+    written with one `bulk_update`.
+
+    A field the caller does not send is a field left alone, which is what lets
+    the grid post only the cells that changed. The row is loaded, the changes
+    are applied to the loaded instance, and the break rule is then checked
+    against what the row WOULD become, because moving two rows onto one
+    quantity is the mistake a grid makes and `wsm_dealer_one_row_per_break`
+    would answer it with a 500.
+    """
+
+    count = graphene.Int(
+        required=True, description="How many tier prices were changed."
+    )
+    tier_prices = NonNullList(
+        WsmTierPrice, required=True, description="The rows as they now stand."
+    )
+
+    class Arguments:
+        tier_prices = NonNullList(
+            WsmTierPriceBulkUpdateInput,
+            required=True,
+            description="The rows to change.",
+        )
+
+    class Meta:
+        description = "Change many tier prices in one call. One transaction."
+        permissions = DEALER_PERMISSIONS
+        error_type_class = WsmError
+        doc_category = DOC_CATEGORY_WSM
+
+    @classmethod
+    def perform_mutation(cls, _root, info, /, *, tier_prices, **data):
+        try:
+            rows = cls._clean_rows(info, tier_prices)
+        except ValidationError as exc:
+            # `count` and `tierPrices` are non-null, so a refusal has to carry
+            # them, exactly as the create path does.
+            return cls.handle_errors(exc, count=0, tier_prices=[])
+        with transaction.atomic():
+            # One statement for the whole grid. `batch_size` equals the cap, so
+            # a legal call is one round trip; raising the cap must not widen it.
+            models.TierPrice.objects.bulk_update(
+                rows, ["amount", "min_quantity"], batch_size=MAX_TIER_PRICES
+            )
+        return cls(errors=[], count=len(rows), tier_prices=rows)
+
+    @classmethod
+    def _clean_rows(cls, info, rows):
+        """Every row checked against the payload and the table, in two queries.
+
+        Errors name the row the way the create path does,
+        `tierPrices.<index>.<field>`, because the Dashboard section maps that
+        string to a grid CELL: a refusal with no index is a red banner over a
+        300-row grid with nothing highlighted in it.
+        """
+        _check_bulk_limit(rows)
+
+        database = get_database_connection_name(info.context)
+        errors: dict = {}
+        parsed: list[dict] = []
+
+        for index, row in enumerate(rows):
+            field = f"tierPrices.{index}"
+            pk = pk_or_none(row["id"], "WsmTierPrice")
+            if pk is None:
+                errors[f"{field}.id"] = error("that is not a tier price", "invalid")
+                continue
+            quantity = row.get("min_quantity")
+            if quantity is not None and quantity < 1:
+                errors[f"{field}.minQuantity"] = error(
+                    "a quantity break starts at one", "invalid"
+                )
+                continue
+            amount = row.get("amount")
+            if amount is not None:
+                try:
+                    amount = _clean_amount(amount, f"{field}.amount")
+                except ValidationError as exc:
+                    errors.update(exc.error_dict)
+                    continue
+            parsed.append(
+                {
+                    "index": index,
+                    "pk": pk,
+                    "min_quantity": quantity,
+                    "amount": amount,
+                }
+            )
+
+        if errors:
+            raise ValidationError(errors)
+
+        # The rows this mutation RETURNS are the rows the grid re-renders, and
+        # it selects `variant.product.name` and `currencyCode` on each one, so
+        # they are loaded the way every other tier-price read is.
+        stored = (
+            models.TierPrice.objects.using(database)
+            .select_related("variant", "variant__product", "group")
+            .prefetch_related("variant__channel_listings")
+            .in_bulk([row["pk"] for row in parsed])
+        )
+
+        instances = []
+        index_of: dict[int, int] = {}
+        wanted: dict[tuple, int] = {}
+        for row in parsed:
+            field = f"tierPrices.{row['index']}"
+            instance = stored.get(row["pk"])
+            if instance is None:
+                errors[f"{field}.id"] = error(
+                    "that tier price does not exist", "not_found"
+                )
+                continue
+            if row["amount"] is not None:
+                instance.amount = row["amount"]
+            if row["min_quantity"] is not None:
+                instance.min_quantity = row["min_quantity"]
+            break_key = (instance.variant_id, instance.group_id, instance.min_quantity)
+            if break_key in wanted:
+                errors[f"{field}.minQuantity"] = error(
+                    f"row {wanted[break_key]} in this call already prices that "
+                    f"SKU for that group at that quantity",
+                    "duplicate_tier_break",
+                )
+                continue
+            wanted[break_key] = row["index"]
+            index_of[instance.pk] = row["index"]
+            instances.append(instance)
+
+        if errors:
+            raise ValidationError(errors)
+
+        # The breaks that belong to rows this call is NOT touching. One query,
+        # whatever the row count, and `exclude` is what keeps a row from
+        # colliding with the version of itself still in the table.
+        taken = set(
+            models.TierPrice.objects.using(database)
+            .filter(
+                variant_id__in={instance.variant_id for instance in instances},
+                group_id__in={instance.group_id for instance in instances},
+            )
+            .exclude(pk__in=list(stored))
+            .values_list("variant_id", "group_id", "min_quantity")
+        )
+        for instance in instances:
+            key = (instance.variant_id, instance.group_id, instance.min_quantity)
+            if key in taken:
+                errors[f"tierPrices.{index_of[instance.pk]}.minQuantity"] = error(
+                    "this group already has a price for that SKU at that quantity",
+                    "duplicate_tier_break",
+                )
+
+        if errors:
+            raise ValidationError(errors)
+        return instances
+
+
 # --- settings ----------------------------------------------------------------
 
 
@@ -751,16 +944,21 @@ class WsmDealerSettingsUpdate(DeprecatedModelMutation):
 
     @classmethod
     def get_instance(cls, info, **data):
-        """One row or none, never a second one.
+        """One row, at one key, whoever is saving.
 
         The inherited implementation reads `data["id"]` and, finding none,
         returns `model()`: a FRESH instance, which on save would give this
         singleton table a second row on every call. There is no id to take,
-        because the row is the store, so the existing row is the instance.
+        because the row is the store.
+
+        `.first() or DealerSettings()` fixed the sequential case and left the
+        concurrent one: two merchants saving the settings screen at the same
+        moment both read no row and both INSERT one, and the toggle they are
+        writing decides whether a voucher stacks on a dealer price. Naming the
+        KEY makes the race unwritable, and `wsm_dealer_settings_is_one_row`
+        (migration 0002) is the backstop under it for every other writer.
         """
-        return (
-            models.DealerSettings.objects.using(
-                get_database_connection_name(info.context)
-            ).first()
-            or models.DealerSettings()
-        )
+        instance, _created = models.DealerSettings.objects.using(
+            get_database_connection_name(info.context)
+        ).get_or_create(pk=1)
+        return instance

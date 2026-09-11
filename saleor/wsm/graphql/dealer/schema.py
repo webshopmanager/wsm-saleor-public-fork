@@ -11,7 +11,7 @@ dealer WRITE stays MANAGE_DISCOUNTS.
 """
 
 import graphene
-from django.db.models import Count, IntegerField, OuterRef, Subquery
+from django.db.models import Count, IntegerField, OuterRef, Prefetch, Subquery
 from django.db.models.functions import Coalesce
 from graphql.language.ast import FragmentSpread, InlineFragment
 
@@ -44,6 +44,7 @@ from .mutations import (
     WsmDealerSettingsUpdate,
     WsmTierPriceBulkCreate,
     WsmTierPriceBulkDelete,
+    WsmTierPriceBulkUpdate,
     WsmTierPriceCreate,
     WsmTierPriceDelete,
     WsmTierPriceUpdate,
@@ -152,17 +153,45 @@ def _groups(info: ResolveInfo):
     return groups.annotate(**annotations) if annotations else groups
 
 
+def _customers(info: ResolveInfo):
+    """Shoppers with their group, and the group with its counts already on it.
+
+    Every row of the customer list names a group, and `WsmDealerGroup` carries
+    two counts with no column behind them. `select_related("group")` hands the
+    type a bare instance, so `resolve_tier_price_count` and
+    `resolve_customer_count` each fell back to a `COUNT(*)` PER ROW: twenty
+    customers was 1+2N, 46 queries against 10 (measured 2026-09-11). The
+    annotation machinery was right here and this resolver never called it.
+
+    `Prefetch` rather than `select_related` because a join cannot carry an
+    ANNOTATED related row. One extra query for the whole page, and `_groups`
+    still annotates only the counts the selection set actually asked for.
+    """
+    return (
+        models.DealerCustomer.objects.using(get_database_connection_name(info.context))
+        .select_related("user")
+        .prefetch_related(Prefetch("group", queryset=_groups(info)))
+    )
+
+
 def _tier_prices(info: ResolveInfo):
     """Tier prices with everything a 300-row grid renders, in four queries.
 
     `variant__channel_listings` is prefetched because `currencyCode` on the row
     is what labels the money column, and reading it off the row instead would be
     one query per line of the paste the merchant just made.
+
+    `group` is prefetched for the reason `_customers` prefetches it: the tier
+    grid names a group per row, and a bare related instance makes the two counts
+    on it a query each.
     """
     return (
         models.TierPrice.objects.using(get_database_connection_name(info.context))
-        .select_related("variant", "variant__product", "group")
-        .prefetch_related("variant__channel_listings")
+        .select_related("variant", "variant__product")
+        .prefetch_related(
+            "variant__channel_listings",
+            Prefetch("group", queryset=_groups(info)),
+        )
     )
 
 
@@ -246,9 +275,7 @@ class WsmDealerQueries(graphene.ObjectType):
     @staticmethod
     def resolve_wsm_dealer_customer(_root, info: ResolveInfo, /, *, id=None, user=None):
         validate_one_of_args_is_in_query("id", id, "user", user, use_camel_case=True)
-        qs = models.DealerCustomer.objects.using(
-            get_database_connection_name(info.context)
-        ).select_related("user", "group")
+        qs = _customers(info)
         if user:
             _, pk = from_global_id_or_error(user, "User", raise_error=True)
             return qs.filter(user_id=pk).first()
@@ -257,11 +284,8 @@ class WsmDealerQueries(graphene.ObjectType):
 
     @staticmethod
     def resolve_wsm_dealer_customers(_root, info: ResolveInfo, /, **kwargs):
-        qs = models.DealerCustomer.objects.using(
-            get_database_connection_name(info.context)
-        ).select_related("user", "group")
         qs = filter_connection_queryset(
-            qs, kwargs, allow_replica=info.context.allow_replica
+            _customers(info), kwargs, allow_replica=info.context.allow_replica
         )
         return create_connection_slice(
             qs, info, kwargs, WsmDealerCustomerCountableConnection
@@ -304,4 +328,5 @@ class WsmDealerMutations(graphene.ObjectType):
     wsm_tier_price_delete = WsmTierPriceDelete.Field()
     wsm_tier_price_bulk_delete = WsmTierPriceBulkDelete.Field()
     wsm_tier_price_bulk_create = WsmTierPriceBulkCreate.Field()
+    wsm_tier_price_bulk_update = WsmTierPriceBulkUpdate.Field()
     wsm_dealer_settings_update = WsmDealerSettingsUpdate.Field()

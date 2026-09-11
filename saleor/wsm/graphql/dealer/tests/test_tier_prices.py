@@ -710,8 +710,10 @@ def test_a_price_leaves_as_an_exact_string_and_not_as_a_float(
         staff_api_client.post_graphql(DETAIL, {"id": tier_gid(row)})
     )
     # Read back off the column, which holds three places to match
-    # CheckoutLine.price_override. Still a string, still exact.
-    assert content["data"]["wsmTierPrice"]["amount"] == "2.500"
+    # CheckoutLine.price_override. Still a string, still exact, and quantized to
+    # the two places a price has: the grid re-sends this value on a quantity
+    # edit, and "2.500" came back as a refusal the merchant never earned.
+    assert content["data"]["wsmTierPrice"]["amount"] == "2.50"
 
 
 def test_a_negative_price_is_refused_as_a_price_and_not_as_a_missing_one(
@@ -872,3 +874,482 @@ def test_a_paste_above_the_cap_is_refused_before_a_row_is_written(
         }
     ]
     assert not TierPrice.objects.exists()
+
+
+# --- wave 2A: stored precision, indexed errors, the bulk update --------------
+
+
+BULK_UPDATE = """
+    mutation BulkUpdate($tierPrices: [WsmTierPriceBulkUpdateInput!]!) {
+      wsmTierPriceBulkUpdate(tierPrices: $tierPrices) {
+        count
+        tierPrices { id minQuantity amount }
+        errors { field code message }
+      }
+    }
+"""
+
+BULK_UPDATE_COUNT_ONLY = """
+    mutation BulkUpdate($tierPrices: [WsmTierPriceBulkUpdateInput!]!) {
+      wsmTierPriceBulkUpdate(tierPrices: $tierPrices) {
+        count
+        errors { field code message }
+      }
+    }
+"""
+
+BULK_UPDATE_GRID = """
+    mutation BulkUpdate($tierPrices: [WsmTierPriceBulkUpdateInput!]!) {
+      wsmTierPriceBulkUpdate(tierPrices: $tierPrices) {
+        count
+        tierPrices { id amount currencyCode variant { sku product { name } } }
+        errors { field code message }
+      }
+    }
+"""
+
+
+def test_a_stored_price_leaves_the_api_at_the_two_places_a_merchant_typed():
+    """The column holds three places; a price is two. The wire is the price.
+
+    `Decimal("270.000")` is what the column gives back, and it left the API as
+    the string "270.000". The Dashboard grid then posts that string back on a
+    quantity edit and the amount rule refused a number the merchant never typed.
+    Formatting on the screen is the screen's job, but the API should not emit
+    the noise in the first place.
+    """
+    from ...scalars import WsmDecimal
+
+    assert WsmDecimal.serialize(Decimal("270.000")) == "270.00"
+    assert WsmDecimal.serialize(Decimal("119.990")) == "119.99"
+    assert WsmDecimal.serialize(None) is None
+
+
+def test_a_tier_price_reads_back_as_two_decimals(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    row = TierPrice.objects.create(
+        variant=variant, group=dealer_group, min_quantity=1, amount="270.000"
+    )
+
+    content = get_graphql_content(
+        staff_api_client.post_graphql(
+            DETAIL, {"id": tier_gid(row)}, permissions=[permission_manage_discounts]
+        )
+    )
+    assert content["data"]["wsmTierPrice"]["amount"] == "270.00"
+
+
+def test_a_quantity_edit_does_not_refuse_the_price_the_api_handed_back(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    """The blocker: every existing row refused to save once its row was touched.
+
+    The grid re-sends `amount` unchanged when the merchant edits the quantity.
+    The amount that came out of the API carried the column's third place, and
+    the rule counted decimal places rather than asking what would be CHARGED,
+    so the merchant was told their own untouched price had too many decimals.
+    """
+    row = TierPrice.objects.create(
+        variant=variant, group=dealer_group, min_quantity=1, amount="270.000"
+    )
+
+    response = staff_api_client.post_graphql(
+        UPDATE,
+        {"id": tier_gid(row), "input": {"minQuantity": 10, "amount": "270.000"}},
+        permissions=[permission_manage_discounts],
+    )
+
+    content = get_graphql_content(response)
+    payload = content["data"]["wsmTierPriceUpdate"]
+    assert payload["errors"] == []
+    assert payload["tierPrice"]["amount"] == "270.00"
+    row.refresh_from_db()
+    assert row.amount == Decimal("270.00")
+    assert row.min_quantity == 10
+
+
+def test_a_trailing_zero_on_the_cents_is_not_a_third_decimal_place(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    response = create(
+        staff_api_client,
+        permission_manage_discounts,
+        variant,
+        dealer_group,
+        amount="119.990",
+    )
+
+    content = get_graphql_content(response)
+    payload = content["data"]["wsmTierPriceCreate"]
+    assert payload["errors"] == []
+    assert payload["tierPrice"]["amount"] == "119.99"
+    assert TierPrice.objects.get().amount == Decimal("119.99")
+
+
+def test_a_real_half_cent_is_still_refused(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    """The rule this fix must not soften: 119.995 is precision nobody can pay."""
+    response = create(
+        staff_api_client,
+        permission_manage_discounts,
+        variant,
+        dealer_group,
+        amount="119.995",
+    )
+
+    content = get_graphql_content(response)
+    payload = content["data"]["wsmTierPriceCreate"]
+    assert payload["errors"] == [
+        {
+            "field": "amount",
+            "code": "TIER_AMOUNT_TOO_MANY_DECIMALS",
+            "message": "a price has at most two decimal places",
+        }
+    ]
+    assert not TierPrice.objects.exists()
+
+
+def test_the_single_update_names_the_cell_the_merchant_is_typing_in(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    """The Dashboard maps `field` to a grid cell, so a blank field is a blank row."""
+    row = TierPrice.objects.create(
+        variant=variant, group=dealer_group, min_quantity=1, amount="100.00"
+    )
+
+    bad_amount = get_graphql_content(
+        staff_api_client.post_graphql(
+            UPDATE,
+            {"id": tier_gid(row), "input": {"amount": "0"}},
+            permissions=[permission_manage_discounts],
+        )
+    )["data"]["wsmTierPriceUpdate"]
+    assert [error["field"] for error in bad_amount["errors"]] == ["amount"]
+
+    bad_quantity = get_graphql_content(
+        staff_api_client.post_graphql(
+            UPDATE, {"id": tier_gid(row), "input": {"minQuantity": 0}}
+        )
+    )["data"]["wsmTierPriceUpdate"]
+    assert [error["field"] for error in bad_quantity["errors"]] == ["minQuantity"]
+
+
+# --- bulk update, the grid's save-all path ----------------------------------
+
+
+def test_the_bulk_update_is_refused_without_the_permission(
+    staff_api_client, variant, dealer_group
+):
+    row = TierPrice.objects.create(
+        variant=variant, group=dealer_group, min_quantity=1, amount="100.00"
+    )
+
+    response = staff_api_client.post_graphql(
+        BULK_UPDATE_COUNT_ONLY,
+        {"tierPrices": [{"id": tier_gid(row), "amount": "90.00"}]},
+    )
+
+    assert_no_permission(response)
+    assert TierPrice.objects.get().amount == Decimal("100.000")
+
+
+def test_a_bulk_update_changes_every_row_it_names(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    rows = TierPrice.objects.bulk_create(
+        [
+            TierPrice(
+                variant=variant, group=dealer_group, min_quantity=quantity, amount="100"
+            )
+            for quantity in (1, 10, 25)
+        ]
+    )
+
+    response = staff_api_client.post_graphql(
+        BULK_UPDATE,
+        {
+            "tierPrices": [
+                {"id": tier_gid(rows[0]), "amount": "95.00"},
+                {"id": tier_gid(rows[1]), "minQuantity": 12},
+                {"id": tier_gid(rows[2]), "amount": "80.00", "minQuantity": 30},
+            ]
+        },
+        permissions=[permission_manage_discounts],
+    )
+
+    content = get_graphql_content(response)
+    payload = content["data"]["wsmTierPriceBulkUpdate"]
+    assert payload["errors"] == []
+    assert payload["count"] == 3
+    assert [row["amount"] for row in payload["tierPrices"]] == [
+        "95.00",
+        "100.00",
+        "80.00",
+    ]
+    assert sorted(TierPrice.objects.values_list("min_quantity", flat=True)) == [
+        1,
+        12,
+        30,
+    ]
+
+
+def test_a_bulk_update_row_that_only_moves_the_quantity_keeps_its_stored_price(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    """A quantity-only edit on a three-place stored amount is the live case."""
+    row = TierPrice.objects.create(
+        variant=variant, group=dealer_group, min_quantity=1, amount="270.000"
+    )
+
+    response = staff_api_client.post_graphql(
+        BULK_UPDATE,
+        {"tierPrices": [{"id": tier_gid(row), "minQuantity": 6}]},
+        permissions=[permission_manage_discounts],
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmTierPriceBulkUpdate"]
+    assert payload["errors"] == []
+    assert payload["tierPrices"][0]["amount"] == "270.00"
+    row.refresh_from_db()
+    assert row.min_quantity == 6
+    assert row.amount == Decimal("270.00")
+
+
+def test_a_bad_bulk_update_row_names_its_own_line_and_nothing_is_written(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    rows = TierPrice.objects.bulk_create(
+        [
+            TierPrice(
+                variant=variant, group=dealer_group, min_quantity=quantity, amount="100"
+            )
+            for quantity in (1, 10)
+        ]
+    )
+
+    response = staff_api_client.post_graphql(
+        BULK_UPDATE,
+        {
+            "tierPrices": [
+                {"id": tier_gid(rows[0]), "amount": "95.00"},
+                {"id": tier_gid(rows[1]), "amount": "0.001"},
+            ]
+        },
+        permissions=[permission_manage_discounts],
+    )
+
+    content = get_graphql_content(response)
+    payload = content["data"]["wsmTierPriceBulkUpdate"]
+    assert payload["count"] == 0
+    assert payload["errors"] == [
+        {
+            "field": "tierPrices.1.amount",
+            "code": "TIER_AMOUNT_TOO_MANY_DECIMALS",
+            "message": "a price has at most two decimal places",
+        }
+    ]
+    assert sorted(TierPrice.objects.values_list("amount", flat=True)) == [
+        Decimal("100.000"),
+        Decimal("100.000"),
+    ]
+
+
+def test_a_bulk_update_row_naming_a_row_that_is_not_there_names_its_line(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    row = TierPrice.objects.create(
+        variant=variant, group=dealer_group, min_quantity=1, amount="100.00"
+    )
+    gone = tier_gid(row)
+    row.delete()
+
+    response = staff_api_client.post_graphql(
+        BULK_UPDATE_COUNT_ONLY,
+        {"tierPrices": [{"id": gone, "amount": "95.00"}]},
+        permissions=[permission_manage_discounts],
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmTierPriceBulkUpdate"]
+    assert payload["errors"][0]["field"] == "tierPrices.0.id"
+    assert payload["errors"][0]["code"] == "NOT_FOUND"
+
+
+def test_a_bulk_update_cannot_move_two_rows_onto_one_break(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    rows = TierPrice.objects.bulk_create(
+        [
+            TierPrice(
+                variant=variant, group=dealer_group, min_quantity=quantity, amount="100"
+            )
+            for quantity in (1, 10)
+        ]
+    )
+
+    response = staff_api_client.post_graphql(
+        BULK_UPDATE_COUNT_ONLY,
+        {
+            "tierPrices": [
+                {"id": tier_gid(rows[0]), "minQuantity": 5},
+                {"id": tier_gid(rows[1]), "minQuantity": 5},
+            ]
+        },
+        permissions=[permission_manage_discounts],
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmTierPriceBulkUpdate"]
+    assert payload["errors"][0]["field"] == "tierPrices.1.minQuantity"
+    assert payload["errors"][0]["code"] == "DUPLICATE_TIER_BREAK"
+    assert sorted(TierPrice.objects.values_list("min_quantity", flat=True)) == [1, 10]
+
+
+def test_a_bulk_update_cannot_move_a_row_onto_a_stored_break(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    rows = TierPrice.objects.bulk_create(
+        [
+            TierPrice(
+                variant=variant, group=dealer_group, min_quantity=quantity, amount="100"
+            )
+            for quantity in (1, 10)
+        ]
+    )
+
+    response = staff_api_client.post_graphql(
+        BULK_UPDATE_COUNT_ONLY,
+        {"tierPrices": [{"id": tier_gid(rows[0]), "minQuantity": 10}]},
+        permissions=[permission_manage_discounts],
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmTierPriceBulkUpdate"]
+    assert payload["errors"][0]["field"] == "tierPrices.0.minQuantity"
+    assert payload["errors"][0]["code"] == "DUPLICATE_TIER_BREAK"
+    assert TierPrice.objects.get(pk=rows[0].pk).min_quantity == 1
+
+
+def test_a_bulk_update_above_the_cap_is_refused_before_a_row_is_written(
+    staff_api_client, permission_manage_discounts, variant, dealer_group
+):
+    row = TierPrice.objects.create(
+        variant=variant, group=dealer_group, min_quantity=1, amount="100.00"
+    )
+    rows = [{"id": tier_gid(row), "amount": "10.00"} for _ in range(501)]
+
+    response = staff_api_client.post_graphql(
+        BULK_UPDATE_COUNT_ONLY,
+        {"tierPrices": rows},
+        permissions=[permission_manage_discounts],
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmTierPriceBulkUpdate"]
+    assert payload["count"] == 0
+    assert payload["errors"] == [
+        {
+            "field": "tierPrices",
+            "code": "BULK_LIMIT",
+            "message": "501 rows in one call, and the limit is 500. Split the paste.",
+        }
+    ]
+    assert TierPrice.objects.get().amount == Decimal("100.000")
+
+
+def test_three_hundred_rows_are_updated_in_one_statement(
+    staff_api_client, permission_manage_discounts, product, dealer_group, capsys
+):
+    """The grid's save-all button, measured. One UPDATE and a flat query count.
+
+    A loop of `wsmTierPriceUpdate` is 300 round trips and four figures of
+    queries to save one screen; this asserts the whole grid is ONE statement
+    and that validating it costs a fixed number of queries rather than one per
+    row.
+    """
+    variants = ProductVariant.objects.bulk_create(
+        [
+            ProductVariant(product=product, sku=f"grid-save-{index}", name=str(index))
+            for index in range(300)
+        ]
+    )
+    stored = TierPrice.objects.bulk_create(
+        [
+            TierPrice(
+                variant=variant, group=dealer_group, min_quantity=1, amount="199.99"
+            )
+            for variant in variants
+        ]
+    )
+    rows = [
+        {"id": tier_gid(row), "amount": "189.99", "minQuantity": 2} for row in stored
+    ]
+
+    staff_api_client.user.user_permissions.add(permission_manage_discounts)
+    started = time.perf_counter()
+    with CaptureQueriesContext(connection) as queries:
+        response = staff_api_client.post_graphql(
+            BULK_UPDATE_COUNT_ONLY, {"tierPrices": rows}
+        )
+    elapsed = time.perf_counter() - started
+
+    payload = get_graphql_content(response)["data"]["wsmTierPriceBulkUpdate"]
+    assert payload["errors"] == []
+    assert payload["count"] == 300
+
+    updates = [
+        query["sql"]
+        for query in queries.captured_queries
+        if query["sql"].lstrip().upper().startswith("UPDATE")
+        and "wsm_dealer_tierprice" in query["sql"]
+    ]
+    with capsys.disabled():
+        # The measurement IS the point of this test; ruff's no-print rule is
+        # about production code.
+        print(  # noqa: T201
+            f"\n[2A bulkUpdate 300 rows] queries={len(queries.captured_queries)} "
+            f"tier-price UPDATEs={len(updates)} wall={elapsed * 1000:.0f} ms"
+        )
+    assert len(updates) == 1
+    assert len(queries.captured_queries) < 25
+    assert set(TierPrice.objects.values_list("min_quantity", flat=True)) == {2}
+    assert set(TierPrice.objects.values_list("amount", flat=True)) == {
+        Decimal("189.990")
+    }
+
+
+def test_the_bulk_update_response_costs_the_same_at_three_hundred_rows_as_at_twenty(
+    staff_api_client,
+    permission_manage_discounts,
+    product,
+    channel_USD,
+    dealer_group,
+    capture_queries,
+):
+    """The rows it returns are the rows the grid re-renders, so they are loaded."""
+    staff_api_client.user.user_permissions.add(permission_manage_discounts)
+
+    def cost(count, offset):
+        variants = paste_variants(product, channel_USD, count, offset)
+        stored = TierPrice.objects.bulk_create(
+            [
+                TierPrice(
+                    variant=variant, group=dealer_group, min_quantity=1, amount="199.99"
+                )
+                for variant in variants
+            ]
+        )
+        rows = [{"id": tier_gid(row), "amount": "189.99"} for row in stored]
+        with capture_queries() as captured:
+            response = staff_api_client.post_graphql(
+                BULK_UPDATE_GRID, {"tierPrices": rows}
+            )
+        payload = get_graphql_content(response)["data"]["wsmTierPriceBulkUpdate"]
+        assert payload["errors"] == []
+        assert payload["count"] == count
+        return len(captured.captured_queries)
+
+    # Discarded: the first request of a test warms per-process caches.
+    cost(1, 9000)
+    small = cost(20, 9100)
+    large = cost(300, 9200)
+
+    assert large == small, f"20 rows cost {small} queries, 300 cost {large}"

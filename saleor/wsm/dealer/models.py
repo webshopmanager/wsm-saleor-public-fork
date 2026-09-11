@@ -225,11 +225,40 @@ class DealerSettings(models.Model):
 
     class Meta:
         verbose_name_plural = "dealer settings"
+        constraints = [
+            # The row IS the store, so there is exactly one and its key is
+            # known. Without this, two concurrent saves of the settings screen
+            # each insert a row and the reader picks one of them.
+            models.CheckConstraint(
+                condition=Q(pk=1),
+                name="wsm_dealer_settings_is_one_row",
+            ),
+        ]
 
     def __str__(self):
         return "Dealer settings"
 
+    def save(self, *args, **kwargs):
+        """The row IS the store, so it is always the same row.
+
+        Without this, `DealerSettings.objects.create(...)` takes the next value
+        of the sequence and the CheckConstraint refuses it: correct, and a trap
+        for every caller that just wants "the settings". Pinning the key here
+        means a writer cannot MISS the singleton, and the constraint under it
+        goes back to being what the tier-amount one is: the backstop for the
+        writers that never come through Django at all.
+        """
+        self.pk = 1
+        return super().save(*args, **kwargs)
+
     @classmethod
     def stacking_enabled(cls) -> bool:
-        row = cls.objects.first()
+        """The one row, named by key rather than by whichever came back first.
+
+        `.first()` on an unordered queryset already orders by pk, so this was
+        deterministic; saying so costs nothing and survives someone giving this
+        model a `Meta.ordering` later, which would silently change WHICH row
+        decides whether a discount stacks on a dealer price.
+        """
+        row = cls.objects.order_by("pk").first()
         return bool(row and row.discount_stacking)

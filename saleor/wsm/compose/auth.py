@@ -1,5 +1,5 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
-"""Email-and-password sign-in for /admin/, and the fork's own permissions.
+"""Email-and-password sign-in, and the fork's own `wsm_*` permissions.
 
 Django's `ModelBackend` cannot be used here for two independent reasons, both of
 them Saleor's doing and neither of them ours to change:
@@ -16,6 +16,13 @@ them Saleor's doing and neither of them ours to change:
 So this backend authenticates a password, and answers for `wsm_*` app labels
 only. Saleor's backends run first and keep owning every Saleor permission.
 
+The Django admin this was written for is gone (CORE-TOUCHES section 2). The
+backend stays because it is in `AUTHENTICATION_BACKENDS`, which makes it part
+of every `authenticate()` and every `has_perm()` in the process, and because
+the `wsm_*` grant rows it answers from are what a per-model permission scheme
+on the GraphQL layer would reuse. Nothing calls its `authenticate()` today:
+the merchant sign-in door it opened was the admin login view.
+
 Every read here goes to the REPLICA. This backend is consulted on every
 `authenticate()` and every `has_perm()` in the process, so a read left on the
 writer raises `UnsafeWriterAccessError` under the writer-restriction middleware
@@ -25,18 +32,14 @@ and takes down every authenticated request with it. A read never wants
 It also honours `SiteSettings.password_login_mode`, which is the merchant's own
 switch for password sign-in. Being in `AUTHENTICATION_BACKENDS` makes this
 backend part of every `authenticate()` call in the process, so ignoring the
-switch would have re-opened password login shop-wide for anyone with a Saleor
-account, through /admin/, after the merchant turned it off.
+switch would re-open password login shop-wide for anyone with a Saleor account
+after the merchant turned it off.
 """
 
-from django import forms
 from django.conf import settings
-from django.contrib.admin.forms import AdminAuthenticationForm
-from django.core.exceptions import ValidationError
 from django.db.models import Q
 
 from ...account.models import User
-from ...account.throttling import authenticate_with_throttling
 from ...core.auth_backend import BaseBackend
 from ...core.db.connection import allow_writer
 from ...permission.models import Permission
@@ -82,10 +85,10 @@ def _password_login_mode():
 def password_login_allowed(user) -> bool:
     """Whether this user is allowed to sign in with a password, on a password already proved right.
 
-    Named on its own because two callers ask it: the backend below, and the
-    throttled admin form, which gets its answer about the PASSWORD from Saleor's
-    own throttle and still owes the merchant their switch. One place, so a shop
-    that turns password login off turns it off on both doors.
+    Named on its own because it is the merchant's switch, not this backend's
+    rule: a shop that turns password login off turns it off wherever it is
+    asked. The throttled admin login form was the second caller until the
+    admin was deleted.
     """
     if not user.is_active:
         return False
@@ -177,50 +180,3 @@ class AdminPasswordBackend(BaseBackend):
         # One query covers direct and group grants, so both callers get the same
         # set rather than paying twice for half of it each.
         return self.get_user_permissions(user_obj, obj=obj)
-
-
-class ThrottledAdminAuthenticationForm(AdminAuthenticationForm):
-    """/admin/ sign-in, through Saleor's own login throttle rather than beside it.
-
-    Django's `AuthenticationForm` calls `authenticate()`, which reaches the
-    backend above and pays a full PBKDF2 hash on every attempt, hit or miss: the
-    miss path hashes on purpose so response time does not say which addresses
-    have accounts. Measured on the bake-off box that is ~2.1 seconds of CPU per
-    unauthenticated POST, against a runtime of one 256-CPU Fargate task.
-
-    Saleor's own password login has a limiter for exactly this
-    (`saleor.account.throttling`): it blocks the requesting IP before the next
-    attempt and escalates the block from there. The fork added a second password
-    door and did not carry the limiter across. So this asks Saleor's function
-    instead of `authenticate()`, and no second counter is invented here.
-
-    What the throttle does not know about is the merchant's own
-    `password_login_mode` switch, so that answer is still taken from
-    `password_login_allowed` above, after the password has proved out.
-    """
-
-    def clean(self):
-        email = self.cleaned_data.get("username")
-        password = self.cleaned_data.get("password")
-        if email and password:
-            try:
-                user = authenticate_with_throttling(self.request, email, password)
-            except ValidationError as blocked:
-                # Too many attempts from this address, or no address at all.
-                # The message carries the time the next one is allowed.
-                raise forms.ValidationError(
-                    " ".join(blocked.messages), code="throttled"
-                ) from blocked
-            if user is not None and password_login_allowed(user):
-                # `authenticate()` is what normally records which backend
-                # answered, and `django.contrib.auth.login` refuses a user
-                # carrying no `backend` while more than one is configured.
-                # Django sets `.backend` dynamically; it is not on the User stub.
-                user.backend = (  # type: ignore[attr-defined]
-                    f"{AdminPasswordBackend.__module__}.AdminPasswordBackend"
-                )
-                self.confirm_login_allowed(user)
-                self.user_cache = user
-            else:
-                raise self.get_invalid_login_error()
-        return self.cleaned_data

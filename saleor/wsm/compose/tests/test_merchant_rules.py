@@ -1,11 +1,12 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
-"""The rules that stop the admin saving a product a shopper cannot buy.
+"""The rules that stop a writer saving a product a shopper cannot buy.
 
 Every case here comes from the merchant walk of 2026-09-08, where a staff user
 saved a price of -9999.00 on a $649 product, was told it had saved, and left a
 buy button that answered 422. These are model tests on purpose: the refusal
-belongs to the row, so the admin, the inline and any writer that validates get
-the same answer from one place.
+belongs to the row, so every writer that validates gets the same answer from
+one place. The Django admin was the first of them and is gone; the GraphQL
+mutations are the next, and they call the same helpers in models.py.
 """
 
 from decimal import Decimal
@@ -14,7 +15,6 @@ import pytest
 from django.core.exceptions import ValidationError
 
 from saleor.wsm.compose import pricing
-from saleor.wsm.compose.forms import OptionValueInlineFormSet
 from saleor.wsm.compose.models import (
     DealerTierOptionPrice,
     Fee,
@@ -141,24 +141,6 @@ def test_making_a_set_required_is_refused_when_its_cheapest_answer_goes_negative
     assert "-51.00" in str(caught.value)
 
 
-def test_three_new_credits_in_one_submit_are_refused_together(finish):
-    """A row at a time is blind to its siblings in the same POST."""
-    finish.prompt_type = pricing.CHOICE_MANY
-    finish.save(update_fields=["prompt_type"])
-
-    formset = _value_formset(
-        finish,
-        [
-            {"name": "Omit A", "price_delta": "-300.00", "sort_order": "1"},
-            {"name": "Omit B", "price_delta": "-300.00", "sort_order": "2"},
-            {"name": "Omit C", "price_delta": "-300.00", "sort_order": "3"},
-        ],
-    )
-
-    assert not formset.is_valid()
-    assert "-251.00" in str(formset.non_form_errors())
-
-
 # --- 2. a duplicate SKU code inside one question ---------------------------
 
 
@@ -199,19 +181,6 @@ def test_the_same_code_on_two_different_questions_is_fine(listed_product, finish
     OptionValue(
         option_set=other, name="Black", sku_fragment="BLK", price_delta=Decimal(0)
     ).full_clean()
-
-
-def test_two_new_choices_sharing_a_code_in_one_submit_are_refused(finish):
-    formset = _value_formset(
-        finish,
-        [
-            {"name": "Dual pumps", "sku_fragment": "49614", "price_delta": "1000.00"},
-            {"name": "Triple pumps", "sku_fragment": "49614", "price_delta": "1500.00"},
-        ],
-    )
-
-    assert not formset.is_valid()
-    assert "49614" in str(formset.errors)
 
 
 def test_the_5_0_import_can_still_write_the_collisions_fuel_lab_already_has(finish):
@@ -341,35 +310,3 @@ def test_the_refusal_a_shopper_reads_is_money_not_cents():
     assert "-9,250.00" in message
     assert "cents" not in message
     assert caught.value.total_cents == -925000
-
-
-# --- the formset the admin builds, without a browser -----------------------
-
-
-def _value_formset(option_set, rows):
-    """The inline formset OptionSetAdmin renders, fed a POST by hand."""
-    from django.forms.models import inlineformset_factory
-
-    from saleor.wsm.compose.forms import OptionValueInlineForm
-
-    factory = inlineformset_factory(
-        OptionSet,
-        OptionValue,
-        form=OptionValueInlineForm,
-        formset=OptionValueInlineFormSet,
-        fields=("name", "sku_fragment", "price_delta", "image_url", "sort_order"),
-        extra=len(rows),
-    )
-    prefix = "values"
-    data = {
-        f"{prefix}-TOTAL_FORMS": str(len(rows)),
-        f"{prefix}-INITIAL_FORMS": "0",
-        f"{prefix}-MIN_NUM_FORMS": "0",
-        f"{prefix}-MAX_NUM_FORMS": "1000",
-    }
-    for index, row in enumerate(rows):
-        for field in ("name", "sku_fragment", "price_delta", "image_url", "sort_order"):
-            data[f"{prefix}-{index}-{field}"] = row.get(
-                field, "0" if field == "sort_order" else ""
-            )
-    return factory(data, instance=option_set, prefix=prefix)

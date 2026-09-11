@@ -1,12 +1,17 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
-"""Ranked SKU search, owned once because two screens now ask the same question.
+"""Ranked SKU search, owned once because every compose screen asks for it.
 
-The Django admin picker wrote this rule first: typing `71801`, a manufacturer
-part number, put the product that carries it FIFTH, behind four covers whose
-SKUs (`trp:1471801`) merely CONTAIN those digits, because product name was the
-only order the picker had. The Dashboard's `wsmOptionSets(filter: {search})`
-searches the same rows for the same reason, so the rule lives here and both
-callers import it. A copy in each would be two rules a month from now.
+The rule: typing `71801`, a manufacturer part number, put the product that
+carries it FIFTH, behind four covers whose SKUs (`trp:1471801`) merely CONTAIN
+those digits, because product name was the only order the caller had.
+
+Four live callers, all searching the same rows for the same reason. Three are
+Dashboard list filters through `graphql/compose/filters.py`:
+`wsmOptionSets(filter: {search})`, `wsmFees(filter: {search})` and
+`wsmProductCompliances(filter: {search})`. The fourth is the merchant console's
+product picker (`compose/admin.py:190`), which wrote the rule first and which
+the Dashboard screens replace. A copy in each would be four rules a month from
+now, and the one that drifts is the one nobody is looking at.
 
 Three tiers, one CASE, no extra round trip: the whole term as a SKU, the whole
 term as a word inside a SKU or a name, then everything else in the order it

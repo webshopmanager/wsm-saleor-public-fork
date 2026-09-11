@@ -16,22 +16,19 @@ from ....graphql.core.mutations import ModelBulkDeleteMutation
 from ....graphql.core.types import NonNullList
 from ....permission.enums import ProductPermissions
 from ...compose import models
-from ..errors import WsmError
-from ..types import DOC_CATEGORY_WSM
+from ..errors import WsmMutationMeta
 from ..utils import BulkLimitMixin
 from .types import WsmFee, WsmOptionSet
 
 MANAGE_PRODUCTS = (ProductPermissions.MANAGE_PRODUCTS,)
 
 
-class WsmOptionSetBulkDelete(BulkLimitMixin, ModelBulkDeleteMutation):
+class WsmOptionSetBulkDelete(WsmMutationMeta, BulkLimitMixin, ModelBulkDeleteMutation):
     class Meta:
         description = "Delete option sets."
         model = models.OptionSet
         object_type = WsmOptionSet
         permissions = MANAGE_PRODUCTS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     class Arguments:
         ids = NonNullList(
@@ -39,14 +36,12 @@ class WsmOptionSetBulkDelete(BulkLimitMixin, ModelBulkDeleteMutation):
         )
 
 
-class WsmFeeBulkDelete(BulkLimitMixin, ModelBulkDeleteMutation):
+class WsmFeeBulkDelete(WsmMutationMeta, BulkLimitMixin, ModelBulkDeleteMutation):
     class Meta:
         description = "Delete charges."
         model = models.Fee
         object_type = WsmFee
         permissions = MANAGE_PRODUCTS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     class Arguments:
         ids = NonNullList(

@@ -19,7 +19,7 @@ from enum import Enum
 import graphene
 
 from ...graphql.core.types.common import Error
-from .types import DOC_CATEGORY_WSM
+from .types import DOC_CATEGORY_WSM, WsmDocCategory
 
 
 class WsmErrorCode(Enum):
@@ -74,9 +74,22 @@ WsmErrorCodeEnum = graphene.Enum.from_enum(WsmErrorCode)
 WsmErrorCodeEnum.doc_category = DOC_CATEGORY_WSM
 
 
-class WsmError(Error):
+class WsmError(WsmDocCategory, Error):
     code = WsmErrorCodeEnum(description="The error code.", required=True)
 
     class Meta:
         description = "Represents an error in a WSM mutation."
-        doc_category = DOC_CATEGORY_WSM
+
+
+class WsmMutationMeta(WsmDocCategory):
+    """Every WSM mutation returns `WsmError`, so no `Meta` has to say so.
+
+    The same argument as `WsmDocCategory` one rung up. One error type for the
+    whole layer (see the module docstring) restated in twenty-four `Meta`
+    blocks is twenty-four places for the twenty-fifth to fall back to stock's
+    own error type, which carries a code enum no WSM screen knows how to read.
+    """
+
+    @classmethod
+    def __init_subclass_with_meta__(cls, error_type_class=WsmError, **kwargs):
+        super().__init_subclass_with_meta__(error_type_class=error_type_class, **kwargs)

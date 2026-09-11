@@ -18,7 +18,7 @@ from ....graphql.shipping.types import ShippingZone
 from ...compose import models
 from ..dealer.types import WsmDealerGroup
 from ..scalars import WsmDecimal
-from ..types import DOC_CATEGORY_WSM
+from ..types import WsmDocCategory
 from . import dataloaders as loaders
 from .enums import WsmFeeBasisEnum, WsmFeeScopeEnum, WsmOptionSetPromptTypeEnum
 
@@ -36,7 +36,9 @@ def _in_context(node):
     return ChannelContext(node=node, channel_slug=None)
 
 
-class WsmDealerTierOptionPrice(ModelObjectType[models.DealerTierOptionPrice]):
+class WsmDealerTierOptionPrice(
+    WsmDocCategory, ModelObjectType[models.DealerTierOptionPrice]
+):
     id = graphene.GlobalID(required=True, description="ID of the dealer delta row.")
     option_value = graphene.Field(
         lambda: WsmOptionValue,
@@ -73,7 +75,6 @@ class WsmDealerTierOptionPrice(ModelObjectType[models.DealerTierOptionPrice]):
         description = "One buyer group's delta for one choice."
         model = models.DealerTierOptionPrice
         interfaces = [graphene.relay.Node]
-        doc_category = DOC_CATEGORY_WSM
 
     @staticmethod
     def resolve_option_value(root, info):
@@ -90,7 +91,7 @@ class WsmDealerTierOptionPrice(ModelObjectType[models.DealerTierOptionPrice]):
         return DealerGroupByCodeLoader(info.context).load(root.tier_group)
 
 
-class WsmOptionValue(ModelObjectType[models.OptionValue]):
+class WsmOptionValue(WsmDocCategory, ModelObjectType[models.OptionValue]):
     id = graphene.GlobalID(required=True, description="ID of the choice.")
     option_set = graphene.Field(
         lambda: WsmOptionSet,
@@ -125,7 +126,6 @@ class WsmOptionValue(ModelObjectType[models.OptionValue]):
         description = "One answer to one question."
         model = models.OptionValue
         interfaces = [graphene.relay.Node]
-        doc_category = DOC_CATEGORY_WSM
 
     @staticmethod
     def resolve_option_set(root, info):
@@ -136,7 +136,7 @@ class WsmOptionValue(ModelObjectType[models.OptionValue]):
         return loaders.TierDeltasByOptionValueIdLoader(info.context).load(root.id)
 
 
-class WsmOptionSet(ModelObjectType[models.OptionSet]):
+class WsmOptionSet(WsmDocCategory, ModelObjectType[models.OptionSet]):
     id = graphene.GlobalID(required=True, description="ID of the question.")
     product = graphene.Field(
         Product, required=True, description="The product that asks this question."
@@ -175,7 +175,6 @@ class WsmOptionSet(ModelObjectType[models.OptionSet]):
         description = "One question a product asks, and the answers it accepts."
         model = models.OptionSet
         interfaces = [graphene.relay.Node]
-        doc_category = DOC_CATEGORY_WSM
 
     @staticmethod
     def resolve_product(root, info):
@@ -190,7 +189,7 @@ class WsmOptionSet(ModelObjectType[models.OptionSet]):
         return loaders.CurrencyByProductIdLoader(info.context).load(root.product_id)
 
 
-class WsmFee(ModelObjectType[models.Fee]):
+class WsmFee(WsmDocCategory, ModelObjectType[models.Fee]):
     id = graphene.GlobalID(required=True, description="ID of the charge.")
     product = graphene.Field(
         Product, required=True, description="The product this charge is attached to."
@@ -227,7 +226,6 @@ class WsmFee(ModelObjectType[models.Fee]):
         description = "A charge attached to a product: crating, oversize, hazmat."
         model = models.Fee
         interfaces = [graphene.relay.Node]
-        doc_category = DOC_CATEGORY_WSM
 
     @staticmethod
     def resolve_product(root, info):
@@ -250,7 +248,7 @@ class WsmFee(ModelObjectType[models.Fee]):
         return loaders.CurrencyByProductIdLoader(info.context).load(root.product_id)
 
 
-class WsmProductCompliance(ModelObjectType[models.ProductCompliance]):
+class WsmProductCompliance(WsmDocCategory, ModelObjectType[models.ProductCompliance]):
     id = graphene.GlobalID(required=True, description="ID of the compliance row.")
     product = graphene.Field(
         Product, required=True, description="The product this row belongs to."
@@ -286,7 +284,6 @@ class WsmProductCompliance(ModelObjectType[models.ProductCompliance]):
         description = "What a product must say and where it may not go."
         model = models.ProductCompliance
         interfaces = [graphene.relay.Node]
-        doc_category = DOC_CATEGORY_WSM
 
     @staticmethod
     def resolve_product(root, info):
@@ -318,19 +315,16 @@ class WsmProductCompliance(ModelObjectType[models.ProductCompliance]):
         )
 
 
-class WsmOptionSetCountableConnection(CountableConnection):
+class WsmOptionSetCountableConnection(WsmDocCategory, CountableConnection):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         node = WsmOptionSet
 
 
-class WsmFeeCountableConnection(CountableConnection):
+class WsmFeeCountableConnection(WsmDocCategory, CountableConnection):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         node = WsmFee
 
 
-class WsmProductComplianceCountableConnection(CountableConnection):
+class WsmProductComplianceCountableConnection(WsmDocCategory, CountableConnection):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         node = WsmProductCompliance

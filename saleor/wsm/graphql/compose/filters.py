@@ -17,7 +17,7 @@ from ....graphql.core.filters import FilterInputObjectType, GlobalIDFilter
 from ....graphql.utils import resolve_global_ids_to_primary_keys
 from ...compose import models
 from ...compose.search import search_and_rank
-from ..types import DOC_CATEGORY_WSM
+from ..types import WsmDocCategory
 
 
 def _product_pk(value):
@@ -77,19 +77,16 @@ class WsmProductComplianceFilter(django_filters.FilterSet):
         fields = ["product", "prop65", "search"]
 
 
-class WsmOptionSetFilterInput(FilterInputObjectType):
+class WsmOptionSetFilterInput(WsmDocCategory, FilterInputObjectType):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         filterset_class = WsmOptionSetFilter
 
 
-class WsmFeeFilterInput(FilterInputObjectType):
+class WsmFeeFilterInput(WsmDocCategory, FilterInputObjectType):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         filterset_class = WsmFeeFilter
 
 
-class WsmProductComplianceFilterInput(FilterInputObjectType):
+class WsmProductComplianceFilterInput(WsmDocCategory, FilterInputObjectType):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         filterset_class = WsmProductComplianceFilter

@@ -43,9 +43,9 @@ from ....graphql.core.types import BaseInputObjectType, NonNullList
 from ....permission.enums import DiscountPermissions
 from ...dealer import models
 from ...money import to_money
-from ..errors import WsmError
+from ..errors import WsmMutationMeta
 from ..scalars import WsmDecimal
-from ..types import DOC_CATEGORY_WSM
+from ..types import WsmDocCategory
 from ..utils import (
     BULK_LIMIT,
     BulkLimitMixin,
@@ -122,7 +122,7 @@ def _clean_amount(amount, field: str) -> Decimal:
 # --- groups ------------------------------------------------------------------
 
 
-class WsmDealerGroupCreateInput(BaseInputObjectType):
+class WsmDealerGroupCreateInput(WsmDocCategory, BaseInputObjectType):
     code = graphene.String(
         required=True,
         description=(
@@ -132,16 +132,10 @@ class WsmDealerGroupCreateInput(BaseInputObjectType):
     )
     name = graphene.String(description="What staff see. Blank shows the code.")
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmDealerGroupUpdateInput(BaseInputObjectType):
+class WsmDealerGroupUpdateInput(WsmDocCategory, BaseInputObjectType):
     code = graphene.String(description="Changing this re-points every compose delta.")
     name = graphene.String(description="What staff see. Blank shows the code.")
-
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
 
 class GroupWriteMixin:
@@ -178,7 +172,7 @@ class GroupWriteMixin:
         return cleaned_input
 
 
-class WsmDealerGroupCreate(GroupWriteMixin, DeprecatedModelMutation):
+class WsmDealerGroupCreate(WsmMutationMeta, GroupWriteMixin, DeprecatedModelMutation):
     class Arguments:
         input = WsmDealerGroupCreateInput(
             required=True, description="Fields required to create a dealer group."
@@ -189,11 +183,9 @@ class WsmDealerGroupCreate(GroupWriteMixin, DeprecatedModelMutation):
         model = models.DealerGroup
         object_type = WsmDealerGroup
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
 
-class WsmDealerGroupUpdate(GroupWriteMixin, DeprecatedModelMutation):
+class WsmDealerGroupUpdate(WsmMutationMeta, GroupWriteMixin, DeprecatedModelMutation):
     class Arguments:
         id = graphene.ID(required=True, description="ID of the group to update.")
         input = WsmDealerGroupUpdateInput(
@@ -205,8 +197,6 @@ class WsmDealerGroupUpdate(GroupWriteMixin, DeprecatedModelMutation):
         model = models.DealerGroup
         object_type = WsmDealerGroup
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
 
 class GroupDeleteMixin:
@@ -263,7 +253,7 @@ class GroupDeleteMixin:
         return clean_instance_ids, errors_dict
 
 
-class WsmDealerGroupDelete(GroupDeleteMixin, ModelDeleteMutation):
+class WsmDealerGroupDelete(WsmMutationMeta, GroupDeleteMixin, ModelDeleteMutation):
     class Arguments:
         id = graphene.ID(required=True, description="ID of the group to delete.")
 
@@ -275,12 +265,10 @@ class WsmDealerGroupDelete(GroupDeleteMixin, ModelDeleteMutation):
         model = models.DealerGroup
         object_type = WsmDealerGroup
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
 
 class WsmDealerGroupBulkDelete(
-    GroupDeleteMixin, BulkLimitMixin, ModelBulkDeleteMutation
+    WsmMutationMeta, GroupDeleteMixin, BulkLimitMixin, ModelBulkDeleteMutation
 ):
     class Arguments:
         ids = NonNullList(
@@ -292,31 +280,23 @@ class WsmDealerGroupBulkDelete(
         model = models.DealerGroup
         object_type = WsmDealerGroup
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
 
 # --- customers ---------------------------------------------------------------
 
 
-class WsmDealerCustomerAssignInput(BaseInputObjectType):
+class WsmDealerCustomerAssignInput(WsmDocCategory, BaseInputObjectType):
     user = graphene.ID(required=True, description="The shopper's account.")
     group = graphene.ID(required=True, description="The group whose prices they get.")
     tax_exempt = graphene.Boolean(description="Charge this shopper no sales tax.")
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmDealerCustomerUpdateInput(BaseInputObjectType):
+class WsmDealerCustomerUpdateInput(WsmDocCategory, BaseInputObjectType):
     group = graphene.ID(description="Move this shopper to another group.")
     tax_exempt = graphene.Boolean(description="Charge this shopper no sales tax.")
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmDealerCustomerAssign(TypedIdMixin, DeprecatedModelMutation):
+class WsmDealerCustomerAssign(WsmMutationMeta, TypedIdMixin, DeprecatedModelMutation):
     """Assign, not create, on stock's `giftCardAddNote` naming for the same shape.
 
     A shopper buys at one group's prices or none (`DealerCustomer.user` is a
@@ -336,8 +316,6 @@ class WsmDealerCustomerAssign(TypedIdMixin, DeprecatedModelMutation):
         model = models.DealerCustomer
         object_type = WsmDealerCustomer
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     @classmethod
     def clean_input(cls, info, instance, data, **kwargs):
@@ -365,7 +343,7 @@ class WsmDealerCustomerAssign(TypedIdMixin, DeprecatedModelMutation):
         return cleaned_input
 
 
-class WsmDealerCustomerUpdate(TypedIdMixin, DeprecatedModelMutation):
+class WsmDealerCustomerUpdate(WsmMutationMeta, TypedIdMixin, DeprecatedModelMutation):
     typed_ids = {"group": WsmDealerGroup}
 
     class Arguments:
@@ -379,11 +357,9 @@ class WsmDealerCustomerUpdate(TypedIdMixin, DeprecatedModelMutation):
         model = models.DealerCustomer
         object_type = WsmDealerCustomer
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
 
-class WsmDealerCustomerUnassign(ModelDeleteMutation):
+class WsmDealerCustomerUnassign(WsmMutationMeta, ModelDeleteMutation):
     class Arguments:
         id = graphene.ID(required=True, description="ID of the assignment to remove.")
 
@@ -395,14 +371,12 @@ class WsmDealerCustomerUnassign(ModelDeleteMutation):
         model = models.DealerCustomer
         object_type = WsmDealerCustomer
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
 
 # --- tier prices -------------------------------------------------------------
 
 
-class WsmTierPriceCreateInput(BaseInputObjectType):
+class WsmTierPriceCreateInput(WsmDocCategory, BaseInputObjectType):
     variant = graphene.ID(required=True, description="The exact SKU.")
     group = graphene.ID(required=True, description="The group that pays this price.")
     min_quantity = graphene.Int(description="This price applies from here up.")
@@ -410,16 +384,10 @@ class WsmTierPriceCreateInput(BaseInputObjectType):
         required=True, description="What the group pays each, at least one cent."
     )
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmTierPriceUpdateInput(BaseInputObjectType):
+class WsmTierPriceUpdateInput(WsmDocCategory, BaseInputObjectType):
     min_quantity = graphene.Int(description="This price applies from here up.")
     amount = WsmDecimal(description="What the group pays each.")
-
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
 
 class TierPriceWriteMixin(TypedIdMixin):
@@ -467,7 +435,7 @@ class TierPriceWriteMixin(TypedIdMixin):
         super().clean_instance(info, instance)
 
 
-class WsmTierPriceCreate(TierPriceWriteMixin, DeprecatedModelMutation):
+class WsmTierPriceCreate(WsmMutationMeta, TierPriceWriteMixin, DeprecatedModelMutation):
     class Arguments:
         input = WsmTierPriceCreateInput(
             required=True, description="Fields required to create a tier price."
@@ -478,11 +446,9 @@ class WsmTierPriceCreate(TierPriceWriteMixin, DeprecatedModelMutation):
         model = models.TierPrice
         object_type = WsmTierPrice
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
 
-class WsmTierPriceUpdate(TierPriceWriteMixin, DeprecatedModelMutation):
+class WsmTierPriceUpdate(WsmMutationMeta, TierPriceWriteMixin, DeprecatedModelMutation):
     """The SKU and the group are not in the input, as they were not in the form.
 
     Moving a price to another SKU is not an edit of this row, it is a different
@@ -502,11 +468,9 @@ class WsmTierPriceUpdate(TierPriceWriteMixin, DeprecatedModelMutation):
         model = models.TierPrice
         object_type = WsmTierPrice
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
 
-class WsmTierPriceDelete(ModelDeleteMutation):
+class WsmTierPriceDelete(WsmMutationMeta, ModelDeleteMutation):
     class Arguments:
         id = graphene.ID(required=True, description="ID of the tier price to delete.")
 
@@ -515,11 +479,9 @@ class WsmTierPriceDelete(ModelDeleteMutation):
         model = models.TierPrice
         object_type = WsmTierPrice
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
 
-class WsmTierPriceBulkDelete(BulkLimitMixin, ModelBulkDeleteMutation):
+class WsmTierPriceBulkDelete(WsmMutationMeta, BulkLimitMixin, ModelBulkDeleteMutation):
     class Arguments:
         ids = NonNullList(
             graphene.ID, required=True, description="IDs of the tier prices."
@@ -530,11 +492,9 @@ class WsmTierPriceBulkDelete(BulkLimitMixin, ModelBulkDeleteMutation):
         model = models.TierPrice
         object_type = WsmTierPrice
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
 
-class WsmTierPriceBulkCreateInput(BaseInputObjectType):
+class WsmTierPriceBulkCreateInput(WsmDocCategory, BaseInputObjectType):
     variant = graphene.ID(required=True, description="The exact SKU.")
     group = graphene.ID(required=True, description="The group that pays this price.")
     min_quantity = graphene.Int(description="This price applies from here up.")
@@ -542,11 +502,8 @@ class WsmTierPriceBulkCreateInput(BaseInputObjectType):
         required=True, description="What the group pays each, at least one cent."
     )
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmTierPriceBulkCreate(BaseMutation):
+class WsmTierPriceBulkCreate(WsmMutationMeta, BaseMutation):
     """The paste/import path: 300+ rows in one call, one transaction, one write.
 
     A loop of `wsmTierPriceCreate` would be 300 round trips and 1,200 queries to
@@ -579,8 +536,6 @@ class WsmTierPriceBulkCreate(BaseMutation):
     class Meta:
         description = "Create many tier prices in one call. One transaction."
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     @classmethod
     def perform_mutation(cls, _root, info, /, *, tier_prices, **data):
@@ -717,16 +672,13 @@ class WsmTierPriceBulkCreate(BaseMutation):
         return instances
 
 
-class WsmTierPriceBulkUpdateInput(BaseInputObjectType):
+class WsmTierPriceBulkUpdateInput(WsmDocCategory, BaseInputObjectType):
     id = graphene.ID(required=True, description="ID of the tier price to change.")
     min_quantity = graphene.Int(description="This price applies from here up.")
     amount = WsmDecimal(description="What the group pays each.")
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmTierPriceBulkUpdate(BaseMutation):
+class WsmTierPriceBulkUpdate(WsmMutationMeta, BaseMutation):
     """The grid's save button: every edited row in one call, one UPDATE.
 
     `wsmTierPriceBulkCreate` gave the merchant a paste path and left them with
@@ -762,8 +714,6 @@ class WsmTierPriceBulkUpdate(BaseMutation):
     class Meta:
         description = "Change many tier prices in one call. One transaction."
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     @classmethod
     def perform_mutation(cls, _root, info, /, *, tier_prices, **data):
@@ -895,7 +845,7 @@ class WsmTierPriceBulkUpdate(BaseMutation):
 # --- settings ----------------------------------------------------------------
 
 
-class WsmDealerSettingsInput(BaseInputObjectType):
+class WsmDealerSettingsInput(WsmDocCategory, BaseInputObjectType):
     discount_stacking = graphene.Boolean(
         required=True,
         description=(
@@ -904,11 +854,8 @@ class WsmDealerSettingsInput(BaseInputObjectType):
         ),
     )
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmDealerSettingsUpdate(DeprecatedModelMutation):
+class WsmDealerSettingsUpdate(WsmMutationMeta, DeprecatedModelMutation):
     """The singleton update.
 
     `DeprecatedModelMutation` is what stock's own model mutations still use
@@ -926,8 +873,6 @@ class WsmDealerSettingsUpdate(DeprecatedModelMutation):
         model = models.DealerSettings
         object_type = WsmDealerSettings
         permissions = DEALER_PERMISSIONS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     @classmethod
     def get_instance(cls, info, **data):

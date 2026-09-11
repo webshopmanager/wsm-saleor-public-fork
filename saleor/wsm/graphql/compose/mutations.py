@@ -34,9 +34,9 @@ from ....graphql.product.types import Product
 from ....permission.enums import ProductPermissions
 from ...compose import models
 from ..dealer.mutations import DEALER_PERMISSIONS
-from ..errors import WsmError
+from ..errors import WsmMutationMeta
 from ..scalars import WsmDecimal
-from ..types import DOC_CATEGORY_WSM
+from ..types import WsmDocCategory
 from ..utils import TypedIdMixin
 from .enums import WsmFeeBasisEnum, WsmFeeScopeEnum, WsmOptionSetPromptTypeEnum
 from .types import (
@@ -237,7 +237,7 @@ def check_configured_floor(product_id):
         raise ValidationError({"values": problem})
 
 
-class WsmDealerTierOptionPriceInput(BaseInputObjectType):
+class WsmDealerTierOptionPriceInput(WsmDocCategory, BaseInputObjectType):
     id = graphene.ID(description="Omit to create. Supply to edit the row in place.")
     tier_group = graphene.String(
         required=True, description="A DealerGroup code, not a global ID."
@@ -246,11 +246,8 @@ class WsmDealerTierOptionPriceInput(BaseInputObjectType):
         required=True, description="Signed. Never above the retail delta."
     )
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmOptionValueInput(BaseInputObjectType):
+class WsmOptionValueInput(WsmDocCategory, BaseInputObjectType):
     id = graphene.ID(description="Omit to create. Supply to edit the row in place.")
     name = graphene.String(required=True, description="What the shopper sees.")
     sku_fragment = graphene.String(description="Appended to the product SKU.")
@@ -265,11 +262,8 @@ class WsmOptionValueInput(BaseInputObjectType):
         ),
     )
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmOptionSetCreateInput(BaseInputObjectType):
+class WsmOptionSetCreateInput(WsmDocCategory, BaseInputObjectType):
     product = graphene.ID(required=True, description="The product asking the question.")
     name = graphene.String(required=True, description="The merchant's internal name.")
     label = graphene.String(description="What the shopper sees above the choices.")
@@ -282,11 +276,8 @@ class WsmOptionSetCreateInput(BaseInputObjectType):
         description="Omit to create the question with no answers.",
     )
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmOptionSetUpdateInput(BaseInputObjectType):
+class WsmOptionSetUpdateInput(WsmDocCategory, BaseInputObjectType):
     name = graphene.String(description="The merchant's internal name.")
     label = graphene.String(description="What the shopper sees above the choices.")
     prompt_type = WsmOptionSetPromptTypeEnum(description="How the shopper answers.")
@@ -300,9 +291,6 @@ class WsmOptionSetUpdateInput(BaseInputObjectType):
             "list, and the floor is checked across the whole list at once."
         ),
     )
-
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
 
 class WsmOptionSetMutationBase(TypedIdMixin, DeprecatedModelMutation):
@@ -381,15 +369,13 @@ class WsmOptionSetMutationBase(TypedIdMixin, DeprecatedModelMutation):
             return super().perform_mutation(root, info, **data)
 
 
-class WsmOptionSetCreate(WsmOptionSetMutationBase):
+class WsmOptionSetCreate(WsmMutationMeta, WsmOptionSetMutationBase):
     class Meta:
         description = "Create a question on a product."
         model = models.OptionSet
         object_type = WsmOptionSet
         return_field_name = "optionSet"
         permissions = MANAGE_PRODUCTS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     class Arguments:
         input = WsmOptionSetCreateInput(
@@ -397,15 +383,13 @@ class WsmOptionSetCreate(WsmOptionSetMutationBase):
         )
 
 
-class WsmOptionSetUpdate(WsmOptionSetMutationBase):
+class WsmOptionSetUpdate(WsmMutationMeta, WsmOptionSetMutationBase):
     class Meta:
         description = "Update a question and, optionally, its whole answer list."
         model = models.OptionSet
         object_type = WsmOptionSet
         return_field_name = "optionSet"
         permissions = MANAGE_PRODUCTS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     class Arguments:
         id = graphene.ID(required=True, description="ID of the option set to update.")
@@ -414,21 +398,19 @@ class WsmOptionSetUpdate(WsmOptionSetMutationBase):
         )
 
 
-class WsmOptionSetDelete(ModelDeleteMutation):
+class WsmOptionSetDelete(WsmMutationMeta, ModelDeleteMutation):
     class Meta:
         description = "Delete a question and every answer on it."
         model = models.OptionSet
         object_type = WsmOptionSet
         return_field_name = "optionSet"
         permissions = MANAGE_PRODUCTS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     class Arguments:
         id = graphene.ID(required=True, description="ID of the option set to delete.")
 
 
-class WsmFeeCreateInput(BaseInputObjectType):
+class WsmFeeCreateInput(WsmDocCategory, BaseInputObjectType):
     product = graphene.ID(required=True, description="The product being charged.")
     label = graphene.String(required=True, description="What the shopper sees.")
     sku = graphene.String(description="The merchant's own code for the charge.")
@@ -438,11 +420,8 @@ class WsmFeeCreateInput(BaseInputObjectType):
     required = graphene.Boolean(description="Always charged.")
     decline_label = graphene.String(description="Wording of the decline option.")
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmFeeUpdateInput(BaseInputObjectType):
+class WsmFeeUpdateInput(WsmDocCategory, BaseInputObjectType):
     label = graphene.String(description="What the shopper sees.")
     sku = graphene.String(description="The merchant's own code for the charge.")
     basis = WsmFeeBasisEnum(description="Flat amount or percentage.")
@@ -451,11 +430,8 @@ class WsmFeeUpdateInput(BaseInputObjectType):
     required = graphene.Boolean(description="Always charged.")
     decline_label = graphene.String(description="Wording of the decline option.")
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmFeeCreate(TypedIdMixin, DeprecatedModelMutation):
+class WsmFeeCreate(WsmMutationMeta, TypedIdMixin, DeprecatedModelMutation):
     """`variant` is deliberately absent from the input.
 
     The hidden carrier variant is written by the first configured add and never
@@ -469,8 +445,6 @@ class WsmFeeCreate(TypedIdMixin, DeprecatedModelMutation):
         object_type = WsmFee
         return_field_name = "fee"
         permissions = MANAGE_PRODUCTS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     typed_ids = {"product": Product}
 
@@ -480,15 +454,13 @@ class WsmFeeCreate(TypedIdMixin, DeprecatedModelMutation):
         )
 
 
-class WsmFeeUpdate(DeprecatedModelMutation):
+class WsmFeeUpdate(WsmMutationMeta, DeprecatedModelMutation):
     class Meta:
         description = "Update a charge."
         model = models.Fee
         object_type = WsmFee
         return_field_name = "fee"
         permissions = MANAGE_PRODUCTS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     class Arguments:
         id = graphene.ID(required=True, description="ID of the charge to update.")
@@ -497,21 +469,19 @@ class WsmFeeUpdate(DeprecatedModelMutation):
         )
 
 
-class WsmFeeDelete(ModelDeleteMutation):
+class WsmFeeDelete(WsmMutationMeta, ModelDeleteMutation):
     class Meta:
         description = "Delete a charge."
         model = models.Fee
         object_type = WsmFee
         return_field_name = "fee"
         permissions = MANAGE_PRODUCTS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     class Arguments:
         id = graphene.ID(required=True, description="ID of the charge to delete.")
 
 
-class WsmProductComplianceInput(BaseInputObjectType):
+class WsmProductComplianceInput(WsmDocCategory, BaseInputObjectType):
     prop65 = graphene.Boolean(description="Show the California Proposition 65 warning.")
     prop65_text = graphene.String(description="Your own Prop 65 wording.")
     restricted_states = NonNullList(
@@ -528,11 +498,8 @@ class WsmProductComplianceInput(BaseInputObjectType):
         description="What the shopper is told when a destination is refused."
     )
 
-    class Meta:
-        doc_category = DOC_CATEGORY_WSM
 
-
-class WsmProductComplianceUpdate(DeprecatedModelMutation):
+class WsmProductComplianceUpdate(WsmMutationMeta, DeprecatedModelMutation):
     """Create-or-update on a OneToOne product row. There is no separate create.
 
     Keyed by the product rather than by row id because the model is a
@@ -546,8 +513,6 @@ class WsmProductComplianceUpdate(DeprecatedModelMutation):
         object_type = WsmProductCompliance
         return_field_name = "compliance"
         permissions = MANAGE_PRODUCTS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     class Arguments:
         product = graphene.ID(required=True, description="ID of the product.")
@@ -582,15 +547,13 @@ class WsmProductComplianceUpdate(DeprecatedModelMutation):
             return super().perform_mutation(root, info, **data)
 
 
-class WsmProductComplianceDelete(ModelDeleteMutation):
+class WsmProductComplianceDelete(WsmMutationMeta, ModelDeleteMutation):
     class Meta:
         description = "Delete a product's compliance row."
         model = models.ProductCompliance
         object_type = WsmProductCompliance
         return_field_name = "compliance"
         permissions = MANAGE_PRODUCTS
-        error_type_class = WsmError
-        doc_category = DOC_CATEGORY_WSM
 
     class Arguments:
         id = graphene.ID(

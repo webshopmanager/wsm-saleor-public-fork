@@ -14,7 +14,7 @@ from django.db.models import Q
 from ....graphql.core.filters import GlobalIDFilter
 from ....graphql.core.filters.filter_input import FilterInputObjectType
 from ...dealer import models
-from ..types import DOC_CATEGORY_WSM
+from ..types import WsmDocCategory
 
 
 def filter_search(fields):
@@ -69,19 +69,16 @@ class TierPriceFilter(django_filters.FilterSet):
         fields = ["group", "variant", "product"]
 
 
-class WsmDealerGroupFilterInput(FilterInputObjectType):
+class WsmDealerGroupFilterInput(WsmDocCategory, FilterInputObjectType):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         filterset_class = DealerGroupFilter
 
 
-class WsmDealerCustomerFilterInput(FilterInputObjectType):
+class WsmDealerCustomerFilterInput(WsmDocCategory, FilterInputObjectType):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         filterset_class = DealerCustomerFilter
 
 
-class WsmTierPriceFilterInput(FilterInputObjectType):
+class WsmTierPriceFilterInput(WsmDocCategory, FilterInputObjectType):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         filterset_class = TierPriceFilter

@@ -21,7 +21,7 @@ from ....graphql.core.types import ModelObjectType
 from ....graphql.product.types.products import ProductVariant
 from ...dealer import models
 from ..scalars import WsmDecimal
-from ..types import DOC_CATEGORY_WSM
+from ..types import WsmDocCategory
 
 # The names the list resolvers annotate their counts under. Read off the row
 # when it is there and counted per row when it is not, because a mutation
@@ -30,7 +30,7 @@ TIER_PRICE_COUNT = "wsm_tier_price_count"
 CUSTOMER_COUNT = "wsm_customer_count"
 
 
-class WsmDealerGroup(ModelObjectType[models.DealerGroup]):
+class WsmDealerGroup(WsmDocCategory, ModelObjectType[models.DealerGroup]):
     id = graphene.GlobalID(required=True, description="ID of the dealer group.")
     code = graphene.String(
         required=True,
@@ -53,7 +53,6 @@ class WsmDealerGroup(ModelObjectType[models.DealerGroup]):
     class Meta:
         model = models.DealerGroup
         interfaces = [graphene.relay.Node]
-        doc_category = DOC_CATEGORY_WSM
         description = "A buyer group: dealer-1, warehouse, installer."
 
     @staticmethod
@@ -67,7 +66,7 @@ class WsmDealerGroup(ModelObjectType[models.DealerGroup]):
         return root.customers.count() if count is None else count
 
 
-class WsmDealerCustomer(ModelObjectType[models.DealerCustomer]):
+class WsmDealerCustomer(WsmDocCategory, ModelObjectType[models.DealerCustomer]):
     id = graphene.GlobalID(required=True, description="ID of the assignment.")
     user = graphene.Field(
         User, required=True, description="The signed-in shopper this is about."
@@ -88,11 +87,10 @@ class WsmDealerCustomer(ModelObjectType[models.DealerCustomer]):
     class Meta:
         model = models.DealerCustomer
         interfaces = [graphene.relay.Node]
-        doc_category = DOC_CATEGORY_WSM
         description = "The link from a signed-in shopper to their buyer group."
 
 
-class WsmTierPrice(ModelObjectType[models.TierPrice]):
+class WsmTierPrice(WsmDocCategory, ModelObjectType[models.TierPrice]):
     id = graphene.GlobalID(required=True, description="ID of the tier price.")
     variant = graphene.Field(
         ProductVariant, required=True, description="The exact SKU this price is for."
@@ -123,7 +121,6 @@ class WsmTierPrice(ModelObjectType[models.TierPrice]):
     class Meta:
         model = models.TierPrice
         interfaces = [graphene.relay.Node]
-        doc_category = DOC_CATEGORY_WSM
         description = "One quantity break: what one group pays for one SKU."
 
     @staticmethod
@@ -164,7 +161,7 @@ class WsmTierPrice(ModelObjectType[models.TierPrice]):
         return min(priced, key=lambda listing: listing.price_amount).currency
 
 
-class WsmDealerSettings(ModelObjectType[models.DealerSettings]):
+class WsmDealerSettings(WsmDocCategory, ModelObjectType[models.DealerSettings]):
     """The dealer-pricing toggles, as one object.
 
     No `id` and no `Node` interface on purpose: the table holds one row or none,
@@ -191,7 +188,6 @@ class WsmDealerSettings(ModelObjectType[models.DealerSettings]):
 
     class Meta:
         model = models.DealerSettings
-        doc_category = DOC_CATEGORY_WSM
         description = "Store-wide dealer pricing settings."
 
     @staticmethod
@@ -201,19 +197,16 @@ class WsmDealerSettings(ModelObjectType[models.DealerSettings]):
         return graphene.Node.to_global_id("WsmDealerSettings", root.pk)
 
 
-class WsmDealerGroupCountableConnection(CountableConnection):
+class WsmDealerGroupCountableConnection(WsmDocCategory, CountableConnection):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         node = WsmDealerGroup
 
 
-class WsmDealerCustomerCountableConnection(CountableConnection):
+class WsmDealerCustomerCountableConnection(WsmDocCategory, CountableConnection):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         node = WsmDealerCustomer
 
 
-class WsmTierPriceCountableConnection(CountableConnection):
+class WsmTierPriceCountableConnection(WsmDocCategory, CountableConnection):
     class Meta:
-        doc_category = DOC_CATEGORY_WSM
         node = WsmTierPrice

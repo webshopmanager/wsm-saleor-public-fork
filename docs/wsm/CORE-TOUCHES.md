@@ -10,7 +10,7 @@ The complete inventory is one command, and it must return this file's list and
 nothing else:
 
 ```
-git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py, urls.py, section 7's list, saleor/wsm/**
+git diff --name-only a1ab3a2..HEAD -- saleor/   # settings.py, section 7's list, saleor/wsm/**
 git diff --name-only a1ab3a2..HEAD -- CHANGELOG.md
 ```
 
@@ -19,20 +19,27 @@ cannot see `CHANGELOG.md`, which this branch also edits and which
 `make vendor-delta` counts. One file, outside the only command this ledger
 offered to find it (Wild West finding 12).
 
-Monkey patches: **three** (MP1, added by U3; MP2, added by U7; MP3, added by
-H1; the design doc budgeted zero, see those entries for why the stock levers do
-not exist). Three, not four: the compliance PLUGIN in section 9 is a native
-hook, argued there, and it is deliberately not a fourth patch. Read this line
-with section 9 and the two counts agree. Plus
+Core touches from outside `saleor/wsm/`: **three wrapped functions, one
+core-class extension and one module-attribute rebind.** MP1 (added by U3), MP2 (U7) and MP3 (H1) replace core
+FUNCTIONS; the design doc budgeted zero, and those entries say why the stock
+levers do not exist. MP4 (section 14) appends three fields to stock's `Product`
+GRAPHENE TYPE, which is not a wrapped function and so was invisible to both the
+count and the boot guard until 2026-09-11. MP5 (section 15) repoints one module
+ATTRIBUTE, `saleor.graphql.views.schema`, so the query complexity guard weighs
+the schema this fork actually serves. The compliance PLUGIN in section 9 is
+a native hook, argued there, and is deliberately none of the four. Plus
 one resolver swap Bill's secondary-categories patch performs from
 `saleor/wsm/apps.py` (section 7). Core table edits: **zero.** Our tables carry
 FKs into core tables; core migrations are untouched, and the one migration
 section 7 brings in is state-only.
 
-Sections 1 to 6 and section 8 are this branch's own work and touch two core
-files. Section 7 is the six WSM patches that already existed before the fork,
-merged in from `wsm/bakeoff-rebase-probe`; they are the reason the guard test's
-allow-list is longer than two entries.
+Sections 1 to 4, 6, 8 to 10, 12 and 13 are this branch's own work and touch
+ONE core file, `saleor/settings.py`. Section 5 is gone and its line with it:
+section 13 turned the fork's urlconf into the root one, which took
+`saleor/urls.py` back to upstream byte-for-byte. Section 7 is the six WSM
+patches that already existed before the fork, merged in from
+`wsm/bakeoff-rebase-probe`; they are the reason the guard test's allow-list is
+longer than one entry.
 
 Since 2026-09-10 every patch also pins a **sha256 of the wrapped function's
 own source** (`SOURCE` in `saleor/wsm/patches.py`), and `install_guard` refuses
@@ -224,42 +231,26 @@ Containers.
 
 ---
 
-## 5. `saleor/urls.py`, +1 line of code (U2, U3 and U4 together, 2026-09-08)
+## 5. Withdrawn. `saleor/urls.py` is upstream again (U1 spine, 2026-09-10)
 
-```python
-    re_path(r"", include("saleor.wsm.urls")),
-```
+This section used to hold the fork's one `saleor/urls.py` line,
+`re_path(r"", include("saleor.wsm.urls"))`. Section 13 inverted that
+relationship: `saleor/wsm/urls.py` is the ROOT urlconf now and `saleor.urls` is
+what it includes, so the core line would be a cycle. It was removed and
+`saleor/urls.py` is byte-identical to the upstream release again.
 
-**Shared touch.** U2 (Compose endpoints, the merchant admin, static), U3
-(Dealer endpoints) and U4 (the kit endpoint) each need the fork's URLs mounted, and both branches wrote
-this line their own way. U2's shape is the one kept: U3's `path("wsm/", ...)`
-prefixes every fork route with `/wsm/`, which the dealer and compose endpoints
-want but `/admin/` and `/static/` do not, and those two are U2's merchant UI.
-Since 2026-09-10 the `/static/` route is OFF unless `WSM_SERVE_STATIC` is set
-(`saleor/wsm/urls.py::static_routes`, Wild West finding 11): the target
-deployment is ECS behind a CDN, where Django serving static files is a
-production defect, and a bake-off box behind SSH says so for itself. A box
-whose merchant screens render unstyled is missing that variable.
-An empty `re_path` prefix mounts the list at the root and lets
-`saleor/wsm/urls.py` spell out each app's own prefix, so all three shapes fit
-behind one core line. The dealer routes keep their exact paths
-(`/wsm/dealer_pricing/...`) because `saleor/wsm/urls.py` now carries the
-`wsm/` segment in its own pattern.
-
-Core gains ONE include however many fork apps exist, because
-`saleor/wsm/urls.py` is the list. Adding the next app's endpoints is a line in
-that file, which upstream does not own, rather than another core touch.
-
-Removal cost: delete the line and the `saleor/wsm/` package. Nothing in core
-resolves a `wsm-` route name.
+The numbering is kept rather than closed up, because sections 6 and 7 were
+written referring to "sections 1 to 5" and a renumbered ledger is a ledger
+nobody can follow across a rebase.
 
 ---
 
 ## 6. Nothing. What the merge added, and where (U6, 2026-09-08)
 
 Landing all three units on one branch added **zero** lines to a file Saleor
-owns. Sections 1 to 5 are still the complete core-touch list, and the command at
-the top of this file still returns `saleor/settings.py`, `saleor/urls.py` and
+owns. Sections 1 to 5 were the complete core-touch list at the time, and the
+command at the top of this file then returned `saleor/settings.py`, the now
+withdrawn `saleor/urls.py` and
 `saleor/wsm/**` and nothing else. What the merge did add lives entirely inside
 `saleor/wsm/`, and is listed here because a reviewer looking for the seam should
 not have to diff three branches to find it.
@@ -572,8 +563,155 @@ and would go red if the scope were tighter than the admin needs: 36 passed. Plus
 
 # Monkey patches
 
-Expected: zero. Actual: **two**, in U3 and U7. Every entry names the exact
-function it replaces and the upstream change that would delete it.
+Expected: zero. Actual: **five**: three wrapped functions (MP1 in U3, MP2 in
+U7, MP3 in the reprice wave), one core-class extension (MP4, the product tab,
+section 14) and one module-attribute rebind (MP5, the query cost guard, section
+15). Every entry names the exact function, class or attribute it changes and the
+upstream change that would delete it.
+
+## 13. `saleor/settings.py`, one line repointed, +5 comment lines (U1 dashboard spine, 2026-09-10)
+
+```python
+ROOT_URLCONF = "saleor.wsm.urls"
+```
+
+**This is the whole attachment for the fork's GraphQL layer.** The merchant
+screens are being rebuilt as native Saleor Dashboard sections, which means the
+Dashboard has to reach our models over GraphQL, which means our fields have to
+be in the schema the API serves. There are two ways to do that in a fork that
+does not edit `saleor/`: rebind `saleor.graphql.api.schema` from `ready()`
+(rung 5, a fourth monkey patch), or compose our own schema and make our own
+urlconf the root (rung 1, a settings seam). This is the second.
+
+What it buys, concretely:
+
+- `saleor/wsm/graphql/schema.py` SUBCLASSES stock's `Query` and `Mutation`
+  (`type("Query", (WsmQueries, api.Query), {})`) and calls
+  `build_federated_schema` with the arguments read back off `api` itself, so
+  the composed schema is stock's schema plus our fields, never stock's schema
+  changed. `saleor/graphql/api.py` is imported and left alone; its own
+  `schema` object still exists and still has no WSM field on it, which
+  `test_our_fields_are_on_our_schema_and_stock_is_left_alone` asserts.
+- `saleor/wsm/urls.py` serves that schema at `graphql/` FIRST, then includes
+  `saleor.urls` whole. Every core route resolves exactly as before; core's own
+  `graphql/` line is simply never reached.
+- The monkey-patch count stays at **three**. A fourth was the alternative.
+- `saleor/urls.py` LEAVES the deviation budget (section 5, withdrawn), so the
+  files outside `saleor/wsm/` that differ from upstream on this branch's own
+  account go from two to one, and `ALLOWED_CORE_FILES` in
+  `saleor/wsm/tests/test_core_tables_untouched.py` is one entry shorter.
+
+**The tripwire.** Composing "with the same arguments" is an assumption about a
+core file. `API_SCHEMA_SOURCE` in `saleor/wsm/graphql/schema.py` is a sha256 of
+api.py's construction block (from `schema = build_federated_schema(` through
+`monitor_fields_usage(schema)`), and
+`test_the_pinned_digest_is_the_api_block_this_layer_was_written_against`
+compares it on every run. An upstream bump that adds a `types=` entry or a
+directive is then a red test with a diff to read, rather than a type that
+exists in stock's schema and silently not in the one we serve. Proven able to
+fail twice over: once by pinning a wrong digest (the first run of this branch),
+and permanently by
+`test_the_tripwire_moves_when_an_argument_does`, which feeds the function a
+modified api.py and asserts the digest moves. To re-pin after a deliberate
+bump, read the diff FIRST, mirror any new argument, then:
+
+```
+python -c "from saleor.wsm.graphql import schema; print(schema.source_digest())"
+```
+
+**Cost, measured and accepted.** Two full Saleor schemas are built at urlconf
+load, because `saleor.urls` builds its own on import and this design refuses to
+patch that away. The ceiling is cold-start time and resident memory on a worker,
+nothing per request. The upgrade path, if a cold start ever has to get cheaper,
+is the rung-5 rebind with a `PINNED` entry, which buys back one build at the
+cost of one monkey patch.
+
+**Removal cost:** set `ROOT_URLCONF` back to `"saleor.urls"`, restore the
+`include("saleor.wsm.urls")` line in `saleor/urls.py`, and the fork's REST
+routes work exactly as they did before; only the GraphQL fields go away.
+
+---
+
+## 14. MP4. Three fields appended to stock's `Product` graphene type (dashboard spine, 2026-09-10; ledgered 2026-09-11)
+
+`saleor/wsm/graphql/compose/product_extension.py` writes into
+`Product._meta.fields` and sets `resolve_<name>` on the class, from our own
+module, at import. No file under `saleor/graphql/` is edited.
+
+**Why it exists.** The Compose tab on the product page wants the product's
+option sets, its charges and its disclosure in the SAME round trip the page
+already makes. A graphene 2 `ObjectType` collects its fields when the class body
+runs, and `_meta.fields` is the only public handle afterwards.
+
+**Why it was not in this ledger until now.** It wraps no function, so
+`patches.installed()` cannot see it, and the count above read "three, nothing
+here adds one". That sentence was in the PR body too. The Marshal review of fork
+PR 4 (2026-09-11) called it: a claim the code contradicts is the most expensive
+sentence in a description.
+
+**The tripwire, now the same as the other three.** `EXTENDED` in
+`saleor/wsm/patches.py` pins the type and the field names;
+`patches.extensions_installed()` DISCOVERS the real set by sweeping loaded core
+modules for a field carrying `_wsm_owned`; and
+`test_the_installed_core_class_extensions_are_the_documented_ones` compares
+them. An extension that lands without a line here reddens that test in the run
+that adds it.
+
+**Removal cost.** One module deleted and the three fields declared wherever
+Saleor grows a real extension hook. Nothing else in the package changes;
+`_assert_free` already refuses to overwrite a stock field, so an upstream bump
+that adds a `wsmFees` of its own is a loud `RuntimeError` at import rather than
+a silently shadowed resolver.
+
+**Known boundary: there are two schemas, and webhooks use the other one.**
+`saleor/graphql/webhook/subscription_payload.py:123` and `:209`, and
+`saleor/webhook/observability/obfuscation.py:200`, all do `from ..api import
+schema` and parse the subscription document against STOCK's schema object, not
+the composed one `saleor/wsm/graphql/schema.py` builds and `ROOT_URLCONF`
+serves. So an app subscription cannot select `wsmFees`, `wsmOptionSets` or
+`wsmCompliance` on `Product`, and `anonymize_event_payload` parses against a
+schema that cannot see them. The Dashboard is unaffected (it goes through the
+served schema); apps subscribing to WSM fields are not supported today. The
+follow-up, if an app ever needs it, is to pass the composed schema into those
+two call sites behind the same digest pin `API_SCHEMA_SOURCE` already uses.
+
+## 15. MP5. `saleor.graphql.views.schema` repointed at the composed schema (fix wave 2A, 2026-09-11)
+
+`saleor/wsm/graphql/cost.py` `install()` sets `saleor.graphql.views.schema` to
+the schema `saleor/wsm/graphql/schema.py` builds, from that module, the moment it
+is built. One attribute, no function wrapped, no core file edited.
+
+**Why it exists.** `saleor/graphql/views.py:38` does
+`from .api import API_PATH, schema`. Line 358 PARSES the incoming document with
+`self.schema`, the schema the view was constructed with, and line 479 costs it
+with `validate_query(schema=schema, ...)`, the module global. On stock Saleor
+both names point at one object and the difference is invisible. On this fork the
+view mounted at `graphql/` serves the COMPOSED schema, so the cost walk ran over
+a schema in which no `Wsm*` field exists: `products(first: 100)` cost 200 and
+`wsmDealerGroups(first: 100)` cost 0, measured 2026-09-11. The whole WSM surface
+sat outside `GRAPHQL_QUERY_MAX_COMPLEXITY`. A cost map alone cannot fix it, and
+in fact cannot be installed without it: `validate_cost_map` walks the same
+schema and rejects the entries ("cost map contains a field wsmOptionSet not
+defined by the Query type"), which turns every request into an error. That was
+the red.
+
+**Blast radius.** The composed schema is stock's `Query` and `Mutation`
+SUBCLASSED, so it is a superset: every stock query is weighed against exactly
+the types it was before, with the same map entries. Nothing else in `views.py`
+reads that module global.
+
+**The tripwire.** `REBOUND` in `saleor/wsm/patches.py` pins the name;
+`patches.rebindings_installed()` DISCOVERS every core module attribute holding
+an object the fork marked `_wsm_owned`; and
+`test_the_core_attributes_this_fork_rebinds_are_the_documented_ones` compares
+them. A second rebind is a red test in the run that adds it.
+
+**Removal cost.** One line, the moment upstream costs the query with
+`self.schema`. The upstream change that deletes this is a one-word diff in
+`saleor/graphql/views.py:479`, and it is worth offering: on stock Saleor the two
+names are the same object, so passing the view's schema is a no-op there and a
+fix for every fork that composes one.
+
 
 ## Where the stamps live: PRIVATE metadata, always (review wave WW1, 2026-09-08)
 

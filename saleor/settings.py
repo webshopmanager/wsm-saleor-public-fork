@@ -89,7 +89,12 @@ SITE_ID = 1
 
 PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 
-ROOT_URLCONF = "saleor.urls"
+# WSM-FORK: the fork's urlconf, not Saleor's. It serves the composed GraphQL
+# schema (saleor/wsm/graphql/schema.py) at graphql/ and then INCLUDES
+# saleor.urls for everything else, so the fork adds fields to the API without a
+# runtime patch and without editing a file Saleor owns. This line is the whole
+# attachment. See docs/wsm/CORE-TOUCHES.md.
+ROOT_URLCONF = "saleor.wsm.urls"
 
 ADMINS = (
     # ('Your Name', 'your_email@example.com'),

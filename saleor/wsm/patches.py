@@ -28,6 +28,14 @@ site guard and silently invalidates the assumption the wrapper was written on.
 This fork has been bitten by exactly that class once already (the
 catalogue-promotion double-take fixed at 08b221ec). A digest per patch turns it
 into a startup error.
+
+`EXTENDED` is the fourth ledger, for the fourth thing. MP4
+(`saleor/wsm/graphql/compose/product_extension.py`) does not wrap a function: it
+APPENDS fields to stock's `Product` graphene type, which `installed()` cannot
+see because there is no `__wrapped__` anywhere. It is still a mutation of a core
+class from a file that class never mentions, which is the expensive half of a
+monkey patch, so it gets the same treatment: the real set is discovered off the
+core types by `extensions_installed()` and compared against the pin below.
 """
 
 import hashlib
@@ -91,6 +99,28 @@ PINNED = {
         "saleor.checkout.calculations",
     ),
 }
+
+# MP4, saleor/wsm/graphql/compose/product_extension.py: the product page hosts
+# a Compose tab, so stock's `Product` type carries three more fields. Additive,
+# idempotent and ordered (see that module's docstring for why it is not a core
+# edit and what it costs); ledgered here because it changes a class defined in
+# `saleor/graphql/product/types/products.py` from outside that file.
+# Value: the field names, as `Product._meta.fields` keys.
+EXTENDED = {
+    "saleor.graphql.product.types.products.Product": (
+        "wsm_compliance",
+        "wsm_fees",
+        "wsm_option_sets",
+    ),
+}
+
+# MP5, saleor/wsm/graphql/cost.py: one module ATTRIBUTE repointed, so the query
+# complexity guard weighs the schema this fork serves instead of the stock
+# object `saleor/graphql/views.py:38` imports. Stock parses with `self.schema`
+# and costs with the module global; on stock Saleor they are the same object, on
+# this fork they are not, and the difference is a surface with no ceiling.
+# Discovered by the `_wsm_owned` marker the fork puts on the object it binds.
+REBOUND = frozenset({"saleor.graphql.views.schema"})
 
 
 SOURCE = {
@@ -160,6 +190,68 @@ def installed() -> frozenset[str]:
                 continue
             if "/saleor/wsm/" in code.co_filename.replace("\\", "/"):
                 found.add(f"{original.__module__}.{original.__qualname__}")
+    return frozenset(found)
+
+
+def extensions_installed() -> dict[str, tuple[str, ...]]:
+    """Every core graphene type this fork has appended fields to, discovered.
+
+    Graphene marks nothing, so the fork does: `product_extension` sets
+    `_wsm_owned` on each field it appends, and this sweeps the loaded core
+    modules for any type whose `_meta.fields` carries one. Discovery rather than
+    a registration call, for the same reason `installed()` sweeps rather than
+    trusts: a patch that lands without telling anyone is exactly the one this
+    ledger exists to catch.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    seen: set[int] = set()
+    for name, module in list(sys.modules.items()):
+        if not name.startswith("saleor.") or name.startswith("saleor.wsm"):
+            continue
+        for value in list(vars(module).values()):
+            if not isinstance(value, type) or id(value) in seen:
+                continue
+            fields = getattr(getattr(value, "_meta", None), "fields", None)
+            # A Django model's `_meta.fields` is a tuple, not a mapping; only a
+            # graphene type answers this shape.
+            if not isinstance(fields, dict):
+                continue
+            seen.add(id(value))
+            owned = tuple(
+                sorted(
+                    field
+                    for field, declaration in fields.items()
+                    if getattr(declaration, "_wsm_owned", False) is True
+                )
+            )
+            if owned:
+                found[f"{value.__module__}.{value.__qualname__}"] = owned
+    return found
+
+
+def rebindings_installed() -> frozenset[str]:
+    """Every core module attribute now holding an object this fork put there.
+
+    Same discipline as `installed()` and `extensions_installed()`: sweep, do not
+    trust a registration call. The fork marks what it binds with `_wsm_owned`,
+    so this finds the binding wherever it landed rather than wherever it was
+    meant to land.
+    """
+    found = set()
+    for name, module in list(sys.modules.items()):
+        if not name.startswith("saleor.") or name.startswith("saleor.wsm"):
+            continue
+        for attribute, value in list(getattr(module, "__dict__", {}).items()):
+            # `getattr` with a default, because a mock left in a core namespace
+            # answers every attribute and some of those answers raise.
+            try:
+                owned = getattr(value, "_wsm_owned", False) is True
+            except Exception:  # pragma: no cover - a hostile test double
+                continue
+            # A graphene FIELD carrying the marker is MP4's business
+            # (`extensions_installed`), not a module-level rebind.
+            if owned and not isinstance(value, type):
+                found.add(f"{name}.{attribute}")
     return frozenset(found)
 
 

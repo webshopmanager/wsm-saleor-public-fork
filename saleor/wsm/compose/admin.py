@@ -13,22 +13,16 @@ showing a merchant. A private site takes only what we register and is immune to
 whatever a future app drops on the default one.
 """
 
-import re
 from functools import wraps
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from django.contrib import admin
 from django.db.models import (
-    Case,
     Count,
-    Exists,
     IntegerField,
     OuterRef,
     Prefetch,
-    Q,
     Subquery,
-    Value,
-    When,
 )
 from django.forms import ModelForm
 from django.http import HttpRequest
@@ -47,7 +41,7 @@ if TYPE_CHECKING:
     _ModelAdminBase = admin.ModelAdmin
 else:
     _ModelAdminBase = object
-from ...product.models import Product, ProductChannelListing, ProductVariant
+from ...product.models import Product, ProductChannelListing
 from . import pricing
 from .auth import ThrottledAdminAuthenticationForm
 from .forms import (
@@ -68,6 +62,7 @@ from .models import (
     OptionValue,
     ProductCompliance,
 )
+from .search import rank_by_sku
 
 # The merchant console mounts on the same host as the public API, so
 # `/admin/login/` is a crawlable 200. One header on the way out keeps the whole
@@ -157,15 +152,6 @@ def _with_currency(queryset, product_path):
     )
 
 
-def whole_token(term):
-    """A pattern that matches `term` only where it is not part of a longer run.
-
-    Postgres flavour, for `iregex`. The catalog is full of SKUs that CONTAIN a
-    part number without being it: `trp:1471801` contains `71801`.
-    """
-    return r"(^|[^0-9A-Za-z])" + re.escape(term) + r"([^0-9A-Za-z]|$)"
-
-
 class SkuRankedSearchMixin(_ModelAdminBase):
     """The row a merchant typed comes first, not the one that sorts first.
 
@@ -183,7 +169,9 @@ class SkuRankedSearchMixin(_ModelAdminBase):
     relation would return the same product once per variant.
     """
 
-    # How a row of THIS model reaches the variant that carries a SKU.
+    # How the variant that carries a SKU reaches a row of THIS model. The
+    # variant picker in `admin_pickers.py` overrides it with "pk", because
+    # there the rows ARE the variants.
     sku_owner_field = "product"
     # Where this model's own merchant-readable name lives.
     name_field = "name"
@@ -196,20 +184,14 @@ class SkuRankedSearchMixin(_ModelAdminBase):
         if not term:
             return queryset, may_have_duplicates
 
-        owner = {self.sku_owner_field: OuterRef("pk")}
-        pattern = whole_token(term)
-        exact = ProductVariant.objects.filter(**owner, sku__iexact=term)
-        token = ProductVariant.objects.filter(**owner, sku__iregex=pattern)
-        ranked = queryset.annotate(
-            wsm_match_rank=Case(
-                When(Exists(exact), then=Value(0)),
-                When(
-                    Q(Exists(token)) | Q(**{f"{self.name_field}__iregex": pattern}),
-                    then=Value(1),
-                ),
-                default=Value(2),
-                output_field=IntegerField(),
-            )
+        # The rule itself lives in `search.py`, because the Dashboard's
+        # `wsmOptionSets(filter: {search})` ranks the same rows the same way and
+        # a second copy here would be a second rule within the month.
+        ranked = rank_by_sku(
+            queryset,
+            term,
+            variant_field=self.sku_owner_field,
+            name_field=self.name_field,
         )
         ordering = self.get_ordering(request) or ()
         return ranked.order_by("wsm_match_rank", *ordering), may_have_duplicates

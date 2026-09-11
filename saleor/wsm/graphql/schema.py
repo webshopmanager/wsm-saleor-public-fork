@@ -33,6 +33,7 @@ import graphql
 from ...graphql import api
 from ...graphql.core.federation.schema import build_federated_schema
 from .compose.schema import ComposeMutations, ComposeQueries
+from .containers.schema import WsmContainersMutations, WsmContainersQueries
 from .dealer.schema import WsmDealerMutations, WsmDealerQueries
 
 _BLOCK_START = "schema = build_federated_schema("
@@ -63,11 +64,11 @@ def source_digest(source: str | None = None) -> str:
     return hashlib.sha256(api_schema_source(source).encode()).hexdigest()
 
 
-class WsmQueries(ComposeQueries, WsmDealerQueries):
+class WsmQueries(ComposeQueries, WsmContainersQueries, WsmDealerQueries):
     """Every query field this fork adds. One mixin per domain."""
 
 
-class WsmMutations(ComposeMutations, WsmDealerMutations):
+class WsmMutations(ComposeMutations, WsmContainersMutations, WsmDealerMutations):
     """Every mutation this fork adds. One mixin per domain."""
 
 

@@ -16,7 +16,11 @@ import pytest
 
 from saleor.graphql.tests.utils import assert_no_permission, get_graphql_content
 from saleor.wsm.compose import pricing
-from saleor.wsm.compose.models import OptionSet, OptionValue
+from saleor.wsm.compose.models import (
+    DealerTierOptionPrice,
+    OptionSet,
+    OptionValue,
+)
 
 DETAIL = """
     query WsmOptionSet($id: ID!) {
@@ -377,6 +381,132 @@ def test_update_accepts_the_submit_that_fixes_two_stored_rows_at_once(
 
 
 @pytest.mark.django_db
+def test_update_refuses_dealer_prices_from_a_catalog_manager(
+    merchant_api_client, option_set, black, dealer_group
+):
+    """MANAGE_PRODUCTS opens the question. It does not open what a dealer pays.
+
+    `tierDeltas` writes `WsmDealerTierOptionPrice`, the same money every
+    mutation in `wsm/graphql/dealer` gates on MANAGE_DISCOUNTS.
+    """
+    response = merchant_api_client.post_graphql(
+        UPDATE,
+        {
+            "id": set_id(option_set),
+            "input": {
+                "values": [
+                    {
+                        "id": value_id(black),
+                        "name": "Black",
+                        "priceDelta": "10.00",
+                        "tierDeltas": [
+                            {"tierGroup": "dealer-1", "priceDelta": "5.00"}
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmOptionSetUpdate"]
+    assert [(e["field"], e["code"]) for e in payload["errors"]] == [
+        ("values.0.tierDeltas", "PERMISSION_DENIED")
+    ]
+    assert not DealerTierOptionPrice.objects.exists(), "a refused save wrote money"
+
+
+@pytest.mark.django_db
+def test_update_refuses_a_catalog_manager_CLEARING_dealer_prices(
+    merchant_api_client, option_set, black, tier_delta
+):
+    """An empty list is a write too: provided REPLACES, so `[]` deletes."""
+    response = merchant_api_client.post_graphql(
+        UPDATE,
+        {
+            "id": set_id(option_set),
+            "input": {
+                "values": [
+                    {
+                        "id": value_id(black),
+                        "name": "Black",
+                        "priceDelta": "10.00",
+                        "tierDeltas": [],
+                    }
+                ]
+            },
+        },
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmOptionSetUpdate"]
+    assert [(e["field"], e["code"]) for e in payload["errors"]] == [
+        ("values.0.tierDeltas", "PERMISSION_DENIED")
+    ]
+    assert DealerTierOptionPrice.objects.filter(pk=tier_delta.pk).exists()
+
+
+@pytest.mark.django_db
+def test_create_refuses_dealer_prices_from_a_catalog_manager(
+    merchant_api_client, product, dealer_group
+):
+    """The same input object rides on create, so it needs the same gate."""
+    response = merchant_api_client.post_graphql(
+        CREATE,
+        {
+            "input": {
+                "product": product_id(product),
+                "name": "Finish",
+                "values": [
+                    {
+                        "name": "Black",
+                        "priceDelta": "10.00",
+                        "tierDeltas": [
+                            {"tierGroup": "dealer-1", "priceDelta": "5.00"}
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmOptionSetCreate"]
+    assert [(e["field"], e["code"]) for e in payload["errors"]] == [
+        ("values.0.tierDeltas", "PERMISSION_DENIED")
+    ]
+    assert not OptionSet.objects.exists(), "a refused create left a question behind"
+
+
+@pytest.mark.django_db
+def test_update_stores_a_dealer_price_for_a_caller_who_has_the_permission(
+    dealer_merchant_api_client, option_set, black, dealer_group
+):
+    """The gate refuses a permission, not the feature."""
+    response = dealer_merchant_api_client.post_graphql(
+        UPDATE,
+        {
+            "id": set_id(option_set),
+            "input": {
+                "values": [
+                    {
+                        "id": value_id(black),
+                        "name": "Black",
+                        "priceDelta": "10.00",
+                        "tierDeltas": [
+                            {"tierGroup": "dealer-1", "priceDelta": "5.00"}
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+
+    payload = get_graphql_content(response)["data"]["wsmOptionSetUpdate"]
+    assert payload["errors"] == []
+    assert payload["optionSet"]["values"][0]["tierDeltas"] == [
+        {"tierGroup": "dealer-1", "priceDelta": "5.00"}
+    ]
+
+
+@pytest.mark.django_db
 def test_update_refuses_two_answers_sharing_one_sku_code(
     merchant_api_client, option_set
 ):
@@ -403,14 +533,14 @@ def test_update_refuses_two_answers_sharing_one_sku_code(
 
 @pytest.mark.django_db
 def test_update_refuses_two_prices_for_one_dealer_group(
-    merchant_api_client, option_set, black, dealer_group
+    dealer_merchant_api_client, option_set, black, dealer_group
 ):
     """Checked before the write, because the constraint fires as a 500.
 
     `wsm_compose_one_tier_row_per_group` is real, and reaching it means an
     IntegrityError on a merchant screen instead of a sentence on a field.
     """
-    response = merchant_api_client.post_graphql(
+    response = dealer_merchant_api_client.post_graphql(
         UPDATE,
         {
             "id": set_id(option_set),
@@ -439,9 +569,9 @@ def test_update_refuses_two_prices_for_one_dealer_group(
 
 @pytest.mark.django_db
 def test_update_refuses_a_tier_group_no_dealer_group_answers_to(
-    merchant_api_client, option_set, black, dealer_group
+    dealer_merchant_api_client, option_set, black, dealer_group
 ):
-    response = merchant_api_client.post_graphql(
+    response = dealer_merchant_api_client.post_graphql(
         UPDATE,
         {
             "id": set_id(option_set),
@@ -468,9 +598,9 @@ def test_update_refuses_a_tier_group_no_dealer_group_answers_to(
 
 @pytest.mark.django_db
 def test_update_refuses_a_dealer_price_above_retail(
-    merchant_api_client, option_set, black, dealer_group
+    dealer_merchant_api_client, option_set, black, dealer_group
 ):
-    response = merchant_api_client.post_graphql(
+    response = dealer_merchant_api_client.post_graphql(
         UPDATE,
         {
             "id": set_id(option_set),

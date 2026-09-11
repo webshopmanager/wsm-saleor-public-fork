@@ -6,8 +6,14 @@ MANAGE_DISCOUNTS alone. The Compose option-set screen offers a picker of buyer
 group CODES for its tier deltas (`compose/models.py:898` stores the code as a
 bare string), and that screen is gated on MANAGE_PRODUCTS: without the second
 permission here, a merchant editing an option set would be handed an empty
-picker and type a code that prices nothing. Amendment of 2026-09-10. Every
-dealer WRITE stays MANAGE_DISCOUNTS.
+picker and type a code that prices nothing. Amendment of 2026-09-10.
+
+Every dealer WRITE stays MANAGE_DISCOUNTS, the Compose path included. That
+screen's `tierDeltas` writes `DealerTierOptionPrice`, so
+`WsmOptionSetMutationBase.check_tier_delta_permission` asks for this permission
+on that input field alone before the nested list is written
+(`graphql/compose/mutations.py`). Until 2026-09-11 it did not, and the sentence
+above was false for exactly that one path.
 """
 
 import graphene

@@ -29,6 +29,7 @@ from ....permission.enums import ProductPermissions
 from ...compose import models
 from ..errors import WsmError
 from ..scalars import WsmDecimal
+from ..dealer.mutations import DEALER_PERMISSIONS
 from ..types import DOC_CATEGORY_WSM
 from ..utils import TypedIdMixin
 from .enums import WsmFeeBasisEnum, WsmFeeScopeEnum, WsmOptionSetPromptTypeEnum
@@ -305,6 +306,49 @@ class WsmOptionSetMutationBase(TypedIdMixin, DeprecatedModelMutation):
 
     class Meta:
         abstract = True
+
+    @classmethod
+    def clean_input(cls, info, instance, data, **kwargs):
+        cleaned_input = super().clean_input(info, instance, data, **kwargs)
+        cls.check_tier_delta_permission(info, cleaned_input.get("values"))
+        return cleaned_input
+
+    @classmethod
+    def check_tier_delta_permission(cls, info, values):
+        """`tierDeltas` is dealer money, so it asks for the dealer permission.
+
+        MANAGE_PRODUCTS gates this mutation because a question on a product is
+        catalog work. A tier delta is not: it writes `DealerTierOptionPrice`,
+        what a named buyer group PAYS, and every mutation in
+        `wsm/graphql/dealer` gates that on MANAGE_DISCOUNTS. Without this a
+        catalog manager sets dealer prices through the option-set screen, which
+        `dealer/schema.py` promises in writing they cannot.
+
+        Asked of the INPUT rather than of what changed, because an empty list
+        is a write too: provided REPLACES, so `tierDeltas: []` deletes every
+        dealer price on that choice. Omitted leaves them untouched and stays a
+        MANAGE_PRODUCTS-only save, which is the whole option-set screen for a
+        store that sells to nobody at a negotiated price.
+
+        A field error and not a top-level `PermissionDenied`, because the
+        caller may run this mutation: the refusal belongs on the column the
+        Dashboard renders, beside the save it is refusing.
+        """
+        for index, item in enumerate(values or []):
+            if item.get("tier_deltas") is None:
+                continue
+            if cls.check_permissions(info.context, DEALER_PERMISSIONS):
+                return
+            raise ValidationError(
+                {
+                    f"values.{index}.tierDeltas": ValidationError(
+                        "Dealer prices need the dealer-pricing permission. "
+                        "Save the question without its dealer columns, or ask "
+                        "someone who has it.",
+                        code="permission_denied",
+                    )
+                }
+            )
 
     @classmethod
     def construct_instance(cls, instance, cleaned_data):

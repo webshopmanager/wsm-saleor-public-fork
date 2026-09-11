@@ -35,6 +35,18 @@ def merchant_api_client(staff_api_client, permission_manage_products):
 
 
 @pytest.fixture
+def dealer_merchant_api_client(merchant_api_client, permission_manage_discounts):
+    """Staff who may edit the catalog AND say what a dealer pays.
+
+    `tierDeltas` on an option-set mutation writes dealer money, so that one
+    path asks for the dealer domain's own permission on top of the catalog one
+    (`graphql/compose/mutations.py`, `check_tier_delta_permission`).
+    """
+    merchant_api_client.user.user_permissions.add(permission_manage_discounts)
+    return merchant_api_client
+
+
+@pytest.fixture
 def dealer_group(db):
     """A tier row names a group by CODE, so the code has to name a real group."""
     return DealerGroup.objects.create(code="dealer-1", name="Dealer tier 1")

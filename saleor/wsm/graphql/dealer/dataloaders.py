@@ -1,16 +1,12 @@
 # WSM-FORK: fork-owned file. See docs/wsm/CORE-TOUCHES.md.
-"""Dealer pricing's dataloaders.
+"""Dealer pricing's dataloader: a group, by the code another domain stored.
 
-OWNERSHIP NOTE: created by the compose unit (U2) because
-`WsmDealerTierOptionPrice.dealerGroup` resolves a group from the CODE stored on
-a compose row, and a naive resolver would be one query per delta on a screen
-that renders one delta per buyer group per choice. Unit U4 owns this file; when
-it lands its own, keep U4's and fold these three loaders into it.
+`WsmDealerTierOptionPrice.dealerGroup` resolves a group from the CODE on a
+compose row, and a naive resolver would be one query per delta on a screen that
+renders one delta per buyer group per choice. The two count loaders that were
+here went with the merge: the dealer type answers `tierPriceCount` and
+`customerCount` off the annotations its own list resolver already carries.
 """
-
-from collections import defaultdict
-
-from django.db.models import Count
 
 from ....graphql.core.dataloaders import DataLoader
 from ...dealer import models
@@ -34,35 +30,3 @@ class DealerGroupByCodeLoader(DataLoader):
             ).filter(code__in=keys)
         }
         return [groups.get(key) for key in keys]
-
-
-class TierPriceCountByDealerGroupIdLoader(DataLoader):
-    context_key = "wsm_tier_price_count_by_dealer_group"
-
-    def batch_load(self, keys):
-        counts: dict[int, int] = defaultdict(int)
-        rows = (
-            models.TierPrice.objects.using(self.database_connection_name)
-            .filter(group_id__in=keys)
-            .values_list("group_id")
-            .annotate(total=Count("pk"))
-        )
-        for group_id, total in rows:
-            counts[group_id] = total
-        return [counts[key] for key in keys]
-
-
-class CustomerCountByDealerGroupIdLoader(DataLoader):
-    context_key = "wsm_customer_count_by_dealer_group"
-
-    def batch_load(self, keys):
-        counts: dict[int, int] = defaultdict(int)
-        rows = (
-            models.DealerCustomer.objects.using(self.database_connection_name)
-            .filter(group_id__in=keys)
-            .values_list("group_id")
-            .annotate(total=Count("pk"))
-        )
-        for group_id, total in rows:
-            counts[group_id] = total
-        return [counts[key] for key in keys]

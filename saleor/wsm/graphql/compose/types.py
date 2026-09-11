@@ -17,23 +17,10 @@ from ....graphql.product.dataloaders import ProductByIdLoader
 from ....graphql.product.types import Product, ProductVariant
 from ....graphql.shipping.types import ShippingZone
 from ...compose import models
+from ..dealer.types import WsmDealerGroup
 from ..types import DOC_CATEGORY_WSM
 from . import dataloaders as loaders
 from .enums import WsmFeeBasisEnum, WsmFeeScopeEnum, WsmOptionSetPromptTypeEnum
-
-
-def _dealer_group_type():
-    """The dealer type, fetched at schema-build time rather than at import time.
-
-    `WsmDealerGroup` belongs to the dealer domain and the contract still puts it
-    on a compose row, because a tier delta names a group by CODE and the screen
-    wants the group's name beside it. A module-level import would make compose
-    unimportable whenever the dealer package moves; a callable resolves once,
-    when graphene builds the type map, and says exactly what is missing if it is.
-    """
-    from ..dealer.types import WsmDealerGroup
-
-    return WsmDealerGroup
 
 
 def _in_context(node):
@@ -57,7 +44,7 @@ class WsmDealerTierOptionPrice(ModelObjectType[models.DealerTierOptionPrice]):
         description="The choice this group is being priced on.",
     )
     dealer_group = graphene.Field(
-        _dealer_group_type,
+        WsmDealerGroup,
         description="The resolved group row, null if the code names a deleted group.",
     )
     tier_group = graphene.String(

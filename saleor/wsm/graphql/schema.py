@@ -32,6 +32,7 @@ import graphql
 
 from ...graphql import api
 from ...graphql.core.federation.schema import build_federated_schema
+from . import cost
 from .compose.schema import ComposeMutations, ComposeQueries
 from .containers.schema import WsmContainersMutations, WsmContainersQueries
 from .dealer.schema import WsmDealerMutations, WsmDealerQueries
@@ -95,3 +96,9 @@ schema = build_federated_schema(
     + [api.GraphQLDocDirective, api.GraphQLWebhookEventsInfoDirective],
 )
 api.monitor_fields_usage(schema)
+
+# The schema that ANSWERS is the schema the complexity guard has to weigh, and
+# every field in it has to have a price. Both halves are in cost.py, installed
+# here rather than from `ready()` because neither is meaningful until this
+# object exists.
+cost.install(schema)
